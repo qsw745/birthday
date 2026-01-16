@@ -1,14 +1,156 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + Vue + TS</title>
-    <script type="module" crossorigin src="/assets/index-Cwgiw_vl.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BlHLJY5O.css">
+    <title>生日提醒中心</title>
+    <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div id="app"></div>
+    <div class="backdrop" aria-hidden="true">
+      <span class="glow glow-1"></span>
+      <span class="glow glow-2"></span>
+      <span class="glow glow-3"></span>
+    </div>
+
+    <div class="app">
+      <header class="hero">
+        <div class="hero-text">
+          <p class="tag">Birthday Studio</p>
+          <h1>生日提醒中心</h1>
+          <p class="subtitle">用农历生日生成下一次提醒时间，让每一封祝福都刚刚好。</p>
+          <div class="hero-actions">
+            <button class="btn ghost" id="refreshButton" type="button">刷新列表</button>
+            <button class="btn text" id="scrollToForm" type="button">新建提醒</button>
+          </div>
+        </div>
+        <div class="hero-panel">
+          <div class="stat">
+            <span>总提醒</span>
+            <strong id="totalCount">0</strong>
+          </div>
+          <div class="stat">
+            <span>30天内</span>
+            <strong id="upcomingCount">0</strong>
+          </div>
+          <div class="stat">
+            <span>闰月提醒</span>
+            <strong id="leapCount">0</strong>
+          </div>
+          <div class="stat">
+            <span>当前显示</span>
+            <strong id="viewCount">0</strong>
+          </div>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="card form-card" id="formCard">
+          <div class="card-head">
+            <div>
+              <h2 id="formTitle">新建生日提醒</h2>
+              <p class="muted" id="formHint">填写寿星信息、农历生日与提醒内容，系统自动计算下一次提醒。</p>
+            </div>
+          </div>
+          <div class="status" id="statusToast" role="status" aria-live="polite"></div>
+          <form id="birthdayForm" novalidate>
+            <div class="form-grid">
+              <div class="field">
+                <label for="nameInput">寿星姓名</label>
+                <input id="nameInput" type="text" placeholder="例如 小明" required />
+              </div>
+              <div class="field">
+                <label for="emailInput">接收邮箱</label>
+                <input id="emailInput" type="email" placeholder="name@example.com" required />
+              </div>
+              <div class="field span-2">
+                <label for="messageInput">提醒内容</label>
+                <textarea id="messageInput" placeholder="写下一句祝福语"></textarea>
+              </div>
+              <div class="field">
+                <label for="lunarMonth">农历月份</label>
+                <select id="lunarMonth"></select>
+              </div>
+              <div class="field">
+                <label for="lunarDay">农历日期</label>
+                <select id="lunarDay"></select>
+              </div>
+              <div class="field inline">
+                <label class="check">
+                  <input id="isLeapMonth" type="checkbox" />
+                  <span>闰月</span>
+                </label>
+              </div>
+              <div class="field span-2">
+                <label for="remindTime">提醒时间</label>
+                <div class="time-picker" id="timePicker">
+                  <button class="time-display" id="timeDisplay" type="button" aria-expanded="false" aria-controls="timePanel">
+                    <span class="time-main" id="timeText">08:00</span>
+                    <span class="time-badge" id="timeBadge">常用时间 08:00</span>
+                  </button>
+                  <div class="time-panel" id="timePanel" hidden>
+                    <div class="time-columns">
+                      <div class="time-column">
+                        <span>小时</span>
+                        <div class="time-list" id="hourList"></div>
+                      </div>
+                      <div class="time-column">
+                        <span>分钟</span>
+                        <div class="time-list" id="minuteList"></div>
+                      </div>
+                    </div>
+                    <div class="time-presets">
+                      <button class="time-option" data-time="08:00" type="button">08:00</button>
+                      <button class="time-option" data-time="09:00" type="button">09:00</button>
+                      <button class="time-option" data-time="10:00" type="button">10:00</button>
+                      <button class="time-option" data-time="12:00" type="button">12:00</button>
+                      <button class="time-option" data-time="14:00" type="button">14:00</button>
+                      <button class="time-option" data-time="16:00" type="button">16:00</button>
+                      <button class="time-option" data-time="18:00" type="button">18:00</button>
+                      <button class="time-option" data-time="20:00" type="button">20:00</button>
+                    </div>
+                  </div>
+                  <input id="remindTime" type="hidden" value="08:00" />
+                </div>
+              </div>
+            </div>
+            <div class="actions">
+              <button class="btn primary" id="addButton" type="button">保存提醒</button>
+              <button class="btn ghost" id="updateButton" type="button" hidden>保存更新</button>
+              <button class="btn text" id="cancelButton" type="button">清空表单</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card list-card">
+          <div class="card-head">
+            <div>
+              <h2>提醒列表</h2>
+              <p class="muted">快速检索、编辑与删除已创建的提醒。</p>
+            </div>
+          </div>
+          <div class="filters">
+            <div class="field">
+              <label for="searchInput">搜索</label>
+              <input id="searchInput" type="text" placeholder="姓名 / 邮箱 / 农历日期" />
+            </div>
+            <label class="switch">
+              <input id="upcomingFilter" type="checkbox" />
+              <span class="slider"></span>
+              <span class="switch-text">仅看30天内</span>
+            </label>
+          </div>
+          <div class="list" id="birthdayList"></div>
+          <div class="empty" id="emptyState">暂无提醒记录</div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>Birthday Reminder Console</span>
+        <span>Powered by Birthday Service</span>
+      </footer>
+    </div>
+
+    <script src="/scripts.js" defer></script>
   </body>
 </html>

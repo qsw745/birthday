@@ -1,181 +1,713 @@
-// 获取版本列表
-async function loadVersions() {
-  try {
-    const response = await fetch('/api/version/apk-versions')
-    if (!response.ok) {
-      throw new Error('加载版本列表失败')
-    }
-    const versions = await response.json()
-    const tbody = document.querySelector('#versionTable tbody')
-    tbody.innerHTML = versions
-      .map(
-        version => `
-        <tr id="versionRow-${version.id}">
-          <td class="versionCode">${version.version_code}</td>
-          <td class="versionName">${version.version_name}</td>
-          <td class="packageName">${version.package_name}</td>
-          <td class="fileSize">${(version.file_size / 1024 / 1024).toFixed(2)} MB</td>
-          <td class="isForceUpdate">${version.is_force_update ? '是' : '否'}</td>
-          <td class="minAndroidVersion">${version.min_android_version || '无'}</td>
-          <td>
-            <button class="deleteButton" data-id="${version.id}">删除</button>
-            <button class="editButton" data-id="${version.id}">编辑</button>
-          </td>
-        </tr>
-      `
-      )
-      .join('')
+const STORAGE_KEY = 'birthday_reminder_cache_v1'
+const DEFAULT_TIME = '08:00'
 
-    // 添加编辑按钮的事件监听
-    const editButtons = document.querySelectorAll('.editButton')
-    editButtons.forEach(button => {
-      button.addEventListener('click', () => {
-        const id = button.getAttribute('data-id')
-        editVersion(id) // 调用编辑函数
-      })
-    })
+const state = {
+  birthdays: [],
+  editingId: null,
+  busy: false,
+  cache: loadCache(),
+}
 
-    // 添加删除按钮的事件监听
-    const deleteButtons = document.querySelectorAll('.deleteButton')
-    deleteButtons.forEach(button => {
-      button.addEventListener('click', () => {
-        const id = button.getAttribute('data-id')
-        deleteVersion(id) // 调用删除函数
-      })
-    })
-  } catch (error) {
-    alert('加载版本列表失败: ' + error.message)
+const dom = {}
+let statusTimer = null
+
+document.addEventListener('DOMContentLoaded', () => {
+  cacheDom()
+  populateLunarOptions()
+  populateTimeLists()
+  bindEvents()
+  resetForm({ clearStatus: true })
+  loadBirthdays()
+})
+
+function cacheDom() {
+  dom.formCard = document.getElementById('formCard')
+  dom.birthdayForm = document.getElementById('birthdayForm')
+  dom.formTitle = document.getElementById('formTitle')
+  dom.formHint = document.getElementById('formHint')
+  dom.statusToast = document.getElementById('statusToast')
+
+  dom.nameInput = document.getElementById('nameInput')
+  dom.emailInput = document.getElementById('emailInput')
+  dom.messageInput = document.getElementById('messageInput')
+  dom.lunarMonth = document.getElementById('lunarMonth')
+  dom.lunarDay = document.getElementById('lunarDay')
+  dom.isLeapMonth = document.getElementById('isLeapMonth')
+  dom.remindTime = document.getElementById('remindTime')
+  dom.timePicker = document.getElementById('timePicker')
+  dom.timeOptions = Array.from(document.querySelectorAll('.time-option'))
+  dom.timeDisplay = document.getElementById('timeDisplay')
+  dom.timePanel = document.getElementById('timePanel')
+  dom.timeText = document.getElementById('timeText')
+  dom.timeBadge = document.getElementById('timeBadge')
+  dom.hourList = document.getElementById('hourList')
+  dom.minuteList = document.getElementById('minuteList')
+
+  dom.addButton = document.getElementById('addButton')
+  dom.updateButton = document.getElementById('updateButton')
+  dom.cancelButton = document.getElementById('cancelButton')
+  dom.refreshButton = document.getElementById('refreshButton')
+  dom.scrollToForm = document.getElementById('scrollToForm')
+
+  dom.searchInput = document.getElementById('searchInput')
+  dom.upcomingFilter = document.getElementById('upcomingFilter')
+
+  dom.list = document.getElementById('birthdayList')
+  dom.emptyState = document.getElementById('emptyState')
+
+  dom.totalCount = document.getElementById('totalCount')
+  dom.upcomingCount = document.getElementById('upcomingCount')
+  dom.leapCount = document.getElementById('leapCount')
+  dom.viewCount = document.getElementById('viewCount')
+}
+
+function populateLunarOptions() {
+  for (let i = 1; i <= 12; i += 1) {
+    const option = document.createElement('option')
+    option.value = i
+    option.textContent = `${i}月`
+    dom.lunarMonth.appendChild(option)
+  }
+
+  for (let i = 1; i <= 30; i += 1) {
+    const option = document.createElement('option')
+    option.value = i
+    option.textContent = `${i}日`
+    dom.lunarDay.appendChild(option)
   }
 }
 
-// 上传新版本
-document.getElementById('addButton').addEventListener('click', async () => {
-  const formData = new FormData()
-  formData.append('version_code', document.getElementById('versionCode').value)
-  formData.append('version_name', document.getElementById('versionName').value)
-  formData.append('package_name', document.getElementById('packageName').value)
-  formData.append('apkFile', document.getElementById('apkFile').files[0])
-  formData.append('release_notes', document.getElementById('releaseNotes').value)
-  formData.append('is_force_update', document.getElementById('isForceUpdate').checked ? 1 : 0)
-  formData.append('min_android_version', document.getElementById('minAndroidVersion').value)
+function populateTimeLists() {
+  if (!dom.hourList || !dom.minuteList) return
+
+  dom.hourList.innerHTML = ''
+  dom.minuteList.innerHTML = ''
+
+  for (let i = 0; i < 24; i += 1) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'time-item'
+    button.dataset.unit = 'hour'
+    button.dataset.value = String(i).padStart(2, '0')
+    button.textContent = button.dataset.value
+    dom.hourList.appendChild(button)
+  }
+
+  for (let i = 0; i < 60; i += 1) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'time-item'
+    button.dataset.unit = 'minute'
+    button.dataset.value = String(i).padStart(2, '0')
+    button.textContent = button.dataset.value
+    dom.minuteList.appendChild(button)
+  }
+}
+
+function bindEvents() {
+  dom.birthdayForm.addEventListener('submit', event => event.preventDefault())
+  dom.addButton.addEventListener('click', handleAdd)
+  dom.updateButton.addEventListener('click', handleUpdate)
+  dom.cancelButton.addEventListener('click', () => resetForm({ clearStatus: true }))
+  dom.refreshButton.addEventListener('click', () => loadBirthdays({ showStatus: true }))
+  dom.scrollToForm.addEventListener('click', () => {
+    dom.formCard.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    dom.nameInput.focus()
+  })
+
+  dom.searchInput.addEventListener('input', renderBirthdays)
+  dom.upcomingFilter.addEventListener('change', renderBirthdays)
+  dom.list.addEventListener('click', handleListAction)
+  if (dom.timeDisplay) {
+    dom.timeDisplay.addEventListener('click', toggleTimePanel)
+    dom.timeDisplay.addEventListener('keydown', handleTimeDisplayKeydown)
+  }
+  if (dom.timePanel) {
+    dom.timePanel.addEventListener('click', handleTimePanelClick)
+  }
+  document.addEventListener('click', handleTimeOutsideClick)
+  document.addEventListener('keydown', handleTimeEscape)
+}
+
+async function loadBirthdays(options = {}) {
+  const { showStatus = true } = options
+  setBusy(true)
+  if (showStatus) {
+    setStatus('info', '正在加载提醒列表...')
+  }
 
   try {
-    const response = await fetch('/api/version/apk-versions', {
-      method: 'POST',
-      body: formData,
-    })
-
+    const response = await fetch('/api/birthdays/list')
     if (!response.ok) {
-      throw new Error('上传失败')
+      throw new Error('加载提醒列表失败')
     }
-
-    alert('新增成功')
-    loadVersions() // 刷新版本列表
+    const data = await response.json()
+    state.birthdays = Array.isArray(data) ? data : []
+    applyCache()
+    renderBirthdays()
+    if (showStatus) {
+      setStatus('success', `已加载 ${state.birthdays.length} 条提醒`)
+    }
   } catch (error) {
-    alert('操作失败: ' + error.message)
-  }
-})
-
-// 编辑版本
-async function editVersion(id) {
-  const versionRow = document.querySelector(`#versionRow-${id}`)
-
-  if (!versionRow) {
-    alert('版本信息未找到')
-    return
-  }
-
-  // 从当前行中提取版本信息
-  const versionCode = versionRow.querySelector('.versionCode').textContent
-  const versionName = versionRow.querySelector('.versionName').textContent
-  const packageName = versionRow.querySelector('.packageName').textContent
-  const releaseNotes = versionRow.querySelector('.releaseNotes')
-    ? versionRow.querySelector('.releaseNotes').textContent
-    : ''
-  const isForceUpdate = versionRow.querySelector('.isForceUpdate').textContent === '是'
-  const minAndroidVersion = versionRow.querySelector('.minAndroidVersion').textContent
-
-  // 填充表单数据
-  document.getElementById('versionCode').value = versionCode
-  document.getElementById('versionName').value = versionName
-  document.getElementById('packageName').value = packageName
-  document.getElementById('releaseNotes').value = releaseNotes || ''
-  document.getElementById('isForceUpdate').checked = isForceUpdate
-  document.getElementById('minAndroidVersion').value = minAndroidVersion || ''
-
-  // 显示更新按钮
-  document.getElementById('addButton').style.display = 'none'
-  document.getElementById('updateButton').style.display = 'inline-block'
-
-  // 更新按钮点击时的操作
-  document.getElementById('updateButton').addEventListener('click', async () => {
-    const formData = new FormData()
-    formData.append('version_code', document.getElementById('versionCode').value)
-    formData.append('version_name', document.getElementById('versionName').value)
-    formData.append('package_name', document.getElementById('packageName').value)
-    formData.append('release_notes', document.getElementById('releaseNotes').value)
-    formData.append('is_force_update', document.getElementById('isForceUpdate').checked ? 1 : 0)
-    formData.append('min_android_version', document.getElementById('minAndroidVersion').value)
-
-    // 检查是否有新的 APK 文件上传
-    const apkFile = document.getElementById('apkFile').files[0]
-    if (apkFile) {
-      formData.append('apkFile', apkFile)
+    if (showStatus) {
+      setStatus('error', `加载失败：${error.message}`)
     }
+  } finally {
+    setBusy(false)
+  }
+}
 
-    try {
-      const response = await fetch(`/api/version/apk-versions/${id}`, {
-        method: 'PUT',
-        body: formData,
-      })
-
-      if (!response.ok) {
-        throw new Error('更新失败')
-      }
-
-      alert('更新成功')
-      loadVersions() // 刷新版本列表
-    } catch (error) {
-      alert('操作失败: ' + error.message)
+function applyCache() {
+  state.birthdays = state.birthdays.map(item => {
+    const cached = state.cache[item.id] || {}
+    return {
+      ...item,
+      userEmail: cached.userEmail || item.userEmail || '',
+      message: cached.message || item.message || '',
     }
   })
 }
 
-// 监听APK文件上传并填充包名（去掉 .apk 后缀）
-document.getElementById('apkFile').addEventListener('change', () => {
-  const apkFile = document.getElementById('apkFile').files[0]
-  if (apkFile) {
-    let fileName = apkFile.name
-    // 去掉 .apk 后缀
-    fileName = fileName.replace(/\.apk$/, '')
-    document.getElementById('packageName').value = fileName // 将文件名填充到包名字段
-  }
-})
+function renderBirthdays() {
+  const filtered = getFilteredBirthdays()
+  const sorted = sortBirthdays(filtered)
 
-// 删除版本
-async function deleteVersion(id) {
-  // 弹出确认框，要求用户确认删除
-  const confirmDelete = window.confirm('确定要删除该版本吗？')
+  dom.list.innerHTML = sorted.map(buildCard).join('')
+  dom.emptyState.classList.toggle('show', sorted.length === 0)
+  updateStats(sorted)
+}
 
-  if (confirmDelete) {
-    try {
-      const response = await fetch(`/api/version/apk-versions/${id}`, {
-        method: 'DELETE',
-      })
+function buildCard(item) {
+  const name = escapeHTML(item.name || '未命名')
+  const lunar = formatLunar(item)
+  const remindTime = escapeHTML(item.remindTime || '未设置')
+  const email = escapeHTML(item.userEmail || '未记录')
+  const message = escapeHTML(item.message || '未填写提醒内容')
+  const nextDate = formatDate(item.nextSolarDate)
+  const countdown = formatCountdown(item.nextSolarDate)
+  const isUpcoming = isUpcomingWithin(item.nextSolarDate, 30)
 
-      if (!response.ok) {
-        throw new Error('删除失败')
-      }
+  return `
+    <article class="birthday-card ${isUpcoming ? 'upcoming' : ''}" data-id="${escapeHTML(item.id)}">
+      <div class="card-top">
+        <div>
+          <h3>${name}</h3>
+          <p class="meta">${lunar}</p>
+        </div>
+        <span class="chip">${isUpcoming ? '即将到来' : '未来提醒'}</span>
+      </div>
+      <div class="card-grid">
+        <div>
+          <span class="label">提醒时间</span>
+          <span>${remindTime}</span>
+        </div>
+        <div>
+          <span class="label">下次提醒</span>
+          <span>${nextDate}</span>
+        </div>
+        <div>
+          <span class="label">倒计时</span>
+          <span>${countdown}</span>
+        </div>
+        <div>
+          <span class="label">邮箱</span>
+          <span>${email}</span>
+        </div>
+      </div>
+      <div class="card-message">
+        <span class="label">提醒内容</span>
+        <p>${message}</p>
+      </div>
+      <div class="card-actions">
+        <button class="btn ghost" data-action="edit" data-id="${escapeHTML(item.id)}" type="button">编辑</button>
+        <button class="btn danger" data-action="delete" data-id="${escapeHTML(item.id)}" type="button">删除</button>
+      </div>
+    </article>
+  `
+}
 
-      alert('删除成功')
-      loadVersions() // 刷新版本列表
-    } catch (error) {
-      alert('删除失败: ' + error.message)
+function getFilteredBirthdays() {
+  const search = dom.searchInput.value.trim().toLowerCase()
+  const upcomingOnly = dom.upcomingFilter.checked
+
+  return state.birthdays.filter(item => {
+    if (upcomingOnly && !isUpcomingWithin(item.nextSolarDate, 30)) {
+      return false
     }
-  } else {
-    console.log('删除操作已取消')
+
+    if (!search) return true
+
+    const haystack = [
+      item.name,
+      item.userEmail,
+      item.message,
+      item.lunarMonth ? `${item.lunarMonth}月` : null,
+      item.lunarDay ? `${item.lunarDay}日` : null,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+
+    return haystack.includes(search)
+  })
+}
+
+function sortBirthdays(list) {
+  return [...list].sort((a, b) => {
+    const dateA = toDate(a.nextSolarDate)
+    const dateB = toDate(b.nextSolarDate)
+    if (dateA && dateB) {
+      return dateA.getTime() - dateB.getTime()
+    }
+    if (dateA) return -1
+    if (dateB) return 1
+    return String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN')
+  })
+}
+
+function updateStats(viewList) {
+  const total = state.birthdays.length
+  const upcoming = state.birthdays.filter(item => isUpcomingWithin(item.nextSolarDate, 30)).length
+  const leap = state.birthdays.filter(item => Number(item.isLeapMonth) === 1).length
+
+  dom.totalCount.textContent = total
+  dom.upcomingCount.textContent = upcoming
+  dom.leapCount.textContent = leap
+  dom.viewCount.textContent = viewList.length
+}
+
+async function handleAdd() {
+  if (state.busy) return
+  const payload = collectFormData()
+  if (!payload) return
+
+  await submitForm({
+    url: '/api/birthdays',
+    method: 'POST',
+    payload,
+    successMessage: '提醒已保存',
+  })
+}
+
+async function handleUpdate() {
+  if (state.busy) return
+  if (!state.editingId) {
+    setStatus('error', '请先选择要编辑的提醒')
+    return
+  }
+
+  const payload = collectFormData()
+  if (!payload) return
+
+  await submitForm({
+    url: `/api/birthdays/${state.editingId}`,
+    method: 'PUT',
+    payload,
+    successMessage: '提醒已更新',
+  })
+}
+
+async function submitForm({ url, method, payload, successMessage }) {
+  setBusy(true)
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+
+    if (!response.ok) {
+      const detail = await safeReadError(response)
+      throw new Error(detail || '操作失败')
+    }
+
+    const data = await safeReadJson(response)
+    const cacheId = data && data.birthday && data.birthday.id ? data.birthday.id : state.editingId
+    updateCache(payload, cacheId)
+    setStatus('success', successMessage)
+    resetForm()
+    await loadBirthdays({ showStatus: false })
+  } catch (error) {
+    setStatus('error', error.message)
+  } finally {
+    setBusy(false)
   }
 }
 
-// 初始化加载版本列表
-loadVersions()
+async function safeReadError(response) {
+  try {
+    const data = await response.json()
+    return data.error || data.message || ''
+  } catch (error) {
+    return ''
+  }
+}
+
+async function safeReadJson(response) {
+  try {
+    return await response.json()
+  } catch (error) {
+    return null
+  }
+}
+
+function collectFormData() {
+  const name = dom.nameInput.value.trim()
+  const userEmail = dom.emailInput.value.trim()
+  const message = dom.messageInput.value.trim()
+  const lunarMonth = Number(dom.lunarMonth.value)
+  const lunarDay = Number(dom.lunarDay.value)
+  const isLeapMonth = dom.isLeapMonth.checked
+  const remindTime = normalizeTime(dom.remindTime.value) || DEFAULT_TIME
+
+  if (!name) {
+    setStatus('error', '请填写寿星姓名')
+    return null
+  }
+
+  if (!userEmail || !isValidEmail(userEmail)) {
+    setStatus('error', '请输入有效的邮箱地址')
+    return null
+  }
+
+  if (!lunarMonth || !lunarDay) {
+    setStatus('error', '请选择农历生日')
+    return null
+  }
+
+  return {
+    name,
+    userEmail,
+    message,
+    lunarMonth,
+    lunarDay,
+    isLeapMonth,
+    remindTime,
+  }
+}
+
+function handleListAction(event) {
+  const button = event.target.closest('button[data-action]')
+  if (!button) return
+
+  const { action, id } = button.dataset
+  if (!id) return
+
+  if (action === 'edit') {
+    startEdit(id)
+  } else if (action === 'delete') {
+    deleteBirthday(id)
+  }
+}
+
+function toggleTimePanel(event) {
+  event.stopPropagation()
+  if (!dom.timePanel || !dom.timeDisplay) return
+  const isOpen = !dom.timePanel.hidden
+  if (isOpen) {
+    closeTimePanel()
+  } else {
+    openTimePanel()
+  }
+}
+
+function handleTimeDisplayKeydown(event) {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    toggleTimePanel(event)
+  }
+}
+
+function handleTimePanelClick(event) {
+  const target = event.target
+  if (!(target instanceof Element)) return
+
+  const preset = target.closest('.time-option')
+  if (preset && preset.dataset.time) {
+    setTimeFromString(preset.dataset.time)
+    closeTimePanel()
+    return
+  }
+
+  const item = target.closest('.time-item')
+  if (!item) return
+  const { unit, value } = item.dataset
+  if (!unit || !value) return
+
+  const current = parseTime(dom.remindTime.value || DEFAULT_TIME)
+  const hour = unit === 'hour' ? value : current.hour
+  const minute = unit === 'minute' ? value : current.minute
+  setTimeFromString(`${hour}:${minute}`)
+}
+
+function handleTimeOutsideClick(event) {
+  if (!dom.timePanel || dom.timePanel.hidden) return
+  const target = event.target
+  if (!(target instanceof Element)) return
+  if (dom.timePicker && dom.timePicker.contains(target)) return
+  closeTimePanel()
+}
+
+function handleTimeEscape(event) {
+  if (event.key !== 'Escape') return
+  closeTimePanel()
+}
+
+function openTimePanel() {
+  if (!dom.timePanel || !dom.timeDisplay) return
+  dom.timePanel.hidden = false
+  dom.timeDisplay.setAttribute('aria-expanded', 'true')
+}
+
+function closeTimePanel() {
+  if (!dom.timePanel || !dom.timeDisplay) return
+  dom.timePanel.hidden = true
+  dom.timeDisplay.setAttribute('aria-expanded', 'false')
+}
+
+function startEdit(id) {
+  const item = state.birthdays.find(entry => entry.id === id)
+  if (!item) {
+    setStatus('error', '未找到该提醒记录')
+    return
+  }
+
+  state.editingId = id
+  dom.nameInput.value = item.name || ''
+  dom.emailInput.value = item.userEmail || ''
+  dom.messageInput.value = item.message || ''
+  dom.lunarMonth.value = item.lunarMonth || 1
+  dom.lunarDay.value = item.lunarDay || 1
+  dom.isLeapMonth.checked = Number(item.isLeapMonth) === 1 || item.isLeapMonth === true
+  setTimeFromString(item.remindTime || DEFAULT_TIME)
+
+  dom.addButton.hidden = true
+  dom.updateButton.hidden = false
+  dom.cancelButton.textContent = '取消编辑'
+  dom.formTitle.textContent = '编辑生日提醒'
+  dom.formHint.textContent = '修改信息后保存更新，提醒时间将重新计算。'
+
+  dom.formCard.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+async function deleteBirthday(id) {
+  const confirmed = window.confirm('确定要删除该提醒吗？此操作无法撤销。')
+  if (!confirmed) return
+
+  setBusy(true)
+  try {
+    const response = await fetch(`/api/birthdays/${id}`, { method: 'DELETE' })
+    if (!response.ok) {
+      const detail = await safeReadError(response)
+      throw new Error(detail || '删除失败')
+    }
+
+    delete state.cache[id]
+    persistCache()
+    if (state.editingId === id) {
+      resetForm()
+    }
+    setStatus('success', '提醒已删除')
+    await loadBirthdays({ showStatus: false })
+  } catch (error) {
+    setStatus('error', error.message)
+  } finally {
+    setBusy(false)
+  }
+}
+
+function resetForm(options = {}) {
+  const { clearStatus = false } = options
+  state.editingId = null
+  dom.birthdayForm.reset()
+  setTimeFromString(DEFAULT_TIME)
+  dom.addButton.hidden = false
+  dom.updateButton.hidden = true
+  dom.cancelButton.textContent = '清空表单'
+  dom.formTitle.textContent = '新建生日提醒'
+  dom.formHint.textContent = '填写寿星信息、农历生日与提醒内容，系统自动计算下一次提醒。'
+  if (clearStatus) {
+    clearStatusMessage()
+  }
+}
+
+function setTimeFromString(value) {
+  const { hour, minute } = parseTime(value || DEFAULT_TIME)
+  const normalized = `${hour}:${minute}`
+  if (dom.remindTime) {
+    dom.remindTime.value = normalized
+  }
+  syncTimeOptions(normalized)
+}
+
+function syncTimeOptions(value) {
+  const normalized = normalizeTime(value) || DEFAULT_TIME
+  const { hour, minute } = parseTime(normalized)
+  let hasMatch = false
+
+  dom.timeOptions.forEach(button => {
+    const isActive = button.dataset.time === normalized
+    if (isActive) hasMatch = true
+    button.classList.toggle('active', isActive)
+  })
+
+  if (dom.timePicker) {
+    dom.timePicker.classList.toggle('custom', !hasMatch)
+  }
+
+  if (dom.timeText) {
+    dom.timeText.textContent = normalized
+  }
+  if (dom.timeBadge) {
+    dom.timeBadge.textContent = hasMatch ? `常用时间 ${normalized}` : `自定义 ${normalized}`
+  }
+  highlightTimeList(dom.hourList, hour)
+  highlightTimeList(dom.minuteList, minute)
+}
+
+function highlightTimeList(container, value) {
+  if (!container) return
+  container.querySelectorAll('.time-item').forEach(item => {
+    item.classList.toggle('active', item.dataset.value === value)
+  })
+}
+
+function setBusy(isBusy) {
+  state.busy = isBusy
+  dom.addButton.disabled = isBusy
+  dom.updateButton.disabled = isBusy
+  dom.cancelButton.disabled = isBusy
+  dom.refreshButton.disabled = isBusy
+}
+
+function setStatus(type, message) {
+  clearTimeout(statusTimer)
+  if (!message) {
+    clearStatusMessage()
+    return
+  }
+
+  dom.statusToast.textContent = message
+  dom.statusToast.dataset.state = type
+  dom.statusToast.classList.add('visible')
+
+  statusTimer = setTimeout(() => {
+    if (!state.busy) {
+      clearStatusMessage()
+    }
+  }, 4000)
+}
+
+function clearStatusMessage() {
+  dom.statusToast.textContent = ''
+  dom.statusToast.dataset.state = ''
+  dom.statusToast.classList.remove('visible')
+}
+
+function updateCache(payload, id) {
+  const cacheId = id || null
+  if (!cacheId) {
+    return
+  }
+
+  state.cache[cacheId] = {
+    userEmail: payload.userEmail,
+    message: payload.message,
+  }
+  persistCache()
+}
+
+function loadCache() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch (error) {
+    return {}
+  }
+}
+
+function persistCache() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.cache))
+}
+
+function formatLunar(item) {
+  const month = item.lunarMonth ? `${item.lunarMonth}月` : '农历月未填'
+  const day = item.lunarDay ? `${item.lunarDay}日` : '农历日未填'
+  const leap = Number(item.isLeapMonth) === 1 ? '（闰月）' : ''
+  return `农历 ${month}${day}${leap}`
+}
+
+function formatDate(value) {
+  if (!value) return '未计算'
+  const date = toDate(value)
+  if (!date) return value
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function formatCountdown(value) {
+  const date = toDate(value)
+  if (!date) return '未计算'
+  const diffMs = date.getTime() - Date.now()
+  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24))
+  if (diffDays < 0) return '已过期'
+  if (diffDays === 0) return '今天'
+  return `还有 ${diffDays} 天`
+}
+
+function isUpcomingWithin(value, days) {
+  const date = toDate(value)
+  if (!date) return false
+  const diffMs = date.getTime() - Date.now()
+  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24))
+  return diffDays >= 0 && diffDays <= days
+}
+
+function parseTime(value) {
+  const normalized = normalizeTime(value)
+  if (!normalized) {
+    return { hour: DEFAULT_TIME.slice(0, 2), minute: DEFAULT_TIME.slice(3, 5) }
+  }
+  const [hour, minute] = normalized.split(':')
+  return { hour, minute }
+}
+
+function normalizeTime(value) {
+  if (!value) return ''
+  const match = String(value).match(/^(\d{1,2}):(\d{2})/)
+  if (!match) return ''
+  let hour = Number(match[1])
+  let minute = Number(match[2])
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return ''
+  hour = Math.min(Math.max(hour, 0), 23)
+  minute = Math.min(Math.max(minute, 0), 59)
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+}
+
+function toDate(value) {
+  if (!value) return null
+  const iso = String(value).includes('T') ? String(value) : String(value).replace(' ', 'T')
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return null
+  return date
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+}
+
+function escapeHTML(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}

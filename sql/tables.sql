@@ -1,3 +1,9 @@
+CREATE DATABASE IF NOT EXISTS email_server
+  DEFAULT CHARACTER SET utf8mb4
+  COLLATE utf8mb4_general_ci;
+
+USE email_server;
+
 CREATE TABLE IF NOT EXISTS birthdays (
   id           VARCHAR(36)  NOT NULL,          -- UUID
   name         VARCHAR(64)  NOT NULL,
@@ -34,4 +40,3 @@ CREATE TABLE IF NOT EXISTS email_reminders (
     FOREIGN KEY (birthday_id) REFERENCES birthdays(id)
     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-

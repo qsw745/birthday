@@ -14,7 +14,15 @@ const {
 // 获取所有生日记录
 router.get('/list', async (req, res) => {
   try {
-    const rows = await query('SELECT * FROM birthdays', [])
+    const rows = await query(
+      `SELECT 
+         b.*,
+         r.email AS userEmail,
+         r.message AS message
+       FROM birthdays b
+       LEFT JOIN email_reminders r ON r.birthday_id = b.id`,
+      []
+    )
     // 统一把 nextSolarDate 规范化为 'YYYY-MM-DD HH:mm:ss'
     const formatted = rows.map(item => {
       const out = { ...item }
