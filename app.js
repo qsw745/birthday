@@ -1,4 +1,4 @@
-require('dotenv').config()
+require('dotenv').config({ quiet: true })
 process.env.TZ = process.env.TZ || 'Asia/Shanghai'
 
 // ===== 定时任务（提前加载，便于关闭）=====
@@ -8,40 +8,79 @@ require('./jobs/updateBirthdays')
 // ===== 基础依赖 =====
 const express = require('express')
 const cors = require('cors')
-const bodyParser = require('body-parser')
+const helmet = require('helmet')
+const rateLimit = require('express-rate-limit')
 const https = require('https')
 const fs = require('fs')
 const path = require('path')
 const routes = require('./routes')
+const { attachAuth, requirePageAuth } = require('./utils/auth')
 
 // ===== 数据库（用于优雅关闭）=====
 const { pool } = require('./utils/db')
 
 const app = express()
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1))
+const publicDir = path.join(__dirname, 'public')
+const appBasePath = process.env.APP_BASE_PATH || '/birthday'
 
 const allowedOrigins = new Set([
   'https://101.37.21.147:3300',
   'https://127.0.0.1:3300',
   'https://localhost:3300',
   'https://qisw.top:3300',
+  'https://qisw.top',
+  'https://www.qisw.top',
 ])
 
+const corsOptions = {
+  origin(origin, cb) {
+    // curl / 同源 / 服务器内部请求：可能没有 Origin
+    if (!origin) return cb(null, true)
+    if (allowedOrigins.has(origin)) return cb(null, true)
+    return cb(new Error(`CORS blocked: ${origin}`))
+  },
+  credentials: true,
+}
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: Number(process.env.API_RATE_LIMIT || 300),
+  standardHeaders: true,
+  legacyHeaders: false,
+})
+
+function requireSameOriginForUnsafeMethods(req, res, next) {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next()
+  const origin = req.headers.origin
+  if (!origin || allowedOrigins.has(origin)) return next()
+  return res.status(403).json({ error: '请求来源不允许' })
+}
+
 app.use(
-  cors({
-    origin(origin, cb) {
-      // curl / 同源 / 服务器内部请求：可能没有 Origin
-      if (!origin) return cb(null, true)
-      if (allowedOrigins.has(origin)) return cb(null, true)
-      return cb(new Error(`CORS blocked: ${origin}`))
-    },
-    credentials: true,
+  helmet({
+    contentSecurityPolicy: false,
   })
 )
+app.use(cors(corsOptions))
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '64kb' }))
+app.use(attachAuth)
+app.use('/api', apiLimiter, requireSameOriginForUnsafeMethods)
 
-// 让预检请求（OPTIONS）也走 CORS
-app.options('*', cors())
-app.use(bodyParser.json())
-app.use(express.static(path.join(__dirname, 'public')))
+app.get(['/login', `${appBasePath}/login`], (req, res) => {
+  if (req.session) return res.redirect(`${appBasePath}/`)
+  return res.sendFile(path.join(publicDir, 'index.html'))
+})
+
+app.get(['/', appBasePath, `${appBasePath}/`], requirePageAuth, (req, res) => {
+  res.sendFile(path.join(publicDir, 'index.html'))
+})
+
+app.get(['/index.html', `${appBasePath}/index.html`], requirePageAuth, (req, res) => {
+  res.sendFile(path.join(publicDir, 'index.html'))
+})
+
+app.use(express.static(publicDir, { index: false }))
 app.use('/api', routes)
 
 // ===== 启动 HTTPS Server（保存 server 引用）=====

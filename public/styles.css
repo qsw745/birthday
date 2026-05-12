@@ -77,6 +77,32 @@ body {
   padding: 32px 24px 48px;
 }
 
+[hidden] {
+  display: none !important;
+}
+
+.login-view {
+  min-height: calc(100vh - 80px);
+  display: grid;
+  place-items: center;
+}
+
+.login-card {
+  width: min(100%, 420px);
+  display: grid;
+  gap: 18px;
+}
+
+.login-card h1 {
+  margin: 0;
+  font-size: 2rem;
+  font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+}
+
+.login-card .btn {
+  width: 100%;
+}
+
 .hero {
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) minmax(250px, 0.7fr);

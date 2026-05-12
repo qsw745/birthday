@@ -1,0 +1,10 @@
+.DS_Store
+node_modules/
+uploads/
+.env
+.env.*
+!.env.example
+ssl/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

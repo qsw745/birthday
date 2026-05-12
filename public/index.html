@@ -14,6 +14,25 @@
     </div>
 
     <div class="app">
+      <section class="login-view" id="loginView" hidden>
+        <form class="card login-card" id="loginForm" novalidate>
+          <p class="tag">Birthday Studio</p>
+          <h1>生日提醒中心</h1>
+          <p class="muted">请先登录后查看和维护提醒记录。</p>
+          <div class="status" id="loginStatus" role="status" aria-live="polite"></div>
+          <div class="field">
+            <label for="loginUsername">用户名</label>
+            <input id="loginUsername" type="text" autocomplete="username" required />
+          </div>
+          <div class="field">
+            <label for="loginPassword">密码</label>
+            <input id="loginPassword" type="password" autocomplete="current-password" required />
+          </div>
+          <button class="btn primary" id="loginButton" type="submit">登录</button>
+        </form>
+      </section>
+
+      <div id="appView" hidden>
       <header class="hero">
         <div class="hero-text">
           <p class="tag">Birthday Studio</p>
@@ -22,6 +41,7 @@
           <div class="hero-actions">
             <button class="btn ghost" id="refreshButton" type="button">刷新列表</button>
             <button class="btn text" id="scrollToForm" type="button">新建提醒</button>
+            <button class="btn text" id="logoutButton" type="button">退出登录</button>
           </div>
         </div>
         <div class="hero-panel">
@@ -149,6 +169,7 @@
         <span>Birthday Reminder Console</span>
         <span>Powered by Birthday Service</span>
       </footer>
+      </div>
     </div>
 
     <script src="/scripts.js" defer></script>

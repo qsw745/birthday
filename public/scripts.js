@@ -5,6 +5,7 @@ const state = {
   birthdays: [],
   editingId: null,
   busy: false,
+  authenticated: false,
   cache: loadCache(),
 }
 
@@ -17,10 +18,18 @@ document.addEventListener('DOMContentLoaded', () => {
   populateTimeLists()
   bindEvents()
   resetForm({ clearStatus: true })
-  loadBirthdays()
+  checkAuth()
 })
 
 function cacheDom() {
+  dom.loginView = document.getElementById('loginView')
+  dom.appView = document.getElementById('appView')
+  dom.loginForm = document.getElementById('loginForm')
+  dom.loginUsername = document.getElementById('loginUsername')
+  dom.loginPassword = document.getElementById('loginPassword')
+  dom.loginButton = document.getElementById('loginButton')
+  dom.loginStatus = document.getElementById('loginStatus')
+
   dom.formCard = document.getElementById('formCard')
   dom.birthdayForm = document.getElementById('birthdayForm')
   dom.formTitle = document.getElementById('formTitle')
@@ -48,6 +57,7 @@ function cacheDom() {
   dom.cancelButton = document.getElementById('cancelButton')
   dom.refreshButton = document.getElementById('refreshButton')
   dom.scrollToForm = document.getElementById('scrollToForm')
+  dom.logoutButton = document.getElementById('logoutButton')
 
   dom.searchInput = document.getElementById('searchInput')
   dom.upcomingFilter = document.getElementById('upcomingFilter')
@@ -105,11 +115,13 @@ function populateTimeLists() {
 }
 
 function bindEvents() {
+  dom.loginForm.addEventListener('submit', handleLogin)
   dom.birthdayForm.addEventListener('submit', event => event.preventDefault())
   dom.addButton.addEventListener('click', handleAdd)
   dom.updateButton.addEventListener('click', handleUpdate)
   dom.cancelButton.addEventListener('click', () => resetForm({ clearStatus: true }))
   dom.refreshButton.addEventListener('click', () => loadBirthdays({ showStatus: true }))
+  dom.logoutButton.addEventListener('click', handleLogout)
   dom.scrollToForm.addEventListener('click', () => {
     dom.formCard.scrollIntoView({ behavior: 'smooth', block: 'start' })
     dom.nameInput.focus()
@@ -129,6 +141,89 @@ function bindEvents() {
   document.addEventListener('keydown', handleTimeEscape)
 }
 
+async function checkAuth() {
+  setLoginBusy(true)
+  try {
+    const response = await fetch('/api/auth/status', { credentials: 'same-origin' })
+    const data = response.ok ? await response.json() : { authenticated: false }
+    if (data.authenticated) {
+      showApp()
+      await loadBirthdays()
+    } else {
+      showLogin()
+    }
+  } catch (error) {
+    showLogin()
+    setLoginStatus('error', '无法检查登录状态')
+  } finally {
+    setLoginBusy(false)
+  }
+}
+
+async function handleLogin(event) {
+  event.preventDefault()
+  if (state.busy) return
+
+  const username = dom.loginUsername.value.trim()
+  const password = dom.loginPassword.value
+  if (!username || !password) {
+    setLoginStatus('error', '请输入用户名和密码')
+    return
+  }
+
+  setLoginBusy(true)
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ username, password }),
+    })
+    if (!response.ok) {
+      const detail = await safeReadError(response)
+      throw new Error(detail || '登录失败')
+    }
+    dom.loginPassword.value = ''
+    setLoginStatus('', '')
+    showApp()
+    await loadBirthdays()
+  } catch (error) {
+    setLoginStatus('error', error.message)
+  } finally {
+    setLoginBusy(false)
+  }
+}
+
+async function handleLogout() {
+  if (state.busy) return
+  setBusy(true)
+  try {
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+    })
+  } finally {
+    state.birthdays = []
+    renderBirthdays()
+    resetForm({ clearStatus: true })
+    showLogin()
+    setBusy(false)
+  }
+}
+
+function showLogin() {
+  state.authenticated = false
+  dom.appView.hidden = true
+  dom.loginView.hidden = false
+  dom.loginUsername.focus()
+}
+
+function showApp() {
+  state.authenticated = true
+  dom.loginView.hidden = true
+  dom.appView.hidden = false
+}
+
 async function loadBirthdays(options = {}) {
   const { showStatus = true } = options
   setBusy(true)
@@ -137,7 +232,11 @@ async function loadBirthdays(options = {}) {
   }
 
   try {
-    const response = await fetch('/api/birthdays/list')
+    const response = await fetch('/api/birthdays/list', { credentials: 'same-origin' })
+    if (response.status === 401) {
+      showLogin()
+      throw new Error('请先登录')
+    }
     if (!response.ok) {
       throw new Error('加载提醒列表失败')
     }
@@ -313,8 +412,14 @@ async function submitForm({ url, method, payload, successMessage }) {
     const response = await fetch(url, {
       method,
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
       body: JSON.stringify(payload),
     })
+
+    if (response.status === 401) {
+      showLogin()
+      throw new Error('请先登录')
+    }
 
     if (!response.ok) {
       const detail = await safeReadError(response)
@@ -496,7 +601,11 @@ async function deleteBirthday(id) {
 
   setBusy(true)
   try {
-    const response = await fetch(`/api/birthdays/${id}`, { method: 'DELETE' })
+    const response = await fetch(`/api/birthdays/${id}`, { method: 'DELETE', credentials: 'same-origin' })
+    if (response.status === 401) {
+      showLogin()
+      throw new Error('请先登录')
+    }
     if (!response.ok) {
       const detail = await safeReadError(response)
       throw new Error(detail || '删除失败')
@@ -574,10 +683,28 @@ function highlightTimeList(container, value) {
 
 function setBusy(isBusy) {
   state.busy = isBusy
+  dom.loginButton.disabled = isBusy
   dom.addButton.disabled = isBusy
   dom.updateButton.disabled = isBusy
   dom.cancelButton.disabled = isBusy
   dom.refreshButton.disabled = isBusy
+}
+
+function setLoginBusy(isBusy) {
+  state.busy = isBusy
+  dom.loginButton.disabled = isBusy
+}
+
+function setLoginStatus(type, message) {
+  if (!message) {
+    dom.loginStatus.textContent = ''
+    dom.loginStatus.dataset.state = ''
+    dom.loginStatus.classList.remove('visible')
+    return
+  }
+  dom.loginStatus.textContent = message
+  dom.loginStatus.dataset.state = type
+  dom.loginStatus.classList.add('visible')
 }
 
 function setStatus(type, message) {

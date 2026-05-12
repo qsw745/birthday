@@ -1,5 +1,5 @@
 // utils/helpers.js
-const { v4: uuidv4 } = require('uuid')
+const crypto = require('crypto')
 const moment = require('moment-timezone')
 const { Lunar } = require('lunar-javascript')
 
@@ -8,7 +8,7 @@ const STORAGE_FMT = 'YYYY-MM-DD HH:mm:ss'
 
 /** 生成UUID */
 function generateUUID() {
-  return uuidv4()
+  return crypto.randomUUID()
 }
 
 /** 统一格式化到 'YYYY-MM-DD HH:mm:ss'（上海时区） */

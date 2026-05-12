@@ -4,12 +4,15 @@ const router = express.Router()
 const schedule = require('node-schedule')
 const { query, pool, formatDate } = require('../utils/db')
 const { generateUUID } = require('../utils/helpers')
+const { requireAuth } = require('../utils/auth')
 const transporter = require('../utils/emailConfig') // 邮件服务配置
+
+router.use(requireAuth)
 
 // 统一的发送逻辑：发邮件 -> 成功则更新状态
 async function sendReminderEmail(reminder) {
   const mailOptions = {
-    from: 'qishiwei745@163.com',
+    from: process.env.SMTP_FROM || process.env.SMTP_USER,
     to: reminder.email,
     subject: `${reminder.name}的生日提醒`,
     text: reminder.message,

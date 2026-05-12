@@ -2,14 +2,14 @@
 const express = require('express')
 const router = express.Router()
 const { query, pool } = require('../utils/db')
+const { requireAuth } = require('../utils/auth')
 const {
   formatDateForStorage,
   generateUUID,
   calculateNextSolarDate,
-  toMoment,
-  STORAGE_FMT,
-  TZ,
 } = require('../utils/helpers')
+
+router.use(requireAuth)
 
 // 获取所有生日记录
 router.get('/list', async (req, res) => {

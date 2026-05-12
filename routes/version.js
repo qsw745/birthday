@@ -2,13 +2,54 @@ const express = require('express')
 const router = express.Router()
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 const { query } = require('../utils/db') // 直接使用 query
 const { generateUUID } = require('../utils/helpers')
+const { requireAuth } = require('../utils/auth')
 const multer = require('multer')
 
 // 配置 multer
-const upload = multer({ dest: 'uploads/' }) // 文件暂存目录
-const baseApkUrl = process.env.BASE_APK_URL || 'https://qisw.top:3300/public/'
+const upload = multer({
+  dest: 'uploads/',
+  limits: {
+    fileSize: Number(process.env.APK_UPLOAD_MAX_BYTES || 100 * 1024 * 1024),
+    files: 1,
+  },
+  fileFilter(req, file, cb) {
+    if (!file.originalname || !file.originalname.toLowerCase().endsWith('.apk')) {
+      return cb(new Error('仅允许上传 APK 文件'))
+    }
+    cb(null, true)
+  },
+}) // 文件暂存目录
+const baseApkUrl = process.env.BASE_APK_URL || 'https://qisw.top'
+const downloadsDir = path.join(__dirname, '../public/downloads')
+
+function sanitizeApkFilename(filename) {
+  const base = path.basename(String(filename || '')).replace(/[^a-zA-Z0-9._-]/g, '_')
+  if (!base || !base.toLowerCase().endsWith('.apk')) {
+    throw new Error('APK 文件名无效')
+  }
+  return `${Date.now()}-${base}`
+}
+
+function resolveDownloadPath(filePath) {
+  const relative = String(filePath || '').replace(/^\/+/, '')
+  const resolved = path.resolve(path.join(__dirname, '../public'), relative)
+  const allowedRoot = path.resolve(downloadsDir)
+  if (!resolved.startsWith(`${allowedRoot}${path.sep}`)) {
+    throw new Error('文件路径无效')
+  }
+  return resolved
+}
+
+function fileMd5(filePath) {
+  const hash = crypto.createHash('md5')
+  hash.update(fs.readFileSync(filePath))
+  return hash.digest('hex')
+}
+
+router.use('/apk-versions', requireAuth)
 
 // ======================== APK 版本管理接口 ========================
 
@@ -73,11 +114,14 @@ router.post('/apk-versions', upload.single('apkFile'), async (req, res) => {
     }
 
     const id = generateUUID()
-    const filePath = `/downloads/${apkFile.originalname}`
-    const targetPath = path.join(__dirname, '../public', filePath)
+    fs.mkdirSync(downloadsDir, { recursive: true })
+    const safeName = sanitizeApkFilename(apkFile.originalname)
+    const filePath = `/downloads/${safeName}`
+    const targetPath = resolveDownloadPath(filePath)
 
     // 移动文件到目标路径
     fs.renameSync(apkFile.path, targetPath)
+    const md5Hash = fileMd5(targetPath)
 
     // 插入数据到数据库
     const sql = `
@@ -94,7 +138,7 @@ router.post('/apk-versions', upload.single('apkFile'), async (req, res) => {
       package_name,
       filePath,
       apkFile.size,
-      '', // 计算文件的 MD5
+      md5Hash,
       release_notes || null,
       is_force_update || 0,
       min_android_version || null,
@@ -128,13 +172,17 @@ router.put('/apk-versions/:id', upload.single('apkFile'), async (req, res) => {
     }
 
     let filePath = null
+    let md5Hash = null
 
     // 如果有新文件上传，处理文件
     if (apkFile) {
-      filePath = `/downloads/${apkFile.originalname}`
-      const targetPath = path.join(__dirname, '../public/downloads', apkFile.originalname)
+      fs.mkdirSync(downloadsDir, { recursive: true })
+      const safeName = sanitizeApkFilename(apkFile.originalname)
+      filePath = `/downloads/${safeName}`
+      const targetPath = resolveDownloadPath(filePath)
       // 移动文件
       fs.renameSync(apkFile.path, targetPath)
+      md5Hash = fileMd5(targetPath)
     }
 
     // 更新数据库记录
@@ -146,6 +194,7 @@ router.put('/apk-versions/:id', upload.single('apkFile'), async (req, res) => {
         package_name = ?,
         file_path = COALESCE(?, file_path),
         file_size = COALESCE(?, file_size),
+        md5_hash = COALESCE(?, md5_hash),
         release_notes = ?,
         is_force_update = ?,
         min_android_version = ?,
@@ -158,6 +207,7 @@ router.put('/apk-versions/:id', upload.single('apkFile'), async (req, res) => {
       package_name,
       filePath,
       apkFile ? apkFile.size : null,
+      md5Hash,
       release_notes || null,
       is_force_update || 0,
       min_android_version || null,
@@ -189,7 +239,7 @@ router.delete('/apk-versions/:id', async (req, res) => {
     const filePath = results[0].file_path
 
     // 拼接完整路径
-    const fullPath = path.join(__dirname, '../public', filePath)
+    const fullPath = resolveDownloadPath(filePath)
 
     // 删除数据库记录
     await query('DELETE FROM apk_version WHERE id = ?', [id])

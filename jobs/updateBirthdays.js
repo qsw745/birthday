@@ -13,8 +13,9 @@ const { calculateNextSolarDate, toMoment, TZ } = require('../utils/helpers')
  */
 schedule.scheduleJob('0 0 * * *', { timezone: TZ }, async () => {
   console.log('更新过期生日提醒')
-  const conn = await pool.getConnection()
+  let conn
   try {
+    conn = await pool.getConnection()
     await conn.beginTransaction()
 
     const [birthdays] = await conn.query('SELECT * FROM birthdays')
@@ -67,9 +68,15 @@ schedule.scheduleJob('0 0 * * *', { timezone: TZ }, async () => {
     await conn.commit()
     console.log('✅ 更新完成')
   } catch (e) {
-    await conn.rollback()
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch (rollbackErr) {
+        console.error('回滚失败:', rollbackErr)
+      }
+    }
     console.error('更新失败:', e)
   } finally {
-    conn.release()
+    if (conn) conn.release()
   }
 })
