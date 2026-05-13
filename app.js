@@ -80,6 +80,7 @@ app.get(['/index.html', `${appBasePath}/index.html`], requirePageAuth, (req, res
   res.sendFile(path.join(publicDir, 'index.html'))
 })
 
+app.use(`${appBasePath}/vendor`, express.static(path.join(publicDir, 'vendor'), { index: false }))
 app.use(express.static(publicDir, { index: false }))
 app.use('/api', routes)
 
