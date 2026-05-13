@@ -217,7 +217,8 @@ body {
 .list-card {
   display: flex;
   flex-direction: column;
-  min-height: calc(100vh - 292px);
+  max-height: calc(100vh - 292px);
+  min-height: 0;
   min-width: 0;
   overflow: hidden;
 }
@@ -503,7 +504,7 @@ body {
 
 .ms-mobile-select .ms-content {
   left: 50%;
-  bottom: -360px;
+  bottom: 24px;
   width: min(560px, calc(100% - 32px));
   border-radius: 18px;
   overflow: hidden;
@@ -728,8 +729,7 @@ body {
 
 .list-scroll {
   flex: 1 1 auto;
-  max-height: calc(100vh - 430px);
-  min-height: 360px;
+  min-height: 0;
   max-width: 100%;
   overflow: auto;
   border: 1px solid var(--border);
@@ -999,7 +999,7 @@ body {
 }
 
 .footer {
-  margin-top: 36px;
+  margin-top: 16px;
   display: flex;
   justify-content: space-between;
   color: var(--muted);
@@ -1139,7 +1139,7 @@ body {
 
   .ms-mobile-select .ms-content {
     left: 0;
-    bottom: -360px;
+    bottom: 0;
     width: 100%;
     border-radius: 18px 18px 0 0;
     transform: none;
