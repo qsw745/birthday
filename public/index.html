@@ -120,36 +120,42 @@
                 <label for="messageInput">提醒内容</label>
                 <textarea id="messageInput" placeholder="写下一句祝福语"></textarea>
               </div>
-              <div class="field">
-                <label for="lunarMonth">农历月份</label>
-                <select id="lunarMonth"></select>
-              </div>
-              <div class="field">
-                <label for="lunarDay">农历日期</label>
-                <select id="lunarDay"></select>
-              </div>
-              <div class="field inline">
-                <label class="check">
-                  <input id="isLeapMonth" type="checkbox" />
-                  <span>闰月</span>
-                </label>
-              </div>
               <div class="field span-2">
-                <label for="remindTime">提醒时间</label>
-                <div class="time-picker" id="timePicker">
-                  <button class="time-display" id="timeDisplay" type="button" aria-expanded="false" aria-controls="timePanel">
-                    <span class="time-main" id="timeText">08:00</span>
+                <label for="timeDisplay">农历生日与提醒时间</label>
+                <div class="datetime-picker" id="timePicker">
+                  <button class="datetime-display" id="timeDisplay" type="button" aria-expanded="false" aria-controls="timePanel">
+                    <span class="datetime-main" id="timeText">农历 1月1日 · 08:00</span>
                     <span class="time-badge" id="timeBadge">常用时间 08:00</span>
                   </button>
-                  <div class="time-panel" id="timePanel" hidden>
-                    <div class="time-columns">
-                      <div class="time-column">
-                        <span>小时</span>
-                        <div class="time-list" id="hourList"></div>
+                  <div class="datetime-panel" id="timePanel" hidden>
+                    <div class="datetime-section">
+                      <span class="panel-label">农历生日</span>
+                      <div class="date-controls">
+                        <label>
+                          <span>月份</span>
+                          <select id="lunarMonth"></select>
+                        </label>
+                        <label>
+                          <span>日期</span>
+                          <select id="lunarDay"></select>
+                        </label>
+                        <label class="check compact">
+                          <input id="isLeapMonth" type="checkbox" />
+                          <span>闰月</span>
+                        </label>
                       </div>
-                      <div class="time-column">
-                        <span>分钟</span>
-                        <div class="time-list" id="minuteList"></div>
+                    </div>
+                    <div class="datetime-section">
+                      <span class="panel-label">提醒时间</span>
+                      <div class="time-columns">
+                        <div class="time-column">
+                          <span>小时</span>
+                          <div class="time-list" id="hourList"></div>
+                        </div>
+                        <div class="time-column">
+                          <span>分钟</span>
+                          <div class="time-list" id="minuteList"></div>
+                        </div>
                       </div>
                     </div>
                     <div class="time-presets">

@@ -147,6 +147,9 @@ function bindEvents() {
   dom.viewButtons.forEach(button => {
     button.addEventListener('click', () => setViewMode(button.dataset.viewMode))
   })
+  dom.lunarMonth.addEventListener('change', syncDateTimeDisplay)
+  dom.lunarDay.addEventListener('change', syncDateTimeDisplay)
+  dom.isLeapMonth.addEventListener('change', syncDateTimeDisplay)
   dom.list.addEventListener('click', handleListAction)
   if (dom.timeDisplay) {
     dom.timeDisplay.addEventListener('click', toggleTimePanel)
@@ -823,14 +826,21 @@ function syncTimeOptions(value) {
     dom.timePicker.classList.toggle('custom', !hasMatch)
   }
 
-  if (dom.timeText) {
-    dom.timeText.textContent = normalized
-  }
+  syncDateTimeDisplay(normalized)
   if (dom.timeBadge) {
     dom.timeBadge.textContent = hasMatch ? `常用时间 ${normalized}` : `自定义 ${normalized}`
   }
   highlightTimeList(dom.hourList, hour)
   highlightTimeList(dom.minuteList, minute)
+}
+
+function syncDateTimeDisplay(timeValue) {
+  if (!dom.timeText) return
+  const normalized = normalizeTime(timeValue || dom.remindTime.value) || DEFAULT_TIME
+  const month = dom.lunarMonth && dom.lunarMonth.value ? `${dom.lunarMonth.value}月` : '月份未选'
+  const day = dom.lunarDay && dom.lunarDay.value ? `${dom.lunarDay.value}日` : '日期未选'
+  const leap = dom.isLeapMonth && dom.isLeapMonth.checked ? '闰' : ''
+  dom.timeText.textContent = `农历 ${leap}${month}${day} · ${normalized}`
 }
 
 function highlightTimeList(container, value) {

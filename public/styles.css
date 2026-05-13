@@ -315,18 +315,18 @@ body {
   resize: vertical;
 }
 
-.time-picker {
+.datetime-picker {
   display: grid;
   gap: 12px;
   position: relative;
 }
 
-.time-display {
+.datetime-display {
   width: 100%;
   border: 1px solid var(--border);
   background: var(--surface-strong);
   border-radius: 12px;
-  padding: 12px 14px;
+  padding: 13px 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -335,16 +335,20 @@ body {
   transition: border 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 
-.time-display:focus-visible {
+.datetime-display:focus-visible {
   outline: none;
   border-color: rgba(46, 140, 140, 0.5);
   box-shadow: 0 0 0 3px rgba(46, 140, 140, 0.16);
 }
 
-.time-main {
+.datetime-main {
   font-size: 1rem;
   font-weight: 700;
   color: var(--ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .time-badge {
@@ -357,7 +361,7 @@ body {
   white-space: nowrap;
 }
 
-.time-panel {
+.datetime-panel {
   border: 1px solid rgba(28, 27, 31, 0.12);
   border-radius: 16px;
   background: var(--surface-strong);
@@ -365,6 +369,52 @@ body {
   box-shadow: 0 16px 32px rgba(27, 31, 42, 0.12);
   display: grid;
   gap: 14px;
+}
+
+.datetime-section {
+  display: grid;
+  gap: 8px;
+}
+
+.panel-label {
+  display: block;
+  font-weight: 700;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.date-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.date-controls label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.date-controls label > span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.date-controls select {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  padding: 9px 10px;
+  font-size: 0.92rem;
+  background: var(--surface-strong);
+}
+
+.date-controls select:focus {
+  outline: none;
+  border-color: rgba(46, 140, 140, 0.5);
+  box-shadow: 0 0 0 3px rgba(46, 140, 140, 0.16);
 }
 
 .time-columns {
@@ -441,7 +491,7 @@ body {
   box-shadow: 0 10px 18px rgba(46, 140, 140, 0.18);
 }
 
-.time-picker.custom .time-badge {
+.datetime-picker.custom .time-badge {
   color: #b44831;
   background: rgba(225, 93, 62, 0.14);
 }
@@ -456,6 +506,15 @@ body {
   gap: 10px;
   font-weight: 600;
   color: var(--ink);
+}
+
+.check.compact {
+  height: 40px;
+  display: inline-flex;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-muted);
 }
 
 .check input {
