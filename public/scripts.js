@@ -1,6 +1,8 @@
 const STORAGE_KEY = 'birthday_reminder_cache_v1'
 const VIEW_KEY = 'birthday_reminder_view_v1'
 const DEFAULT_TIME = '08:00'
+const DATE_TIME_CONNECTOR = '|'
+const COMMON_TIMES = ['08:00', '09:00', '10:00', '12:00', '14:00', '16:00', '18:00', '20:00']
 
 const state = {
   birthdays: [],
@@ -13,12 +15,14 @@ const state = {
 
 const dom = {}
 let statusTimer = null
+let dateTimePicker = null
 
 document.addEventListener('DOMContentLoaded', () => {
   cacheDom()
   populateLunarOptions()
   populateTimeLists()
   bindEvents()
+  initDateTimePicker()
   resetForm({ clearStatus: true })
   checkAuth()
 })
@@ -151,7 +155,7 @@ function bindEvents() {
   dom.lunarDay.addEventListener('change', syncDateTimeDisplay)
   dom.isLeapMonth.addEventListener('change', syncDateTimeDisplay)
   dom.list.addEventListener('click', handleListAction)
-  if (dom.timeDisplay) {
+  if (dom.timePanel && dom.timeDisplay) {
     dom.timeDisplay.addEventListener('click', toggleTimePanel)
     dom.timeDisplay.addEventListener('keydown', handleTimeDisplayKeydown)
   }
@@ -160,6 +164,77 @@ function bindEvents() {
   }
   document.addEventListener('click', handleTimeOutsideClick)
   document.addEventListener('keydown', handleTimeEscape)
+}
+
+function initDateTimePicker() {
+  if (!dom.timeDisplay || typeof MobileSelect === 'undefined') return
+
+  dateTimePicker = new MobileSelect({
+    trigger: dom.timeDisplay,
+    title: '选择农历生日与提醒时间',
+    wheels: buildDateTimeWheels(),
+    position: getDateTimePosition(),
+    colWidth: [1, 1, 1, 1, 1],
+    connector: DATE_TIME_CONNECTOR,
+    triggerDisplayValue: false,
+    ensureBtnText: '完成',
+    cancelBtnText: '取消',
+    ensureBtnColor: '#2e8c8c',
+    cancelBtnColor: '#687482',
+    titleColor: '#18202a',
+    titleBgColor: '#ffffff',
+    textColor: '#18202a',
+    bgColor: '#ffffff',
+    maskOpacity: 0.35,
+    onShow: syncDateTimePickerPosition,
+    onChange: applyDateTimeSelection,
+  })
+}
+
+function buildDateTimeWheels() {
+  return [
+    { data: Array.from({ length: 12 }, (_, index) => ({ id: String(index + 1), value: `${index + 1}月` })) },
+    { data: Array.from({ length: 30 }, (_, index) => ({ id: String(index + 1), value: `${index + 1}日` })) },
+    {
+      data: [
+        { id: 'normal', value: '不闰' },
+        { id: 'leap', value: '闰月' },
+      ],
+    },
+    { data: Array.from({ length: 24 }, (_, index) => ({ id: String(index).padStart(2, '0'), value: `${String(index).padStart(2, '0')}时` })) },
+    { data: Array.from({ length: 60 }, (_, index) => ({ id: String(index).padStart(2, '0'), value: `${String(index).padStart(2, '0')}分` })) },
+  ]
+}
+
+function applyDateTimeSelection(data) {
+  if (!Array.isArray(data) || data.length < 5) return
+
+  const month = Number(data[0].id)
+  const day = Number(data[1].id)
+  const isLeap = data[2].id === 'leap'
+  const hour = data[3].id
+  const minute = data[4].id
+  if (!month || !day || !hour || !minute) return
+
+  dom.lunarMonth.value = String(month)
+  dom.lunarDay.value = String(day)
+  dom.isLeapMonth.checked = isLeap
+  setTimeFromString(`${hour}:${minute}`)
+}
+
+function getDateTimePosition() {
+  const month = Math.max(Number(dom.lunarMonth.value || 1) - 1, 0)
+  const day = Math.max(Number(dom.lunarDay.value || 1) - 1, 0)
+  const leap = dom.isLeapMonth.checked ? 1 : 0
+  const { hour, minute } = parseTime(dom.remindTime.value || DEFAULT_TIME)
+  return [month, day, leap, Number(hour), Number(minute)]
+}
+
+function syncDateTimePickerPosition() {
+  if (!dateTimePicker || typeof dateTimePicker.locatePosition !== 'function') return
+  getDateTimePosition().forEach((position, index) => {
+    dateTimePicker.locatePosition(index, position)
+  })
 }
 
 async function checkAuth() {
@@ -814,11 +889,10 @@ function setTimeFromString(value) {
 function syncTimeOptions(value) {
   const normalized = normalizeTime(value) || DEFAULT_TIME
   const { hour, minute } = parseTime(normalized)
-  let hasMatch = false
+  let hasMatch = COMMON_TIMES.includes(normalized)
 
   dom.timeOptions.forEach(button => {
     const isActive = button.dataset.time === normalized
-    if (isActive) hasMatch = true
     button.classList.toggle('active', isActive)
   })
 

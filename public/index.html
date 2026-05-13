@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>生日提醒中心</title>
+    <link rel="stylesheet" href="vendor/mobile-select/mobile-select.css" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -123,52 +124,13 @@
               <div class="field span-2">
                 <label for="timeDisplay">农历生日与提醒时间</label>
                 <div class="datetime-picker" id="timePicker">
-                  <button class="datetime-display" id="timeDisplay" type="button" aria-expanded="false" aria-controls="timePanel">
+                  <button class="datetime-display" id="timeDisplay" type="button">
                     <span class="datetime-main" id="timeText">农历 1月1日 · 08:00</span>
                     <span class="time-badge" id="timeBadge">常用时间 08:00</span>
                   </button>
-                  <div class="datetime-panel" id="timePanel" hidden>
-                    <div class="datetime-section">
-                      <span class="panel-label">农历生日</span>
-                      <div class="date-controls">
-                        <label>
-                          <span>月份</span>
-                          <select id="lunarMonth"></select>
-                        </label>
-                        <label>
-                          <span>日期</span>
-                          <select id="lunarDay"></select>
-                        </label>
-                        <label class="check compact">
-                          <input id="isLeapMonth" type="checkbox" />
-                          <span>闰月</span>
-                        </label>
-                      </div>
-                    </div>
-                    <div class="datetime-section">
-                      <span class="panel-label">提醒时间</span>
-                      <div class="time-columns">
-                        <div class="time-column">
-                          <span>小时</span>
-                          <div class="time-list" id="hourList"></div>
-                        </div>
-                        <div class="time-column">
-                          <span>分钟</span>
-                          <div class="time-list" id="minuteList"></div>
-                        </div>
-                      </div>
-                    </div>
-                    <div class="time-presets">
-                      <button class="time-option" data-time="08:00" type="button">08:00</button>
-                      <button class="time-option" data-time="09:00" type="button">09:00</button>
-                      <button class="time-option" data-time="10:00" type="button">10:00</button>
-                      <button class="time-option" data-time="12:00" type="button">12:00</button>
-                      <button class="time-option" data-time="14:00" type="button">14:00</button>
-                      <button class="time-option" data-time="16:00" type="button">16:00</button>
-                      <button class="time-option" data-time="18:00" type="button">18:00</button>
-                      <button class="time-option" data-time="20:00" type="button">20:00</button>
-                    </div>
-                  </div>
+                  <select id="lunarMonth" hidden></select>
+                  <select id="lunarDay" hidden></select>
+                  <input id="isLeapMonth" type="checkbox" hidden />
                   <input id="remindTime" type="hidden" value="08:00" />
                 </div>
               </div>
@@ -215,6 +177,7 @@
       </div>
     </div>
 
+    <script src="vendor/mobile-select/mobile-select.iife.min.js" defer></script>
     <script src="/scripts.js" defer></script>
   </body>
 </html>

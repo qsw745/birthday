@@ -496,6 +496,61 @@ body {
   background: rgba(225, 93, 62, 0.14);
 }
 
+.ms-mobile-select .ms-gray-layer {
+  background: rgba(24, 32, 42, 0.35);
+  backdrop-filter: blur(2px);
+}
+
+.ms-mobile-select .ms-content {
+  left: 50%;
+  bottom: -360px;
+  width: min(560px, calc(100% - 32px));
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(24, 32, 42, 0.18);
+  transform: translateX(-50%);
+}
+
+.ms-mobile-select.ms-show .ms-content {
+  bottom: 24px;
+}
+
+.ms-mobile-select .ms-btn-bar {
+  height: 48px;
+  line-height: 48px;
+  border-bottom: 1px solid rgba(24, 32, 42, 0.1);
+}
+
+.ms-mobile-select .ms-cancel,
+.ms-mobile-select .ms-ensure {
+  height: 48px;
+  width: 72px;
+  font-weight: 700;
+}
+
+.ms-mobile-select .ms-title {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.ms-mobile-select .ms-wheels,
+.ms-mobile-select .ms-wheel,
+.ms-mobile-select .ms-shadow-mask {
+  height: 220px;
+}
+
+.ms-mobile-select .ms-select-line {
+  top: 90px;
+  border-color: rgba(46, 140, 140, 0.22);
+  background: rgba(46, 140, 140, 0.06);
+}
+
+.ms-mobile-select .ms-select-container li {
+  color: var(--ink);
+  font-size: 0.96rem;
+  font-weight: 700;
+}
+
 .span-2 {
   grid-column: span 2;
 }
@@ -1080,6 +1135,18 @@ body {
 
   .time-columns {
     grid-template-columns: 1fr;
+  }
+
+  .ms-mobile-select .ms-content {
+    left: 0;
+    bottom: -360px;
+    width: 100%;
+    border-radius: 18px 18px 0 0;
+    transform: none;
+  }
+
+  .ms-mobile-select.ms-show .ms-content {
+    bottom: 0;
   }
 
   .footer {
