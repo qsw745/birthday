@@ -1,4 +1,5 @@
 const STORAGE_KEY = 'birthday_reminder_cache_v1'
+const VIEW_KEY = 'birthday_reminder_view_v1'
 const DEFAULT_TIME = '08:00'
 
 const state = {
@@ -6,6 +7,7 @@ const state = {
   editingId: null,
   busy: false,
   authenticated: false,
+  viewMode: loadViewMode(),
   cache: loadCache(),
 }
 
@@ -70,6 +72,7 @@ function cacheDom() {
 
   dom.searchInput = document.getElementById('searchInput')
   dom.upcomingFilter = document.getElementById('upcomingFilter')
+  dom.viewButtons = Array.from(document.querySelectorAll('[data-view-mode]'))
 
   dom.list = document.getElementById('birthdayList')
   dom.emptyState = document.getElementById('emptyState')
@@ -141,6 +144,9 @@ function bindEvents() {
 
   dom.searchInput.addEventListener('input', renderBirthdays)
   dom.upcomingFilter.addEventListener('change', renderBirthdays)
+  dom.viewButtons.forEach(button => {
+    button.addEventListener('click', () => setViewMode(button.dataset.viewMode))
+  })
   dom.list.addEventListener('click', handleListAction)
   if (dom.timeDisplay) {
     dom.timeDisplay.addEventListener('click', toggleTimePanel)
@@ -346,23 +352,85 @@ function renderBirthdays() {
   const filtered = getFilteredBirthdays()
   const sorted = sortBirthdays(filtered)
 
-  dom.list.innerHTML = sorted.map(buildCard).join('')
+  syncViewButtons()
+  dom.list.className = `list-scroll ${state.viewMode === 'card' ? 'card-view' : 'table-view'}`
+  dom.list.innerHTML = sorted.length ? buildListMarkup(sorted) : ''
   dom.emptyState.classList.toggle('show', sorted.length === 0)
   updateStats(sorted)
 }
 
-function buildCard(item) {
+function buildListMarkup(list) {
+  if (state.viewMode === 'card') {
+    return list.map(buildCard).join('')
+  }
+
+  return `
+    <table class="reminder-table">
+      <thead>
+        <tr>
+          <th scope="col">姓名</th>
+          <th scope="col">农历生日</th>
+          <th scope="col">提醒时间</th>
+          <th scope="col">下次提醒</th>
+          <th scope="col">倒计时</th>
+          <th scope="col">邮箱</th>
+          <th scope="col">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${list.map(buildTableRow).join('')}
+      </tbody>
+    </table>
+  `
+}
+
+function buildTableRow(item) {
+  const id = escapeHTML(item.id)
   const name = escapeHTML(item.name || '未命名')
-  const lunar = formatLunar(item)
+  const lunar = escapeHTML(formatLunar(item))
   const remindTime = escapeHTML(item.remindTime || '未设置')
   const email = escapeHTML(item.userEmail || '未记录')
   const message = escapeHTML(item.message || '未填写提醒内容')
-  const nextDate = formatDate(item.nextSolarDate)
-  const countdown = formatCountdown(item.nextSolarDate)
+  const nextDate = escapeHTML(formatDate(item.nextSolarDate))
+  const countdown = escapeHTML(formatCountdown(item.nextSolarDate))
   const isUpcoming = isUpcomingWithin(item.nextSolarDate, 30)
 
   return `
-    <article class="birthday-card ${isUpcoming ? 'upcoming' : ''}" data-id="${escapeHTML(item.id)}">
+    <tr class="${isUpcoming ? 'is-upcoming' : ''}" data-id="${id}">
+      <td>
+        <div class="person-cell">
+          <strong title="${name}">${name}</strong>
+          <span class="table-subline" title="${message}">${message}</span>
+        </div>
+      </td>
+      <td>${lunar}</td>
+      <td>${remindTime}</td>
+      <td>${nextDate}</td>
+      <td><span class="countdown ${isUpcoming ? 'soon' : ''}">${countdown}</span></td>
+      <td><span class="email-cell" title="${email}">${email}</span></td>
+      <td>
+        <div class="table-actions">
+          <button class="btn ghost" data-action="edit" data-id="${id}" type="button">编辑</button>
+          <button class="btn danger" data-action="delete" data-id="${id}" type="button">删除</button>
+        </div>
+      </td>
+    </tr>
+  `
+}
+
+function buildCard(item) {
+  const id = escapeHTML(item.id)
+  const name = escapeHTML(item.name || '未命名')
+  const lunar = escapeHTML(formatLunar(item))
+  const remindTime = escapeHTML(item.remindTime || '未设置')
+  const email = escapeHTML(item.userEmail || '未记录')
+  const message = escapeHTML(item.message || '未填写提醒内容')
+  const nextDate = escapeHTML(formatDate(item.nextSolarDate))
+  const countdown = escapeHTML(formatCountdown(item.nextSolarDate))
+  const isUpcoming = isUpcomingWithin(item.nextSolarDate, 30)
+
+  return `
+    <article class="birthday-card ${isUpcoming ? 'upcoming' : ''}" data-id="${id}">
       <div class="card-top">
         <div>
           <h3>${name}</h3>
@@ -393,11 +461,27 @@ function buildCard(item) {
         <p>${message}</p>
       </div>
       <div class="card-actions">
-        <button class="btn ghost" data-action="edit" data-id="${escapeHTML(item.id)}" type="button">编辑</button>
-        <button class="btn danger" data-action="delete" data-id="${escapeHTML(item.id)}" type="button">删除</button>
+        <button class="btn ghost" data-action="edit" data-id="${id}" type="button">编辑</button>
+        <button class="btn danger" data-action="delete" data-id="${id}" type="button">删除</button>
       </div>
     </article>
   `
+}
+
+function setViewMode(mode) {
+  const nextMode = mode === 'card' ? 'card' : 'table'
+  if (state.viewMode === nextMode) return
+  state.viewMode = nextMode
+  persistViewMode()
+  renderBirthdays()
+}
+
+function syncViewButtons() {
+  dom.viewButtons.forEach(button => {
+    const active = button.dataset.viewMode === state.viewMode
+    button.classList.toggle('active', active)
+    button.setAttribute('aria-pressed', String(active))
+  })
 }
 
 function getFilteredBirthdays() {
@@ -845,6 +929,22 @@ function loadCache() {
 
 function persistCache() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.cache))
+}
+
+function loadViewMode() {
+  try {
+    return localStorage.getItem(VIEW_KEY) === 'card' ? 'card' : 'table'
+  } catch (error) {
+    return 'table'
+  }
+}
+
+function persistViewMode() {
+  try {
+    localStorage.setItem(VIEW_KEY, state.viewMode)
+  } catch (error) {
+    // Ignore storage failures so the list remains usable in restricted browsers.
+  }
 }
 
 function formatLunar(item) {

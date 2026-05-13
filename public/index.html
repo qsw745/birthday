@@ -33,19 +33,21 @@
       </section>
 
       <div id="appView" hidden>
-      <header class="hero">
-        <div class="hero-text">
-          <p class="tag">Birthday Studio</p>
-          <h1>生日提醒中心</h1>
-          <p class="subtitle">用农历生日生成下一次提醒时间，让每一封祝福都刚刚好。</p>
-          <div class="hero-actions">
-            <button class="btn ghost" id="refreshButton" type="button">刷新列表</button>
-            <button class="btn text" id="scrollToForm" type="button">新建提醒</button>
+      <header class="topbar">
+        <div class="topbar-main">
+          <div class="topbar-title">
+            <p class="tag">Birthday Studio</p>
+            <h1>生日提醒中心</h1>
+            <p class="subtitle">管理农历生日提醒、收件邮箱和下一次发送时间。</p>
+          </div>
+          <div class="topbar-actions">
+            <button class="btn ghost" id="refreshButton" type="button">刷新</button>
+            <button class="btn primary" id="scrollToForm" type="button">新建提醒</button>
             <button class="btn text" id="togglePasswordButton" type="button">修改密码</button>
-            <button class="btn text" id="logoutButton" type="button">退出登录</button>
+            <button class="btn text" id="logoutButton" type="button">退出</button>
           </div>
         </div>
-        <div class="hero-panel">
+        <div class="topbar-stats">
           <div class="stat">
             <span>总提醒</span>
             <strong id="totalCount">0</strong>
@@ -177,7 +179,7 @@
           <div class="card-head">
             <div>
               <h2>提醒列表</h2>
-              <p class="muted">快速检索、编辑与删除已创建的提醒。</p>
+              <p class="muted">默认按下一次提醒时间排序，列表区域独立滚动。</p>
             </div>
           </div>
           <div class="filters">
@@ -190,8 +192,12 @@
               <span class="slider"></span>
               <span class="switch-text">仅看30天内</span>
             </label>
+            <div class="view-toggle" role="group" aria-label="列表视图">
+              <button class="view-toggle-btn" data-view-mode="table" type="button">表格</button>
+              <button class="view-toggle-btn" data-view-mode="card" type="button">卡片</button>
+            </div>
           </div>
-          <div class="list" id="birthdayList"></div>
+          <div class="list-scroll" id="birthdayList"></div>
           <div class="empty" id="emptyState">暂无提醒记录</div>
         </section>
       </main>
