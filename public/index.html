@@ -41,6 +41,7 @@
           <div class="hero-actions">
             <button class="btn ghost" id="refreshButton" type="button">刷新列表</button>
             <button class="btn text" id="scrollToForm" type="button">新建提醒</button>
+            <button class="btn text" id="togglePasswordButton" type="button">修改密码</button>
             <button class="btn text" id="logoutButton" type="button">退出登录</button>
           </div>
         </div>
@@ -63,6 +64,36 @@
           </div>
         </div>
       </header>
+
+      <section class="card password-card" id="passwordCard" hidden>
+        <div class="card-head">
+          <div>
+            <h2>修改登录密码</h2>
+            <p class="muted">修改成功后需要用新密码重新登录。</p>
+          </div>
+        </div>
+        <div class="status" id="passwordStatus" role="status" aria-live="polite"></div>
+        <form id="passwordForm" novalidate>
+          <div class="form-grid">
+            <div class="field">
+              <label for="currentPasswordInput">当前密码</label>
+              <input id="currentPasswordInput" type="password" autocomplete="current-password" required />
+            </div>
+            <div class="field">
+              <label for="newPasswordInput">新密码</label>
+              <input id="newPasswordInput" type="password" autocomplete="new-password" minlength="8" required />
+            </div>
+            <div class="field">
+              <label for="confirmPasswordInput">确认新密码</label>
+              <input id="confirmPasswordInput" type="password" autocomplete="new-password" minlength="8" required />
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="changePasswordButton" type="submit">保存新密码</button>
+            <button class="btn text" id="cancelPasswordButton" type="button">取消</button>
+          </div>
+        </form>
+      </section>
 
       <main class="layout">
         <section class="card form-card" id="formCard">

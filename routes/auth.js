@@ -1,6 +1,16 @@
 const express = require('express')
+const fs = require('fs')
+const path = require('path')
 const rateLimit = require('express-rate-limit')
-const { clearSessionCookie, destroySession, requireAuth, setSessionCookie, verifyPassword } = require('../utils/auth')
+const {
+  clearSessionCookie,
+  destroyAllSessions,
+  destroySession,
+  hashPassword,
+  requireAuth,
+  setSessionCookie,
+  verifyPassword,
+} = require('../utils/auth')
 
 const router = express.Router()
 
@@ -11,6 +21,23 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: '登录尝试过多，请稍后再试' },
 })
+
+function updateEnvValue(key, value) {
+  const envPath = path.join(__dirname, '../.env')
+  const current = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8').split(/\r?\n/) : []
+  let found = false
+  const next = current.map(line => {
+    if (line.startsWith(`${key}=`)) {
+      found = true
+      return `${key}=${value}`
+    }
+    return line
+  })
+  if (!found) next.push(`${key}=${value}`)
+  fs.writeFileSync(envPath, `${next.filter((line, index) => line || index < next.length - 1).join('\n')}\n`, {
+    mode: 0o600,
+  })
+}
 
 router.get('/status', (req, res) => {
   res.json({
@@ -41,6 +68,28 @@ router.post('/login', loginLimiter, async (req, res) => {
 
 router.post('/logout', requireAuth, (req, res) => {
   destroySession(req.session)
+  clearSessionCookie(res)
+  res.json({ success: true })
+})
+
+router.post('/password', requireAuth, async (req, res) => {
+  const currentPassword = String(req.body.currentPassword || '')
+  const newPassword = String(req.body.newPassword || '')
+  const expectedHash = process.env.AUTH_PASSWORD_HASH
+
+  if (newPassword.length < 8 || newPassword.length > 128) {
+    return res.status(400).json({ error: '新密码长度需要在 8 到 128 位之间' })
+  }
+
+  const passwordMatches = await verifyPassword(currentPassword, expectedHash)
+  if (!passwordMatches) {
+    return res.status(401).json({ error: '当前密码不正确' })
+  }
+
+  const nextHash = await hashPassword(newPassword)
+  updateEnvValue('AUTH_PASSWORD_HASH', nextHash)
+  process.env.AUTH_PASSWORD_HASH = nextHash
+  destroyAllSessions()
   clearSessionCookie(res)
   res.json({ success: true })
 })

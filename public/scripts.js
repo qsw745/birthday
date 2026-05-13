@@ -57,7 +57,16 @@ function cacheDom() {
   dom.cancelButton = document.getElementById('cancelButton')
   dom.refreshButton = document.getElementById('refreshButton')
   dom.scrollToForm = document.getElementById('scrollToForm')
+  dom.togglePasswordButton = document.getElementById('togglePasswordButton')
   dom.logoutButton = document.getElementById('logoutButton')
+  dom.passwordCard = document.getElementById('passwordCard')
+  dom.passwordForm = document.getElementById('passwordForm')
+  dom.currentPasswordInput = document.getElementById('currentPasswordInput')
+  dom.newPasswordInput = document.getElementById('newPasswordInput')
+  dom.confirmPasswordInput = document.getElementById('confirmPasswordInput')
+  dom.passwordStatus = document.getElementById('passwordStatus')
+  dom.changePasswordButton = document.getElementById('changePasswordButton')
+  dom.cancelPasswordButton = document.getElementById('cancelPasswordButton')
 
   dom.searchInput = document.getElementById('searchInput')
   dom.upcomingFilter = document.getElementById('upcomingFilter')
@@ -121,7 +130,10 @@ function bindEvents() {
   dom.updateButton.addEventListener('click', handleUpdate)
   dom.cancelButton.addEventListener('click', () => resetForm({ clearStatus: true }))
   dom.refreshButton.addEventListener('click', () => loadBirthdays({ showStatus: true }))
+  dom.togglePasswordButton.addEventListener('click', togglePasswordCard)
   dom.logoutButton.addEventListener('click', handleLogout)
+  dom.passwordForm.addEventListener('submit', handlePasswordChange)
+  dom.cancelPasswordButton.addEventListener('click', closePasswordCard)
   dom.scrollToForm.addEventListener('click', () => {
     dom.formCard.scrollIntoView({ behavior: 'smooth', block: 'start' })
     dom.nameInput.focus()
@@ -207,6 +219,69 @@ async function handleLogout() {
     renderBirthdays()
     resetForm({ clearStatus: true })
     showLogin()
+    setBusy(false)
+  }
+}
+
+function togglePasswordCard() {
+  if (dom.passwordCard.hidden) {
+    dom.passwordCard.hidden = false
+    dom.currentPasswordInput.focus()
+  } else {
+    closePasswordCard()
+  }
+}
+
+function closePasswordCard() {
+  dom.passwordForm.reset()
+  setPasswordStatus('', '')
+  dom.passwordCard.hidden = true
+}
+
+async function handlePasswordChange(event) {
+  event.preventDefault()
+  if (state.busy) return
+
+  const currentPassword = dom.currentPasswordInput.value
+  const newPassword = dom.newPasswordInput.value
+  const confirmPassword = dom.confirmPasswordInput.value
+
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    setPasswordStatus('error', '请填写完整密码信息')
+    return
+  }
+  if (newPassword.length < 8) {
+    setPasswordStatus('error', '新密码至少 8 位')
+    return
+  }
+  if (newPassword !== confirmPassword) {
+    setPasswordStatus('error', '两次输入的新密码不一致')
+    return
+  }
+
+  setBusy(true)
+  try {
+    const response = await fetch('/api/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    })
+    if (!response.ok) {
+      const detail = await safeReadError(response)
+      throw new Error(detail || '修改密码失败')
+    }
+    dom.passwordForm.reset()
+    setPasswordStatus('success', '密码已修改，请重新登录')
+    setTimeout(() => {
+      state.birthdays = []
+      renderBirthdays()
+      closePasswordCard()
+      showLogin()
+    }, 900)
+  } catch (error) {
+    setPasswordStatus('error', error.message)
+  } finally {
     setBusy(false)
   }
 }
@@ -684,6 +759,7 @@ function highlightTimeList(container, value) {
 function setBusy(isBusy) {
   state.busy = isBusy
   dom.loginButton.disabled = isBusy
+  dom.changePasswordButton.disabled = isBusy
   dom.addButton.disabled = isBusy
   dom.updateButton.disabled = isBusy
   dom.cancelButton.disabled = isBusy
@@ -705,6 +781,18 @@ function setLoginStatus(type, message) {
   dom.loginStatus.textContent = message
   dom.loginStatus.dataset.state = type
   dom.loginStatus.classList.add('visible')
+}
+
+function setPasswordStatus(type, message) {
+  if (!message) {
+    dom.passwordStatus.textContent = ''
+    dom.passwordStatus.dataset.state = ''
+    dom.passwordStatus.classList.remove('visible')
+    return
+  }
+  dom.passwordStatus.textContent = message
+  dom.passwordStatus.dataset.state = type
+  dom.passwordStatus.classList.add('visible')
 }
 
 function setStatus(type, message) {

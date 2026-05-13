@@ -105,6 +105,10 @@ function destroySession(session) {
   }
 }
 
+function destroyAllSessions() {
+  sessions.clear()
+}
+
 function hashPassword(password, salt = crypto.randomBytes(16).toString('base64url')) {
   return new Promise((resolve, reject) => {
     crypto.scrypt(password, salt, SCRYPT_KEYLEN, (err, derivedKey) => {
@@ -150,6 +154,7 @@ module.exports = {
   attachAuth,
   clearSessionCookie,
   destroySession,
+  destroyAllSessions,
   hashPassword,
   requireAuth,
   requirePageAuth,
