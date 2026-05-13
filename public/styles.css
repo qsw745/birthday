@@ -497,23 +497,29 @@ body {
   background: rgba(225, 93, 62, 0.14);
 }
 
+.ms-mobile-select {
+  position: fixed;
+  transform: none;
+}
+
 .ms-mobile-select .ms-gray-layer {
   background: rgba(24, 32, 42, 0.35);
   backdrop-filter: blur(2px);
 }
 
 .ms-mobile-select .ms-content {
+  top: 50%;
   left: 50%;
-  bottom: 24px;
+  bottom: auto;
   width: min(560px, calc(100% - 32px));
   border-radius: 18px;
   overflow: hidden;
   box-shadow: 0 24px 60px rgba(24, 32, 42, 0.18);
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
 }
 
 .ms-mobile-select.ms-show .ms-content {
-  bottom: 24px;
+  bottom: auto;
 }
 
 .ms-mobile-select .ms-btn-bar {
@@ -1138,15 +1144,14 @@ body {
   }
 
   .ms-mobile-select .ms-content {
-    left: 0;
-    bottom: 0;
-    width: 100%;
-    border-radius: 18px 18px 0 0;
-    transform: none;
+    left: 50%;
+    width: min(100% - 24px, 420px);
+    border-radius: 18px;
+    transform: translate(-50%, -50%);
   }
 
   .ms-mobile-select.ms-show .ms-content {
-    bottom: 0;
+    bottom: auto;
   }
 
   .footer {
