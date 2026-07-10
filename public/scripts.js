@@ -35,6 +35,8 @@ function cacheDom() {
   dom.loginPassword = document.getElementById('loginPassword')
   dom.loginButton = document.getElementById('loginButton')
   dom.loginStatus = document.getElementById('loginStatus')
+  dom.passkeyDivider = document.getElementById('passkeyDivider')
+  dom.passkeyLoginButton = document.getElementById('passkeyLoginButton')
 
   dom.formCard = document.getElementById('formCard')
   dom.birthdayForm = document.getElementById('birthdayForm')
@@ -73,6 +75,14 @@ function cacheDom() {
   dom.passwordStatus = document.getElementById('passwordStatus')
   dom.changePasswordButton = document.getElementById('changePasswordButton')
   dom.cancelPasswordButton = document.getElementById('cancelPasswordButton')
+
+  dom.togglePasskeyButton = document.getElementById('togglePasskeyButton')
+  dom.passkeyCard = document.getElementById('passkeyCard')
+  dom.passkeyStatus = document.getElementById('passkeyStatus')
+  dom.passkeyList = document.getElementById('passkeyList')
+  dom.passkeyEmpty = document.getElementById('passkeyEmpty')
+  dom.addPasskeyButton = document.getElementById('addPasskeyButton')
+  dom.closePasskeyButton = document.getElementById('closePasskeyButton')
 
   dom.searchInput = document.getElementById('searchInput')
   dom.upcomingFilter = document.getElementById('upcomingFilter')
@@ -141,6 +151,11 @@ function bindEvents() {
   dom.logoutButton.addEventListener('click', handleLogout)
   dom.passwordForm.addEventListener('submit', handlePasswordChange)
   dom.cancelPasswordButton.addEventListener('click', closePasswordCard)
+  dom.passkeyLoginButton.addEventListener('click', handlePasskeyLogin)
+  dom.togglePasskeyButton.addEventListener('click', togglePasskeyCard)
+  dom.addPasskeyButton.addEventListener('click', handleAddPasskey)
+  dom.closePasskeyButton.addEventListener('click', closePasskeyCard)
+  dom.passkeyList.addEventListener('click', handlePasskeyListAction)
   dom.scrollToForm.addEventListener('click', () => {
     dom.formCard.scrollIntoView({ behavior: 'smooth', block: 'start' })
     dom.nameInput.focus()
@@ -374,6 +389,9 @@ function showLogin() {
   state.authenticated = false
   dom.appView.hidden = true
   dom.loginView.hidden = false
+  const passkeySupported = supportsWebAuthn()
+  dom.passkeyDivider.hidden = !passkeySupported
+  dom.passkeyLoginButton.hidden = !passkeySupported
   dom.loginUsername.focus()
 }
 
@@ -381,6 +399,290 @@ function showApp() {
   state.authenticated = true
   dom.loginView.hidden = true
   dom.appView.hidden = false
+}
+
+function supportsWebAuthn() {
+  return typeof window.PublicKeyCredential === 'function' && !!(navigator.credentials && navigator.credentials.create)
+}
+
+function bufToB64u(buffer) {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  bytes.forEach(byte => {
+    binary += String.fromCharCode(byte)
+  })
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function b64uToBuf(value) {
+  const base64 = String(value).replace(/-/g, '+').replace(/_/g, '/')
+  const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4)
+  const binary = atob(padded)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return bytes.buffer
+}
+
+function decodeCreationOptions(options) {
+  return {
+    ...options,
+    challenge: b64uToBuf(options.challenge),
+    user: { ...options.user, id: b64uToBuf(options.user.id) },
+    excludeCredentials: (options.excludeCredentials || []).map(item => ({ ...item, id: b64uToBuf(item.id) })),
+  }
+}
+
+function decodeRequestOptions(options) {
+  return {
+    ...options,
+    challenge: b64uToBuf(options.challenge),
+    allowCredentials: (options.allowCredentials || []).map(item => ({ ...item, id: b64uToBuf(item.id) })),
+  }
+}
+
+function encodeRegistrationResult(credential) {
+  const response = credential.response
+  return {
+    id: credential.id,
+    rawId: bufToB64u(credential.rawId),
+    type: credential.type,
+    authenticatorAttachment: credential.authenticatorAttachment || undefined,
+    clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+    response: {
+      clientDataJSON: bufToB64u(response.clientDataJSON),
+      attestationObject: bufToB64u(response.attestationObject),
+      transports: typeof response.getTransports === 'function' ? response.getTransports() : undefined,
+    },
+  }
+}
+
+function encodeAuthenticationResult(credential) {
+  const response = credential.response
+  return {
+    id: credential.id,
+    rawId: bufToB64u(credential.rawId),
+    type: credential.type,
+    authenticatorAttachment: credential.authenticatorAttachment || undefined,
+    clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+    response: {
+      clientDataJSON: bufToB64u(response.clientDataJSON),
+      authenticatorData: bufToB64u(response.authenticatorData),
+      signature: bufToB64u(response.signature),
+      userHandle: response.userHandle ? bufToB64u(response.userHandle) : undefined,
+    },
+  }
+}
+
+function describePasskeyError(error, fallback) {
+  if (error && (error.name === 'NotAllowedError' || error.name === 'AbortError')) {
+    return '已取消验证，或验证超时'
+  }
+  if (error && error.name === 'InvalidStateError') {
+    return '该设备可能已注册过通行密钥'
+  }
+  return (error && error.message) || fallback
+}
+
+async function handlePasskeyLogin() {
+  if (state.busy) return
+  setLoginBusy(true)
+  try {
+    const optionsResponse = await fetch('/api/auth/webauthn/login/options', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: '{}',
+    })
+    if (!optionsResponse.ok) {
+      const detail = await safeReadError(optionsResponse)
+      throw new Error(detail || '无法发起通行密钥登录')
+    }
+    const { token, options } = await optionsResponse.json()
+    const credential = await navigator.credentials.get({ publicKey: decodeRequestOptions(options) })
+    if (!credential) {
+      throw new Error('未获取到通行密钥')
+    }
+    const verifyResponse = await fetch('/api/auth/webauthn/login/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ token, response: encodeAuthenticationResult(credential) }),
+    })
+    if (!verifyResponse.ok) {
+      const detail = await safeReadError(verifyResponse)
+      throw new Error(detail || '通行密钥登录失败')
+    }
+    setLoginStatus('', '')
+    showApp()
+    await loadBirthdays()
+  } catch (error) {
+    setLoginStatus('error', describePasskeyError(error, '通行密钥登录失败'))
+  } finally {
+    setLoginBusy(false)
+  }
+}
+
+function togglePasskeyCard() {
+  if (dom.passkeyCard.hidden) {
+    dom.passkeyCard.hidden = false
+    setPasskeyStatus('', '')
+    if (!supportsWebAuthn()) {
+      setPasskeyStatus('error', '当前浏览器不支持通行密钥')
+    }
+    loadPasskeys()
+  } else {
+    closePasskeyCard()
+  }
+}
+
+function closePasskeyCard() {
+  setPasskeyStatus('', '')
+  dom.passkeyCard.hidden = true
+}
+
+async function loadPasskeys() {
+  try {
+    const response = await fetch('/api/auth/webauthn/credentials', { credentials: 'same-origin' })
+    if (response.status === 401) {
+      showLogin()
+      return
+    }
+    if (!response.ok) {
+      throw new Error('获取通行密钥列表失败')
+    }
+    renderPasskeys(await response.json())
+  } catch (error) {
+    setPasskeyStatus('error', error.message)
+  }
+}
+
+function renderPasskeys(list) {
+  const items = Array.isArray(list) ? list : []
+  dom.passkeyList.innerHTML = items
+    .map(item => {
+      const id = escapeHTML(item.id)
+      const name = escapeHTML(item.deviceName || '通行密钥')
+      const created = escapeHTML(formatDate(item.createdAt))
+      const lastUsed = item.lastUsedAt ? `最近使用 ${escapeHTML(formatDate(item.lastUsedAt))}` : '未使用过'
+      return `
+        <div class="passkey-item" data-id="${id}">
+          <div class="passkey-meta">
+            <strong>${name}</strong>
+            <span class="muted">注册于 ${created} · ${lastUsed}</span>
+          </div>
+          <button class="btn danger" data-action="remove-passkey" data-id="${id}" type="button">删除</button>
+        </div>
+      `
+    })
+    .join('')
+  dom.passkeyEmpty.classList.toggle('show', items.length === 0)
+}
+
+function defaultDeviceName() {
+  const ua = navigator.userAgent
+  if (/iPhone/.test(ua)) return 'iPhone'
+  if (/iPad/.test(ua)) return 'iPad'
+  if (/Android/.test(ua)) return 'Android 设备'
+  if (/Macintosh/.test(ua)) return 'Mac'
+  if (/Windows/.test(ua)) return 'Windows 电脑'
+  return '通行密钥'
+}
+
+async function handleAddPasskey() {
+  if (state.busy) return
+  if (!supportsWebAuthn()) {
+    setPasskeyStatus('error', '当前浏览器不支持通行密钥')
+    return
+  }
+
+  setBusy(true)
+  try {
+    const optionsResponse = await fetch('/api/auth/webauthn/register/options', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: '{}',
+    })
+    if (optionsResponse.status === 401) {
+      showLogin()
+      throw new Error('请先登录')
+    }
+    if (!optionsResponse.ok) {
+      const detail = await safeReadError(optionsResponse)
+      throw new Error(detail || '无法发起通行密钥注册')
+    }
+    const { token, options } = await optionsResponse.json()
+    const credential = await navigator.credentials.create({ publicKey: decodeCreationOptions(options) })
+    if (!credential) {
+      throw new Error('未获取到通行密钥')
+    }
+    const verifyResponse = await fetch('/api/auth/webauthn/register/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        token,
+        deviceName: defaultDeviceName(),
+        response: encodeRegistrationResult(credential),
+      }),
+    })
+    if (!verifyResponse.ok) {
+      const detail = await safeReadError(verifyResponse)
+      throw new Error(detail || '通行密钥注册失败')
+    }
+    setPasskeyStatus('success', '通行密钥已添加，下次可直接扫脸/指纹登录')
+    await loadPasskeys()
+  } catch (error) {
+    setPasskeyStatus('error', describePasskeyError(error, '通行密钥注册失败'))
+  } finally {
+    setBusy(false)
+  }
+}
+
+async function handlePasskeyListAction(event) {
+  const button = event.target.closest('button[data-action="remove-passkey"]')
+  if (!button || state.busy) return
+  const id = button.dataset.id
+  if (!id) return
+
+  const confirmed = window.confirm('确定要删除这个通行密钥吗？删除后该设备将无法扫脸/指纹登录。')
+  if (!confirmed) return
+
+  setBusy(true)
+  try {
+    const response = await fetch(`/api/auth/webauthn/credentials/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (response.status === 401) {
+      showLogin()
+      throw new Error('请先登录')
+    }
+    if (!response.ok) {
+      const detail = await safeReadError(response)
+      throw new Error(detail || '删除失败')
+    }
+    setPasskeyStatus('success', '通行密钥已删除')
+    await loadPasskeys()
+  } catch (error) {
+    setPasskeyStatus('error', error.message)
+  } finally {
+    setBusy(false)
+  }
+}
+
+function setPasskeyStatus(type, message) {
+  if (!message) {
+    dom.passkeyStatus.textContent = ''
+    dom.passkeyStatus.dataset.state = ''
+    dom.passkeyStatus.classList.remove('visible')
+    return
+  }
+  dom.passkeyStatus.textContent = message
+  dom.passkeyStatus.dataset.state = type
+  dom.passkeyStatus.classList.add('visible')
 }
 
 async function loadBirthdays(options = {}) {
@@ -928,6 +1230,7 @@ function setBusy(isBusy) {
   state.busy = isBusy
   dom.loginButton.disabled = isBusy
   dom.changePasswordButton.disabled = isBusy
+  dom.addPasskeyButton.disabled = isBusy
   dom.addButton.disabled = isBusy
   dom.updateButton.disabled = isBusy
   dom.cancelButton.disabled = isBusy
@@ -937,6 +1240,7 @@ function setBusy(isBusy) {
 function setLoginBusy(isBusy) {
   state.busy = isBusy
   dom.loginButton.disabled = isBusy
+  dom.passkeyLoginButton.disabled = isBusy
 }
 
 function setLoginStatus(type, message) {

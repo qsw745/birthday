@@ -21,6 +21,20 @@ CREATE TABLE IF NOT EXISTS birthdays (
   KEY idx_lunar (lunarMonth, lunarDay, isLeapMonth)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS webauthn_credentials (
+  credential_id VARCHAR(255)  NOT NULL,          -- base64url 编码的凭证 ID
+  username      VARCHAR(64)   NOT NULL,          -- 对应 AUTH_USERNAME
+  public_key    BLOB          NOT NULL,          -- COSE 公钥
+  counter       BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  transports    VARCHAR(255)  DEFAULT NULL,      -- JSON 数组字符串，如 ["internal","hybrid"]
+  device_name   VARCHAR(100)  DEFAULT NULL,      -- 用户可读的设备备注
+  created_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_used_at  TIMESTAMP     NULL DEFAULT NULL,
+
+  PRIMARY KEY (credential_id),
+  KEY idx_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS email_reminders (
   id          VARCHAR(36)   NOT NULL,          -- UUID
   birthday_id VARCHAR(36)   NOT NULL,          -- 对应 birthdays.id（你代码里每个生日一条提醒）

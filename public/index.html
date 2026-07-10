@@ -30,6 +30,10 @@
             <input id="loginPassword" type="password" autocomplete="current-password" required />
           </div>
           <button class="btn primary" id="loginButton" type="submit">登录</button>
+          <div class="login-divider" id="passkeyDivider" hidden><span>或</span></div>
+          <button class="btn ghost passkey-login" id="passkeyLoginButton" type="button" hidden>
+            使用通行密钥登录（Face ID / 指纹）
+          </button>
         </form>
       </section>
 
@@ -45,6 +49,7 @@
             <button class="btn ghost" id="refreshButton" type="button">刷新</button>
             <button class="btn primary" id="scrollToForm" type="button">新建提醒</button>
             <button class="btn text" id="togglePasswordButton" type="button">修改密码</button>
+            <button class="btn text" id="togglePasskeyButton" type="button">通行密钥</button>
             <button class="btn text" id="logoutButton" type="button">退出</button>
           </div>
         </div>
@@ -96,6 +101,22 @@
             <button class="btn text" id="cancelPasswordButton" type="button">取消</button>
           </div>
         </form>
+      </section>
+
+      <section class="card passkey-card" id="passkeyCard" hidden>
+        <div class="card-head">
+          <div>
+            <h2>通行密钥管理</h2>
+            <p class="muted">注册后可在本设备用 Face ID、指纹或设备锁直接登录。</p>
+          </div>
+          <button class="btn primary" id="addPasskeyButton" type="button">添加通行密钥</button>
+        </div>
+        <div class="status" id="passkeyStatus" role="status" aria-live="polite"></div>
+        <div class="passkey-list" id="passkeyList"></div>
+        <div class="empty" id="passkeyEmpty">尚未注册通行密钥</div>
+        <div class="actions">
+          <button class="btn text" id="closePasskeyButton" type="button">关闭</button>
+        </div>
       </section>
 
       <main class="layout">

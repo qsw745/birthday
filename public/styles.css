@@ -1159,3 +1159,59 @@ body {
     gap: 8px;
   }
 }
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.passkey-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.passkey-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+
+.passkey-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.passkey-meta .muted {
+  font-size: 0.78rem;
+}
+
+@media (max-width: 640px) {
+  .passkey-card .card-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .passkey-item {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
