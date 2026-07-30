@@ -152,6 +152,10 @@ function bindEvents() {
   dom.passwordForm.addEventListener('submit', handlePasswordChange)
   dom.cancelPasswordButton.addEventListener('click', closePasswordCard)
   dom.passkeyLoginButton.addEventListener('click', handlePasskeyLogin)
+  // pointerdown 早于 click 触发，用来兜住「页面停留过久、挑战值已过期」的情况
+  dom.passkeyLoginButton.addEventListener('pointerdown', () => {
+    prefetchPasskeyOptions().catch(() => {})
+  })
   dom.togglePasskeyButton.addEventListener('click', togglePasskeyCard)
   dom.addPasskeyButton.addEventListener('click', handleAddPasskey)
   dom.closePasskeyButton.addEventListener('click', closePasskeyCard)
@@ -393,6 +397,10 @@ function showLogin() {
   dom.passkeyDivider.hidden = !passkeySupported
   dom.passkeyLoginButton.hidden = !passkeySupported
   dom.loginUsername.focus()
+  if (passkeySupported) {
+    // 预取挑战值，让点击时能同步调用 navigator.credentials.get()
+    prefetchPasskeyOptions().catch(() => {})
+  }
 }
 
 function showApp() {
@@ -477,7 +485,7 @@ function encodeAuthenticationResult(credential) {
 
 function describePasskeyError(error, fallback) {
   if (error && (error.name === 'NotAllowedError' || error.name === 'AbortError')) {
-    return '已取消验证，或验证超时'
+    return '本设备没有可用的通行密钥，或验证被取消。请用密码登录后在本设备添加通行密钥。'
   }
   if (error && error.name === 'InvalidStateError') {
     return '该设备可能已注册过通行密钥'
@@ -485,42 +493,119 @@ function describePasskeyError(error, fallback) {
   return (error && error.message) || fallback
 }
 
-async function handlePasskeyLogin() {
+// 服务端挑战值有效期 5 分钟，这里留出余量后重新预取
+const PASSKEY_OPTIONS_TTL_MS = 3.5 * 60 * 1000
+// 已就绪的挑战值（同步可读），点击时不必再等网络
+let passkeyOptions = null
+let passkeyOptionsFetchedAt = 0
+let passkeyOptionsInFlight = null
+
+function passkeyOptionsAreFresh() {
+  return !!passkeyOptions && Date.now() - passkeyOptionsFetchedAt < PASSKEY_OPTIONS_TTL_MS
+}
+
+// 预先取回挑战值。Safari 要求 navigator.credentials.get() 处于用户手势上下文中，
+// 而任何 await（哪怕只是一个微任务）都会让该上下文失效，随即抛 NotAllowedError
+// ——表现就是「已取消验证」，且请求根本到不了服务端（服务端因此没有任何失败日志）。
+// 所以挑战值必须在点击之前就备好，点击回调里同步调用 credentials.get()。
+function prefetchPasskeyOptions() {
+  if (passkeyOptionsAreFresh() || passkeyOptionsInFlight) return passkeyOptionsInFlight
+  passkeyOptionsInFlight = fetch('/api/auth/webauthn/login/options', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: '{}',
+  })
+    .then(async response => {
+      if (!response.ok) {
+        const detail = await safeReadError(response)
+        throw new Error(detail || '无法发起通行密钥登录')
+      }
+      const data = await response.json()
+      passkeyOptions = data
+      passkeyOptionsFetchedAt = Date.now()
+      return data
+    })
+    .finally(() => {
+      passkeyOptionsInFlight = null
+    })
+  return passkeyOptionsInFlight
+}
+
+function clearPasskeyOptions() {
+  passkeyOptions = null
+  passkeyOptionsFetchedAt = 0
+}
+
+// 注意：本函数必须保持同步，且在 credentials.get() 之前不得出现任何 await
+function handlePasskeyLogin() {
   if (state.busy) return
+
+  if (passkeyOptionsAreFresh()) {
+    const { token, options } = passkeyOptions
+    clearPasskeyOptions() // 挑战值一次性使用
+    let credentialPromise
+    try {
+      credentialPromise = navigator.credentials.get({ publicKey: decodeRequestOptions(options) })
+    } catch (error) {
+      setLoginStatus('error', describePasskeyError(error, '通行密钥登录失败'))
+      prefetchPasskeyOptions()
+      return
+    }
+    setLoginBusy(true)
+    finishPasskeyLogin(token, credentialPromise)
+    return
+  }
+
+  // 没有可用的预取结果：先取挑战值再验证。
+  // 这一条在 Safari 上可能因手势失效而失败，但挑战值会留在缓存里，再点一次即可走上面的同步路径。
   setLoginBusy(true)
-  try {
-    const optionsResponse = await fetch('/api/auth/webauthn/login/options', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: '{}',
+  const pending = prefetchPasskeyOptions()
+    .then(({ token, options }) => {
+      clearPasskeyOptions()
+      return navigator.credentials.get({ publicKey: decodeRequestOptions(options) }).then(credential => ({
+        token,
+        credential,
+      }))
     })
-    if (!optionsResponse.ok) {
-      const detail = await safeReadError(optionsResponse)
-      throw new Error(detail || '无法发起通行密钥登录')
-    }
-    const { token, options } = await optionsResponse.json()
-    const credential = await navigator.credentials.get({ publicKey: decodeRequestOptions(options) })
-    if (!credential) {
-      throw new Error('未获取到通行密钥')
-    }
-    const verifyResponse = await fetch('/api/auth/webauthn/login/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({ token, response: encodeAuthenticationResult(credential) }),
+    .then(({ token, credential }) => verifyPasskeyLogin(token, credential))
+  handlePasskeyOutcome(pending)
+}
+
+function finishPasskeyLogin(token, credentialPromise) {
+  handlePasskeyOutcome(credentialPromise.then(credential => verifyPasskeyLogin(token, credential)))
+}
+
+function handlePasskeyOutcome(promise) {
+  promise
+    .then(() => {
+      setLoginStatus('', '')
+      showApp()
+      return loadBirthdays()
     })
-    if (!verifyResponse.ok) {
-      const detail = await safeReadError(verifyResponse)
-      throw new Error(detail || '通行密钥登录失败')
-    }
-    setLoginStatus('', '')
-    showApp()
-    await loadBirthdays()
-  } catch (error) {
-    setLoginStatus('error', describePasskeyError(error, '通行密钥登录失败'))
-  } finally {
-    setLoginBusy(false)
+    .catch(error => {
+      setLoginStatus('error', describePasskeyError(error, '通行密钥登录失败'))
+      // 为下一次点击重新备好挑战值
+      prefetchPasskeyOptions().catch(() => {})
+    })
+    .finally(() => {
+      setLoginBusy(false)
+    })
+}
+
+async function verifyPasskeyLogin(token, credential) {
+  if (!credential) {
+    throw new Error('未获取到通行密钥')
+  }
+  const verifyResponse = await fetch('/api/auth/webauthn/login/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ token, response: encodeAuthenticationResult(credential) }),
+  })
+  if (!verifyResponse.ok) {
+    const detail = await safeReadError(verifyResponse)
+    throw new Error(detail || '通行密钥登录失败')
   }
 }
 
@@ -777,18 +862,18 @@ function buildTableRow(item) {
 
   return `
     <tr class="${isUpcoming ? 'is-upcoming' : ''}" data-id="${id}">
-      <td>
+      <td class="person-col">
         <div class="person-cell">
           <strong title="${name}">${name}</strong>
           <span class="table-subline" title="${message}">${message}</span>
         </div>
       </td>
-      <td>${lunar}</td>
-      <td>${remindTime}</td>
-      <td>${nextDate}</td>
-      <td><span class="countdown ${isUpcoming ? 'soon' : ''}">${countdown}</span></td>
-      <td><span class="email-cell" title="${email}">${email}</span></td>
-      <td>
+      <td data-label="农历生日">${lunar}</td>
+      <td data-label="提醒时间">${remindTime}</td>
+      <td data-label="下次提醒">${nextDate}</td>
+      <td data-label="倒计时"><span class="countdown ${isUpcoming ? 'soon' : ''}">${countdown}</span></td>
+      <td data-label="邮箱"><span class="email-cell" title="${email}">${email}</span></td>
+      <td data-label="操作">
         <div class="table-actions">
           <button class="btn ghost" data-action="edit" data-id="${id}" type="button">编辑</button>
           <button class="btn danger" data-action="delete" data-id="${id}" type="button">删除</button>

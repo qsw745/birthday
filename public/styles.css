@@ -1125,18 +1125,120 @@ body {
     flex: 1 1 0;
   }
 
+  /* 小屏不再用嵌套滚动容器：页面本身是唯一的滚动轴。
+     原来 max-height:58vh + overflow:auto 会把列表裁掉一半，
+     而 iOS 上内层滚动条不可见，看上去就是「下方内容没了」。 */
   .list-scroll {
-    min-height: 320px;
-    max-height: 58vh;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
   }
 
+  /* 表格改为堆叠布局：每行一张卡片，字段名由 data-label 提供。
+     这样彻底去掉 820px 定宽带来的横向滚动。 */
   .reminder-table {
-    min-width: 820px;
+    min-width: 0;
+    width: 100%;
+    display: block;
+    table-layout: auto;
+    font-size: 0.95rem;
   }
 
-  .reminder-table th,
+  .reminder-table thead {
+    display: none;
+  }
+
+  .reminder-table tbody,
+  .reminder-table tr,
   .reminder-table td {
-    padding: 10px;
+    display: block;
+    width: auto;
+  }
+
+  .reminder-table th:nth-child(n),
+  .reminder-table td:nth-child(n) {
+    width: auto;
+  }
+
+  .reminder-table tbody tr {
+    margin-bottom: 10px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-strong);
+    box-shadow: 0 1px 2px rgba(24, 32, 42, 0.04);
+  }
+
+  .reminder-table tbody tr:last-child {
+    margin-bottom: 0;
+  }
+
+  .reminder-table tbody tr.is-upcoming {
+    border-color: var(--accent);
+    box-shadow: 0 2px 10px rgba(46, 140, 140, 0.14);
+  }
+
+  .reminder-table td {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 6px 0;
+    border-bottom: 0;
+    text-align: right;
+  }
+
+  .reminder-table td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 0.82rem;
+    text-align: left;
+  }
+
+  /* 姓名单元格作为卡片标题：占满整行、不显示标签 */
+  .reminder-table td.person-col {
+    display: block;
+    padding: 0 0 10px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+
+  .reminder-table td.person-col::before {
+    content: none;
+  }
+
+  .reminder-table .person-cell strong {
+    font-size: 1.05rem;
+  }
+
+  .reminder-table .table-subline {
+    white-space: normal;
+    overflow: visible;
+  }
+
+  .reminder-table .email-cell {
+    overflow-wrap: anywhere;
+  }
+
+  .reminder-table td[data-label='操作'] {
+    padding-top: 12px;
+  }
+
+  .reminder-table td[data-label='操作']::before {
+    content: none;
+  }
+
+  .reminder-table .table-actions {
+    width: 100%;
+  }
+
+  .reminder-table .table-actions .btn {
+    flex: 1 1 0;
   }
 
   .time-columns {
