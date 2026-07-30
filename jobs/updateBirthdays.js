@@ -21,6 +21,18 @@ schedule.scheduleJob({ rule: '0 0 * * *', tz: TZ }, async () => {
     conn = await pool.getConnection()
     await conn.beginTransaction()
 
+    // 自愈：remind_time 还没到、却已被标记为已发(status=1) 是一种异常状态。
+    // 正常流程里发送完成后 remind_time 仍指向刚过去的那次，要等本任务推进日期时才连带重置为 0；
+    // 若发送与推进撞在同一分钟，就会留下「已发 + 未来时间」的记录——它既不会被轮询选中
+    // （轮询要求 status=0），启动时也不会注册定点任务（同样要求 status=0），
+    // 于是那一次提醒被静默跳过。这里把它重新置为待发。
+    const [healed] = await conn.query(
+      'UPDATE email_reminders SET status = 0 WHERE status = 1 AND remind_time > NOW()'
+    )
+    if (healed.affectedRows) {
+      console.log(`[heal] 重新置为待发的提醒条数: ${healed.affectedRows}`)
+    }
+
     const [birthdays] = await conn.query('SELECT * FROM birthdays')
 
     const now = toMoment(new Date()) // 上海时区
