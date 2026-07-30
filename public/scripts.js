@@ -158,6 +158,9 @@ function bindEvents() {
   })
   dom.togglePasskeyButton.addEventListener('click', togglePasskeyCard)
   dom.addPasskeyButton.addEventListener('click', handleAddPasskey)
+  dom.addPasskeyButton.addEventListener('pointerdown', () => {
+    prefetchRegisterOptions().catch(() => {})
+  })
   dom.closePasskeyButton.addEventListener('click', closePasskeyCard)
   dom.passkeyList.addEventListener('click', handlePasskeyListAction)
   dom.scrollToForm.addEventListener('click', () => {
@@ -483,12 +486,14 @@ function encodeAuthenticationResult(credential) {
   }
 }
 
-function describePasskeyError(error, fallback) {
+function describePasskeyError(error, fallback, purpose) {
   if (error && (error.name === 'NotAllowedError' || error.name === 'AbortError')) {
-    return '本设备没有可用的通行密钥，或验证被取消。请用密码登录后在本设备添加通行密钥。'
+    return purpose === 'register'
+      ? '注册被取消或超时。请在系统弹窗里选择本设备保存（iPhone 上选 iPhone / iCloud 钥匙串），不要选其他设备。'
+      : '本设备没有可用的通行密钥，或验证被取消。请用密码登录后在本设备添加通行密钥。'
   }
   if (error && error.name === 'InvalidStateError') {
-    return '该设备可能已注册过通行密钥'
+    return '本设备已注册过通行密钥，可直接用它登录'
   }
   return (error && error.message) || fallback
 }
@@ -548,8 +553,8 @@ function handlePasskeyLogin() {
     try {
       credentialPromise = navigator.credentials.get({ publicKey: decodeRequestOptions(options) })
     } catch (error) {
-      setLoginStatus('error', describePasskeyError(error, '通行密钥登录失败'))
-      prefetchPasskeyOptions()
+      setLoginStatus('error', describePasskeyError(error, '通行密钥登录失败', 'login'))
+      prefetchPasskeyOptions().catch(() => {})
       return
     }
     setLoginBusy(true)
@@ -584,7 +589,7 @@ function handlePasskeyOutcome(promise) {
       return loadBirthdays()
     })
     .catch(error => {
-      setLoginStatus('error', describePasskeyError(error, '通行密钥登录失败'))
+      setLoginStatus('error', describePasskeyError(error, '通行密钥登录失败', 'login'))
       // 为下一次点击重新备好挑战值
       prefetchPasskeyOptions().catch(() => {})
     })
@@ -615,6 +620,9 @@ function togglePasskeyCard() {
     setPasskeyStatus('', '')
     if (!supportsWebAuthn()) {
       setPasskeyStatus('error', '当前浏览器不支持通行密钥')
+    } else {
+      // 打开卡片就备好注册挑战值，点「添加」时才能同步调用 credentials.create()
+      prefetchRegisterOptions().catch(() => {})
     }
     loadPasskeys()
   } else {
@@ -675,54 +683,119 @@ function defaultDeviceName() {
   return '通行密钥'
 }
 
-async function handleAddPasskey() {
+// 注册路径与登录路径受同一条 Safari 限制：credentials.create() 也必须在
+// 用户手势上下文中同步发起，因此挑战值同样需要提前备好。
+let registerOptions = null
+let registerOptionsFetchedAt = 0
+let registerOptionsInFlight = null
+
+function registerOptionsAreFresh() {
+  return !!registerOptions && Date.now() - registerOptionsFetchedAt < PASSKEY_OPTIONS_TTL_MS
+}
+
+function prefetchRegisterOptions() {
+  if (registerOptionsAreFresh() || registerOptionsInFlight) return registerOptionsInFlight
+  registerOptionsInFlight = fetch('/api/auth/webauthn/register/options', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: '{}',
+  })
+    .then(async response => {
+      if (response.status === 401) {
+        showLogin()
+        throw new Error('请先登录')
+      }
+      if (!response.ok) {
+        const detail = await safeReadError(response)
+        throw new Error(detail || '无法发起通行密钥注册')
+      }
+      const data = await response.json()
+      registerOptions = data
+      registerOptionsFetchedAt = Date.now()
+      return data
+    })
+    .finally(() => {
+      registerOptionsInFlight = null
+    })
+  return registerOptionsInFlight
+}
+
+function clearRegisterOptions() {
+  registerOptions = null
+  registerOptionsFetchedAt = 0
+}
+
+// 注意：本函数必须保持同步，且在 credentials.create() 之前不得出现任何 await
+function handleAddPasskey() {
   if (state.busy) return
   if (!supportsWebAuthn()) {
     setPasskeyStatus('error', '当前浏览器不支持通行密钥')
     return
   }
 
+  if (registerOptionsAreFresh()) {
+    const { token, options } = registerOptions
+    clearRegisterOptions() // 挑战值一次性使用
+    let credentialPromise
+    try {
+      credentialPromise = navigator.credentials.create({ publicKey: decodeCreationOptions(options) })
+    } catch (error) {
+      setPasskeyStatus('error', describePasskeyError(error, '通行密钥注册失败', 'register'))
+      prefetchRegisterOptions().catch(() => {})
+      return
+    }
+    setBusy(true)
+    finishAddPasskey(credentialPromise.then(credential => verifyPasskeyRegister(token, credential)))
+    return
+  }
+
+  // 无预取结果时退回旧路径；失败后挑战值已在缓存中，再点一次即走上面的同步路径
   setBusy(true)
-  try {
-    const optionsResponse = await fetch('/api/auth/webauthn/register/options', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: '{}',
+  finishAddPasskey(
+    prefetchRegisterOptions().then(({ token, options }) => {
+      clearRegisterOptions()
+      return navigator.credentials
+        .create({ publicKey: decodeCreationOptions(options) })
+        .then(credential => verifyPasskeyRegister(token, credential))
     })
-    if (optionsResponse.status === 401) {
-      showLogin()
-      throw new Error('请先登录')
-    }
-    if (!optionsResponse.ok) {
-      const detail = await safeReadError(optionsResponse)
-      throw new Error(detail || '无法发起通行密钥注册')
-    }
-    const { token, options } = await optionsResponse.json()
-    const credential = await navigator.credentials.create({ publicKey: decodeCreationOptions(options) })
-    if (!credential) {
-      throw new Error('未获取到通行密钥')
-    }
-    const verifyResponse = await fetch('/api/auth/webauthn/register/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({
-        token,
-        deviceName: defaultDeviceName(),
-        response: encodeRegistrationResult(credential),
-      }),
+  )
+}
+
+function finishAddPasskey(promise) {
+  promise
+    .then(() => {
+      setPasskeyStatus('success', '通行密钥已添加，下次可直接扫脸/指纹登录')
+      return loadPasskeys()
     })
-    if (!verifyResponse.ok) {
-      const detail = await safeReadError(verifyResponse)
-      throw new Error(detail || '通行密钥注册失败')
-    }
-    setPasskeyStatus('success', '通行密钥已添加，下次可直接扫脸/指纹登录')
-    await loadPasskeys()
-  } catch (error) {
-    setPasskeyStatus('error', describePasskeyError(error, '通行密钥注册失败'))
-  } finally {
-    setBusy(false)
+    .catch(error => {
+      setPasskeyStatus('error', describePasskeyError(error, '通行密钥注册失败', 'register'))
+    })
+    .finally(() => {
+      setBusy(false)
+      // excludeCredentials 随已注册凭证变化，无论成败都重新预取
+      clearRegisterOptions()
+      prefetchRegisterOptions().catch(() => {})
+    })
+}
+
+async function verifyPasskeyRegister(token, credential) {
+  if (!credential) {
+    throw new Error('未获取到通行密钥')
+  }
+  const verifyResponse = await fetch('/api/auth/webauthn/register/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({
+      token,
+      deviceName: defaultDeviceName(),
+      response: encodeRegistrationResult(credential),
+    }),
+  })
+  if (!verifyResponse.ok) {
+    const detail = await safeReadError(verifyResponse)
+    throw new Error(detail || '通行密钥注册失败')
   }
 }
 
