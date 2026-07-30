@@ -39,6 +39,8 @@ function cacheDom() {
   dom.passkeyLoginButton = document.getElementById('passkeyLoginButton')
 
   dom.formCard = document.getElementById('formCard')
+  dom.formModalBackdrop = document.getElementById('formModalBackdrop')
+  dom.closeFormModalButton = document.getElementById('closeFormModalButton')
   dom.birthdayForm = document.getElementById('birthdayForm')
   dom.formTitle = document.getElementById('formTitle')
   dom.formHint = document.getElementById('formHint')
@@ -146,6 +148,13 @@ function bindEvents() {
   dom.addButton.addEventListener('click', handleAdd)
   dom.updateButton.addEventListener('click', handleUpdate)
   dom.cancelButton.addEventListener('click', () => resetForm({ clearStatus: true }))
+  dom.closeFormModalButton.addEventListener('click', () => resetForm({ clearStatus: true }))
+  dom.formModalBackdrop.addEventListener('click', () => resetForm({ clearStatus: true }))
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && document.body.classList.contains('form-modal-open')) {
+      resetForm({ clearStatus: true })
+    }
+  })
   dom.refreshButton.addEventListener('click', () => loadBirthdays({ showStatus: true }))
   dom.togglePasswordButton.addEventListener('click', togglePasswordCard)
   dom.logoutButton.addEventListener('click', handleLogout)
@@ -401,6 +410,8 @@ function showLogin() {
   dom.passkeyLoginButton.hidden = !passkeySupported
   dom.loginUsername.focus()
   if (passkeySupported) {
+    const environmentHint = passkeyEnvironmentHint()
+    if (environmentHint) setLoginStatus('error', environmentHint)
     // 预取挑战值，让点击时能同步调用 navigator.credentials.get()
     prefetchPasskeyOptions().catch(() => {})
   }
@@ -414,6 +425,20 @@ function showApp() {
 
 function supportsWebAuthn() {
   return typeof window.PublicKeyCredential === 'function' && !!(navigator.credentials && navigator.credentials.create)
+}
+
+function passkeyEnvironmentHint() {
+  if (!window.isSecureContext) {
+    return '当前页面不是安全连接，无法使用 Face ID 通行密钥。请通过 https://qisw.top/birthday/ 访问。'
+  }
+
+  const ua = navigator.userAgent || ''
+  const isIOS = /iPhone|iPad|iPod/.test(ua)
+  if (isIOS && /\bGSA\//.test(ua)) {
+    return '当前页面在 iPhone 的 Google App 内置浏览器中，无法可靠调用 Face ID 通行密钥。请点右上角“分享”，选择“用 Safari 打开”，再登录或添加通行密钥。'
+  }
+
+  return ''
 }
 
 function bufToB64u(buffer) {
@@ -488,6 +513,8 @@ function encodeAuthenticationResult(credential) {
 
 function describePasskeyError(error, fallback, purpose) {
   if (error && (error.name === 'NotAllowedError' || error.name === 'AbortError')) {
+    const environmentHint = passkeyEnvironmentHint()
+    if (environmentHint) return environmentHint
     return purpose === 'register'
       ? '注册被取消或超时。请在系统弹窗里选择本设备保存（iPhone 上选 iPhone / iCloud 钥匙串），不要选其他设备。'
       : '本设备没有可用的通行密钥，或验证被取消。请用密码登录后在本设备添加通行密钥。'
@@ -618,9 +645,11 @@ function togglePasskeyCard() {
   if (dom.passkeyCard.hidden) {
     dom.passkeyCard.hidden = false
     setPasskeyStatus('', '')
+    const environmentHint = passkeyEnvironmentHint()
     if (!supportsWebAuthn()) {
       setPasskeyStatus('error', '当前浏览器不支持通行密钥')
     } else {
+      if (environmentHint) setPasskeyStatus('error', environmentHint)
       // 打开卡片就备好注册挑战值，点「添加」时才能同步调用 credentials.create()
       prefetchRegisterOptions().catch(() => {})
     }
@@ -1289,7 +1318,23 @@ function startEdit(id) {
   dom.formTitle.textContent = '编辑生日提醒'
   dom.formHint.textContent = '修改信息后保存更新，提醒时间将重新计算。'
 
-  dom.formCard.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  openFormModal()
+}
+
+// 编辑以浮层呈现：不移动 DOM，只切 body 状态类，表单内部逻辑完全复用
+function openFormModal() {
+  dom.formModalBackdrop.hidden = false
+  dom.closeFormModalButton.hidden = false
+  document.body.classList.add('form-modal-open')
+  dom.formCard.scrollTop = 0
+  dom.nameInput.focus()
+}
+
+function closeFormModal() {
+  if (!document.body.classList.contains('form-modal-open')) return
+  document.body.classList.remove('form-modal-open')
+  dom.formModalBackdrop.hidden = true
+  dom.closeFormModalButton.hidden = true
 }
 
 async function deleteBirthday(id) {
@@ -1324,6 +1369,7 @@ async function deleteBirthday(id) {
 
 function resetForm(options = {}) {
   const { clearStatus = false } = options
+  closeFormModal()
   state.editingId = null
   dom.birthdayForm.reset()
   setTimeFromString(DEFAULT_TIME)

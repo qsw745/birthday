@@ -13,6 +13,7 @@ const rateLimit = require('express-rate-limit')
 const https = require('https')
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 const routes = require('./routes')
 const { attachAuth, requirePageAuth } = require('./utils/auth')
 
@@ -67,17 +68,49 @@ app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '64kb' }))
 app.use(attachAuth)
 app.use('/api', apiLimiter, requireSameOriginForUnsafeMethods)
 
+// ===== 首页资源版本戳 =====
+// nginx 给 scripts.js / styles.css 加了 max-age=300，而资源 URL 没有版本号，
+// 浏览器（尤其 iOS Safari）会继续用旧文件，导致前端改动上线后看不到效果。
+// 这里按文件 mtime 生成版本戳注入 index.html，使每次部署自动失效旧缓存。
+const indexPath = path.join(publicDir, 'index.html')
+const versionedAssets = ['scripts.js', 'styles.css'].map(name => path.join(publicDir, name))
+let indexCache = { version: null, html: null }
+
+function assetVersion() {
+  const stamp = versionedAssets
+    .map(file => {
+      try {
+        return fs.statSync(file).mtimeMs
+      } catch {
+        return 0
+      }
+    })
+    .join('-')
+  return crypto.createHash('sha1').update(stamp).digest('hex').slice(0, 10)
+}
+
+function sendIndex(res) {
+  const version = assetVersion()
+  if (indexCache.version !== version) {
+    indexCache = {
+      version,
+      html: fs.readFileSync(indexPath, 'utf8').split('__ASSET_V__').join(version),
+    }
+  }
+  res.type('html').set('Cache-Control', 'no-cache').send(indexCache.html)
+}
+
 app.get(['/login', `${appBasePath}/login`], (req, res) => {
   if (req.session) return res.redirect(`${appBasePath}/`)
-  return res.sendFile(path.join(publicDir, 'index.html'))
+  return sendIndex(res)
 })
 
 app.get(['/', appBasePath, `${appBasePath}/`], requirePageAuth, (req, res) => {
-  res.sendFile(path.join(publicDir, 'index.html'))
+  sendIndex(res)
 })
 
 app.get(['/index.html', `${appBasePath}/index.html`], requirePageAuth, (req, res) => {
-  res.sendFile(path.join(publicDir, 'index.html'))
+  sendIndex(res)
 })
 
 app.use(`${appBasePath}/vendor`, express.static(path.join(publicDir, 'vendor'), { index: false }))

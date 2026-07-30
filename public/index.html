@@ -13,7 +13,9 @@
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
     <link rel="manifest" href="site.webmanifest" />
     <link rel="stylesheet" href="vendor/mobile-select/mobile-select.css" />
-    <link rel="stylesheet" href="/styles.css" />
+    <!-- 版本戳由服务端按文件 mtime 注入，避免 nginx 的 max-age=300 让浏览器一直用旧文件。
+         用相对路径，使 /birthday/ 反代与 :3300 直连两种入口都能解析。 -->
+    <link rel="stylesheet" href="styles.css?v=__ASSET_V__" />
   </head>
   <body>
     <div class="backdrop" aria-hidden="true">
@@ -127,6 +129,8 @@
         </div>
       </section>
 
+      <div class="modal-backdrop" id="formModalBackdrop" hidden></div>
+
       <main class="layout">
         <section class="card form-card" id="formCard">
           <div class="card-head">
@@ -134,6 +138,7 @@
               <h2 id="formTitle">新建生日提醒</h2>
               <p class="muted" id="formHint">填写寿星信息、农历生日与提醒内容，系统自动计算下一次提醒。</p>
             </div>
+            <button class="btn text form-modal-close" id="closeFormModalButton" type="button" hidden>关闭</button>
           </div>
           <div class="status" id="statusToast" role="status" aria-live="polite"></div>
           <form id="birthdayForm" novalidate>
@@ -176,7 +181,7 @@
           <div class="card-head">
             <div>
               <h2>提醒列表</h2>
-              <p class="muted">默认按下一次提醒时间排序，列表区域独立滚动。</p>
+              <p class="muted">默认按下一次提醒时间排序。</p>
             </div>
           </div>
           <div class="filters">
@@ -207,6 +212,6 @@
     </div>
 
     <script src="vendor/mobile-select/mobile-select.iife.min.js" defer></script>
-    <script src="/scripts.js" defer></script>
+    <script src="scripts.js?v=__ASSET_V__" defer></script>
   </body>
 </html>

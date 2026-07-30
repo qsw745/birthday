@@ -1043,12 +1043,19 @@ body {
     max-height: none;
   }
 
+  /* 单列布局下由页面统一滚动。
+     .list-card 基础规则是 max-height: calc(100vh - 292px) + overflow: hidden，
+     如果只解除内层 .list-scroll 的滚动，内容会被外层直接裁掉且完全无法滚动
+     （表现为「只看到一条，划不动」）；所以两层的高度限制必须一起解除。 */
   .list-card {
     min-height: auto;
+    max-height: none;
+    overflow: visible;
   }
 
   .list-scroll {
-    max-height: 62vh;
+    max-height: none;
+    overflow: visible;
   }
 
   .topbar-main {
@@ -1315,5 +1322,54 @@ body {
   .passkey-item {
     flex-direction: column;
     align-items: flex-start;
+  }
+}
+
+/* ===== 编辑弹窗 =====
+   不移动 DOM，只用 body 上的状态类把既有的 .form-card 提升为居中浮层，
+   这样表单里的时间选择器、校验与提交逻辑全部沿用原有实现。 */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(24, 32, 42, 0.45);
+  backdrop-filter: blur(2px);
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+body.form-modal-open {
+  overflow: hidden;
+}
+
+body.form-modal-open .form-card {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 60;
+  width: min(100vw - 24px, 520px);
+  max-height: min(88vh, 720px);
+  overflow-y: auto;
+  /* .card 的 rise 动画会改写 transform，与这里的居中冲突 */
+  animation: none;
+}
+
+body.form-modal-open .form-card .card-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: -18px -18px 12px;
+  padding: 18px 18px 12px;
+  background: var(--surface-strong);
+  border-bottom: 1px solid var(--border);
+}
+
+@media (max-width: 760px) {
+  body.form-modal-open .form-card .card-head {
+    margin: -14px -14px 12px;
+    padding: 14px 14px 12px;
   }
 }
