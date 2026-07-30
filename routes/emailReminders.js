@@ -6,25 +6,37 @@ const { query, pool, formatDate } = require('../utils/db')
 const { generateUUID } = require('../utils/helpers')
 const { requireAuth } = require('../utils/auth')
 const transporter = require('../utils/emailConfig') // 邮件服务配置
+const { buildBirthdayEmailHtml } = require('../utils/emailTemplate')
 
 router.use(requireAuth)
 
-// 统一的发送逻辑：发邮件 -> 成功则更新状态
+// 统一的发送逻辑：先原子占位（status 0→1），抢到的才发邮件
+// 定点任务、每分钟轮询、多进程实例同时触发时，只有一方能把 status 从 0 改成 1，杜绝重复发送
 async function sendReminderEmail(reminder) {
+  const claim = await query('UPDATE email_reminders SET status = 1 WHERE id = ? AND status = 0', [reminder.id])
+  if (!claim.affectedRows) {
+    return // 已被其它调度任务/进程处理
+  }
+
   const mailOptions = {
     from: process.env.SMTP_FROM || process.env.SMTP_USER,
     to: reminder.email,
-    subject: `${reminder.name}的生日提醒`,
+    subject: `🎂 ${reminder.name}的生日提醒`,
     text: reminder.message,
+    html: buildBirthdayEmailHtml(reminder),
   }
 
   try {
     await transporter.sendMail(mailOptions)
-    await query('UPDATE email_reminders SET status = 1 WHERE id = ?', [reminder.id])
     console.log('[email] sent & marked delivered:', reminder.id)
   } catch (err) {
     console.error('[email] send failed:', reminder.id, err)
-    // 失败不抛出，以免把调度器打挂；可以在此记录失败原因到表里（可选）
+    // 发送失败则释放占位，交给下一次轮询重试；不抛出以免把调度器打挂
+    try {
+      await query('UPDATE email_reminders SET status = 0 WHERE id = ?', [reminder.id])
+    } catch (resetErr) {
+      console.error('[email] reset status failed:', reminder.id, resetErr)
+    }
   }
 }
 
