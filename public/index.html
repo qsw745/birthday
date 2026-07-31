@@ -138,7 +138,7 @@
               <h2 id="formTitle">新建生日提醒</h2>
               <p class="muted" id="formHint">填写寿星信息、农历生日与提醒内容，系统自动计算下一次提醒。</p>
             </div>
-            <button class="btn text form-modal-close" id="closeFormModalButton" type="button" hidden>关闭</button>
+            <button class="form-modal-close" id="closeFormModalButton" type="button" aria-label="关闭" hidden>&#215;</button>
           </div>
           <div class="status" id="statusToast" role="status" aria-live="polite"></div>
           <form id="birthdayForm" novalidate>
@@ -171,7 +171,7 @@
             </div>
             <div class="actions">
               <button class="btn primary" id="addButton" type="button">保存提醒</button>
-              <button class="btn ghost" id="updateButton" type="button" hidden>保存更新</button>
+              <button class="btn primary" id="updateButton" type="button" hidden>保存更新</button>
               <button class="btn text" id="cancelButton" type="button">清空表单</button>
             </div>
           </form>

@@ -1326,14 +1326,15 @@ body {
 }
 
 /* ===== 编辑弹窗 =====
-   不移动 DOM，只用 body 上的状态类把既有的 .form-card 提升为居中浮层，
-   这样表单里的时间选择器、校验与提交逻辑全部沿用原有实现。 */
+   不移动 DOM，只用 body 上的状态类把既有的 .form-card 提升为浮层，
+   表单内的时间选择器、校验与提交逻辑全部沿用原有实现。 */
 .modal-backdrop {
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: rgba(24, 32, 42, 0.45);
-  backdrop-filter: blur(2px);
+  background: rgba(24, 32, 42, 0.5);
+  backdrop-filter: blur(3px);
+  animation: modal-fade 0.2s ease both;
 }
 
 .modal-backdrop[hidden] {
@@ -1352,24 +1353,131 @@ body.form-modal-open .form-card {
   z-index: 60;
   width: min(100vw - 24px, 520px);
   max-height: min(88vh, 720px);
+  padding: 0;
   overflow-y: auto;
-  /* .card 的 rise 动画会改写 transform，与这里的居中冲突 */
-  animation: none;
+  overscroll-behavior: contain;
+  box-shadow: 0 24px 60px rgba(24, 32, 42, 0.28);
+  /* .card 的 rise 动画会改写 transform，与这里的居中定位冲突 */
+  animation: modal-pop 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* 标题栏吸顶，长表单滚动时不丢上下文 */
 body.form-modal-open .form-card .card-head {
   position: sticky;
   top: 0;
-  z-index: 1;
-  margin: -18px -18px 12px;
-  padding: 18px 18px 12px;
+  z-index: 2;
+  align-items: flex-start;
+  margin: 0;
+  padding: 16px 18px 12px;
   background: var(--surface-strong);
   border-bottom: 1px solid var(--border);
 }
 
+body.form-modal-open .form-card .status,
+body.form-modal-open .form-card form {
+  padding: 0 18px;
+}
+
+body.form-modal-open .form-card .status {
+  margin-top: 14px;
+}
+
+/* 操作条吸底，长表单不必滚到底才能保存 */
+body.form-modal-open .form-card .actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin: 16px -18px 0;
+  padding: 12px 18px calc(12px + env(safe-area-inset-bottom, 0px));
+  background: var(--surface-strong);
+  border-top: 1px solid var(--border);
+}
+
+.form-modal-close {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.form-modal-close:hover,
+.form-modal-close:focus-visible {
+  background: rgba(225, 93, 62, 0.14);
+  color: var(--accent-2);
+}
+
+body.form-modal-open .form-modal-close:not([hidden]) {
+  display: inline-flex;
+}
+
+@keyframes modal-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes modal-pop {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -46%) scale(0.97);
+  }
+}
+
+/* 手机上改为底部浮层：更贴近系统习惯，且键盘弹出时不会盖住输入焦点 */
 @media (max-width: 760px) {
-  body.form-modal-open .form-card .card-head {
-    margin: -14px -14px 12px;
-    padding: 14px 14px 12px;
+  body.form-modal-open .form-card {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    max-height: 90vh;
+    transform: none;
+    border-radius: var(--radius) var(--radius) 0 0;
+    animation: sheet-up 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  body.form-modal-open .form-card .card-head,
+  body.form-modal-open .form-card .status,
+  body.form-modal-open .form-card form {
+    padding-inline: 14px;
+  }
+
+  body.form-modal-open .form-card .actions {
+    margin-inline: -14px;
+    padding-inline: 14px;
+  }
+
+  /* 主操作占满整行，次要操作退居其后 */
+  body.form-modal-open .form-card .actions .btn.primary,
+  body.form-modal-open .form-card .actions .btn.ghost {
+    flex: 1 1 100%;
+  }
+
+  body.form-modal-open .form-card .actions .btn.text {
+    flex: 1 1 100%;
+  }
+}
+
+@keyframes sheet-up {
+  from {
+    opacity: 0.6;
+    transform: translateY(14px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal-backdrop,
+  body.form-modal-open .form-card {
+    animation: none;
   }
 }

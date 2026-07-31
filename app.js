@@ -73,11 +73,12 @@ app.use('/api', apiLimiter, requireSameOriginForUnsafeMethods)
 // 浏览器（尤其 iOS Safari）会继续用旧文件，导致前端改动上线后看不到效果。
 // 这里按文件 mtime 生成版本戳注入 index.html，使每次部署自动失效旧缓存。
 const indexPath = path.join(publicDir, 'index.html')
-const versionedAssets = ['scripts.js', 'styles.css'].map(name => path.join(publicDir, name))
+// index.html 自身也参与计算：否则只改 HTML 时版本不变，下面的缓存不会刷新，会一直吐旧页面
+const stampedFiles = ['scripts.js', 'styles.css', 'index.html'].map(name => path.join(publicDir, name))
 let indexCache = { version: null, html: null }
 
 function assetVersion() {
-  const stamp = versionedAssets
+  const stamp = stampedFiles
     .map(file => {
       try {
         return fs.statSync(file).mtimeMs
