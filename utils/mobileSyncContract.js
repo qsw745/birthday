@@ -1,17 +1,220 @@
 const moment = require('moment-timezone')
-const { TZ } = require('./helpers')
+const { calculateNextSolarDate, TZ } = require('./helpers')
 
 const DECIMAL_PATTERN = /^\d+$/
 const LIMIT_PATTERN = /^[1-9]\d*$/
 const TIME_PATTERN = /^(\d{2}):(\d{2})(?::(\d{2}))?$/
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const UINT64_PATTERN = /^(?:0|[1-9]\d*)$/
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const STORAGE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
 const UINT64_MAX = 18446744073709551615n
+const MAX_TEXT_BYTES = 65535
+const MAX_LUNAR_YEAR_PROBES = 20
+const NORMALIZED_PUSH_OPERATION = Symbol('normalizedPushOperation')
 
 class MobileSyncValidationError extends Error {
-  constructor(code) {
-    super(code)
+  constructor(code, message = code) {
+    super(message)
     this.name = 'MobileSyncValidationError'
     this.code = code
   }
+}
+
+function invalidBirthdayPayload() {
+  return new MobileSyncValidationError('invalid_birthday_payload', 'invalid birthday payload')
+}
+
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function normalizeUUID(value) {
+  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
+    throw invalidBirthdayPayload()
+  }
+  return value.toLowerCase()
+}
+
+function normalizeUInt64String(value) {
+  if (
+    typeof value !== 'string'
+    || !UINT64_PATTERN.test(value)
+    || BigInt(value) > UINT64_MAX
+  ) {
+    throw invalidBirthdayPayload()
+  }
+  return value
+}
+
+function characterLength(value) {
+  return Array.from(value).length
+}
+
+function calculateNextAvailableDate(payload, {
+  calculateNextSolarDateFn = calculateNextSolarDate,
+  nowInput = new Date(),
+} = {}) {
+  const start = moment.tz(nowInput, TZ)
+  if (!start.isValid()) throw invalidBirthdayPayload()
+
+  for (let offset = 0; offset <= MAX_LUNAR_YEAR_PROBES; offset += 1) {
+    const probe = offset === 0 ? start : start.clone().add(offset, 'year')
+    try {
+      const value = calculateNextSolarDateFn({
+        lunarMonth: payload.lunarMonth,
+        lunarDay: payload.lunarDay,
+        isLeapMonth: payload.isLeapMonth,
+        remindTime: payload.remindTime,
+      }, probe.toDate())
+      if (typeof value === 'string' && STORAGE_DATE_PATTERN.test(value)) return value
+    } catch {
+      // A lunar month may have only 29 days in this year; probe later years.
+    }
+  }
+  throw invalidBirthdayPayload()
+}
+
+function normalizeBirthdayPayload(payload, dateOptions) {
+  if (!isPlainObject(payload)) throw invalidBirthdayPayload()
+
+  const {
+    id,
+    name: rawName,
+    lunarMonth,
+    lunarDay,
+    isLeapMonth,
+    reminderTimeMinutes,
+    notifyDayBefore,
+    notifySameDay,
+    emailEnabled,
+    emailAddress: rawEmailAddress,
+    emailMessage: rawEmailMessage,
+  } = payload
+  const normalizedId = normalizeUUID(id)
+  if (typeof rawName !== 'string') throw invalidBirthdayPayload()
+
+  const name = rawName.trim()
+  if (!name || characterLength(name) > 64) throw invalidBirthdayPayload()
+  if (!Number.isInteger(lunarMonth) || lunarMonth < 1 || lunarMonth > 12) {
+    throw invalidBirthdayPayload()
+  }
+  if (!Number.isInteger(lunarDay) || lunarDay < 1 || lunarDay > 30) {
+    throw invalidBirthdayPayload()
+  }
+  if (typeof isLeapMonth !== 'boolean') throw invalidBirthdayPayload()
+  if (
+    !Number.isInteger(reminderTimeMinutes)
+    || reminderTimeMinutes < 0
+    || reminderTimeMinutes >= 1440
+  ) {
+    throw invalidBirthdayPayload()
+  }
+  if (typeof notifyDayBefore !== 'boolean' || typeof notifySameDay !== 'boolean') {
+    throw invalidBirthdayPayload()
+  }
+  if (!notifyDayBefore && !notifySameDay) throw invalidBirthdayPayload()
+  if (typeof emailEnabled !== 'boolean') throw invalidBirthdayPayload()
+  if (typeof rawEmailAddress !== 'string' || typeof rawEmailMessage !== 'string') {
+    throw invalidBirthdayPayload()
+  }
+
+  let emailAddress = rawEmailAddress.trim()
+  let emailMessage = rawEmailMessage
+  if (Buffer.byteLength(`${name}${emailMessage}`, 'utf8') > MAX_TEXT_BYTES) {
+    throw invalidBirthdayPayload()
+  }
+  if (emailEnabled) {
+    if (
+      !emailAddress
+      || characterLength(emailAddress) > 128
+      || !EMAIL_PATTERN.test(emailAddress)
+    ) {
+      throw invalidBirthdayPayload()
+    }
+  } else {
+    emailAddress = ''
+    emailMessage = ''
+  }
+
+  const hour = String(Math.floor(reminderTimeMinutes / 60)).padStart(2, '0')
+  const minute = String(reminderTimeMinutes % 60).padStart(2, '0')
+  const normalized = {
+    id: normalizedId,
+    name,
+    lunarMonth,
+    lunarDay,
+    isLeapMonth,
+    reminderTimeMinutes,
+    notifyDayBefore,
+    notifySameDay,
+    emailEnabled,
+    emailAddress,
+    emailMessage,
+    remindTime: `${hour}:${minute}:00`,
+  }
+  normalized.nextSolarDate = calculateNextAvailableDate(normalized, dateOptions)
+  return normalized
+}
+
+function markNormalizedOperation(operation) {
+  Object.defineProperty(operation, NORMALIZED_PUSH_OPERATION, { value: true })
+  return operation
+}
+
+function isNormalizedPushOperation(operation) {
+  return Boolean(operation && operation[NORMALIZED_PUSH_OPERATION])
+}
+
+function normalizePushRequest(body, dateOptions) {
+  if (!isPlainObject(body) || !Array.isArray(body.operations)) {
+    throw invalidBirthdayPayload()
+  }
+  if (body.operations.length > 50) {
+    throw new MobileSyncValidationError('too_many_operations')
+  }
+  if (body.operations.length === 0) throw invalidBirthdayPayload()
+
+  const entityByOperationId = new Map()
+  const operations = body.operations.map(operation => {
+    if (!isPlainObject(operation)) throw invalidBirthdayPayload()
+    const normalizedOperationId = normalizeUUID(operation.operationId)
+    const normalizedEntityId = normalizeUUID(operation.entityId)
+    const { type } = operation
+    if (type !== 'upsert' && type !== 'delete') throw invalidBirthdayPayload()
+    const baseVersion = normalizeUInt64String(operation.baseVersion)
+
+    const priorEntityId = entityByOperationId.get(normalizedOperationId)
+    if (priorEntityId && priorEntityId !== normalizedEntityId) throw invalidBirthdayPayload()
+    entityByOperationId.set(normalizedOperationId, normalizedEntityId)
+
+    if (type === 'delete') {
+      if (operation.payload !== undefined && operation.payload !== null) {
+        throw invalidBirthdayPayload()
+      }
+      return markNormalizedOperation({
+        operationId: normalizedOperationId,
+        entityId: normalizedEntityId,
+        type,
+        baseVersion,
+        payload: null,
+      })
+    }
+
+    const payload = normalizeBirthdayPayload(operation.payload, dateOptions)
+    if (payload.id !== normalizedEntityId) throw invalidBirthdayPayload()
+    return markNormalizedOperation({
+      operationId: normalizedOperationId,
+      entityId: normalizedEntityId,
+      type,
+      baseVersion,
+      payload,
+    })
+  })
+
+  return { operations }
 }
 
 function normalizeCursor(value) {
@@ -114,8 +317,12 @@ function serializeBirthdayRow(row) {
 module.exports = {
   MobileSyncValidationError,
   decimalString,
+  invalidBirthdayPayload,
+  isNormalizedPushOperation,
+  normalizeBirthdayPayload,
   normalizeCursor,
   normalizeLimit,
+  normalizePushRequest,
   serializeBirthdayRow,
   timeToMinutes,
 }

@@ -1,9 +1,15 @@
 const {
   decimalString,
+  isNormalizedPushOperation,
   normalizeCursor,
   normalizeLimit,
+  normalizePushRequest,
   serializeBirthdayRow,
 } = require('../utils/mobileSyncContract')
+const {
+  applyMobileOperation,
+  readStoredOperation,
+} = require('../services/birthdayMutationService')
 
 const BIRTHDAY_SELECT = `SELECT
   b.id,
@@ -40,7 +46,11 @@ function requireUsername(username) {
   }
 }
 
-function createMobileSyncRepository({ pool }) {
+function createMobileSyncRepository({
+  pool,
+  applyMobileOperationFn = applyMobileOperation,
+  readStoredOperationFn = readStoredOperation,
+}) {
   async function snapshot(username) {
     requireUsername(username)
     const connection = await pool.getConnection()
@@ -117,7 +127,57 @@ function createMobileSyncRepository({ pool }) {
     }
   }
 
-  return { snapshot, pull }
+  async function recoverDuplicateOperation(deviceId, operation, duplicateError) {
+    const connection = await pool.getConnection()
+    try {
+      await connection.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED', [])
+      await connection.beginTransaction()
+      const stored = await readStoredOperationFn(connection, { deviceId, operation })
+      if (!stored) throw duplicateError
+      await connection.commit()
+      return stored
+    } catch (error) {
+      try {
+        await connection.rollback()
+      } catch {
+        // Preserve the read/replay error while still releasing the connection.
+      }
+      throw error
+    } finally {
+      connection.release()
+    }
+  }
+
+  async function applyOperation(deviceId, operationInput) {
+    const operation = isNormalizedPushOperation(operationInput)
+      ? operationInput
+      : normalizePushRequest({ operations: [operationInput] }).operations[0]
+    const connection = await pool.getConnection()
+    let duplicateError = null
+    try {
+      await connection.beginTransaction()
+      const result = await applyMobileOperationFn(connection, { deviceId, operation })
+      await connection.commit()
+      return result
+    } catch (error) {
+      try {
+        await connection.rollback()
+      } catch {
+        // Preserve the operation error while still releasing the connection.
+      }
+      if (error && error.mobileOperationResponseDuplicate) {
+        duplicateError = error
+      } else {
+        throw error
+      }
+    } finally {
+      connection.release()
+    }
+
+    return recoverDuplicateOperation(deviceId, operation, duplicateError)
+  }
+
+  return { snapshot, pull, applyOperation }
 }
 
 module.exports = { createMobileSyncRepository }

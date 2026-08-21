@@ -4,6 +4,7 @@ const {
   MobileSyncValidationError,
   normalizeCursor,
   normalizeLimit,
+  normalizePushRequest,
 } = require('../utils/mobileSyncContract')
 
 function createMobileSyncRouter({
@@ -11,6 +12,7 @@ function createMobileSyncRouter({
   mobileAuth,
   sessions,
   now = () => new Date(),
+  calculateNextSolarDateFn,
 }) {
   const router = express.Router()
   const requireMobileAuth = mobileAuth || createMobileAuth({ sessions, now })
@@ -37,6 +39,26 @@ function createMobileSyncRouter({
 
     const result = await syncRepository.pull(cursor, limit)
     return res.json(result)
+  })
+
+  router.post('/push', async (req, res) => {
+    try {
+      const { operations } = normalizePushRequest(req.body, {
+        calculateNextSolarDateFn,
+        nowInput: now(),
+      })
+      const deviceId = req.mobileSession.device_id || req.mobileSession.deviceId
+      const results = []
+      for (const operation of operations) {
+        results.push(await syncRepository.applyOperation(deviceId, operation))
+      }
+      return res.json({ results })
+    } catch (error) {
+      if (error instanceof MobileSyncValidationError) {
+        return res.status(400).json({ error: error.code })
+      }
+      throw error
+    }
   })
 
   return router
