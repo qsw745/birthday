@@ -1,11 +1,27 @@
 const express = require('express')
-const router = express.Router()
+const {
+  createEmailRemindersRouter,
+  registerEmailReminderSchedulers,
+} = require('./emailReminders')
 
-// 加载子路由
-router.use('/auth', require('./auth'))
-router.use('/birthdays', require('./birthdays'))
-router.use('/email-reminders', require('./emailReminders'))
-router.use('/version', require('./version'))
-router.use('/schedule-email', require('./scheduleEmail'))
+function createApiRouter({
+  authRouter = require('./auth'),
+  birthdaysRouter = require('./birthdays'),
+  versionRouter = require('./version'),
+  scheduleEmailRouter = require('./scheduleEmail'),
+  createEmailRemindersRouterFn = createEmailRemindersRouter,
+  registerEmailReminderSchedulersFn = registerEmailReminderSchedulers,
+} = {}) {
+  const router = express.Router()
+  const emailRemindersRouter = createEmailRemindersRouterFn()
+  registerEmailReminderSchedulersFn()
 
-module.exports = router
+  router.use('/auth', authRouter)
+  router.use('/birthdays', birthdaysRouter)
+  router.use('/email-reminders', emailRemindersRouter)
+  router.use('/version', versionRouter)
+  router.use('/schedule-email', scheduleEmailRouter)
+  return router
+}
+
+module.exports = { createApiRouter }

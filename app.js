@@ -3,7 +3,8 @@ process.env.TZ = process.env.TZ || 'Asia/Shanghai'
 
 // ===== 定时任务（提前加载，便于关闭）=====
 const schedule = require('node-schedule')
-require('./jobs/updateBirthdays')
+const { scheduleUpdateBirthdaysJob } = require('./jobs/updateBirthdays')
+scheduleUpdateBirthdaysJob()
 
 // ===== 基础依赖 =====
 const express = require('express')
@@ -14,13 +15,14 @@ const https = require('https')
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
-const routes = require('./routes')
+const { createApiRouter } = require('./routes')
 const { attachAuth, requirePageAuth } = require('./utils/auth')
 
 // ===== 数据库（用于优雅关闭）=====
 const { pool } = require('./utils/db')
 
 const app = express()
+const routes = createApiRouter()
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1))
 const publicDir = path.join(__dirname, 'public')
 const appBasePath = process.env.APP_BASE_PATH || '/birthday'

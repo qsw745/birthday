@@ -1,38 +1,12 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 
-function loadJobWithHarmlessDefaults() {
-  const schedulePath = require.resolve('node-schedule')
-  const dbPath = require.resolve('../../utils/db')
-  const jobPath = require.resolve('../../jobs/updateBirthdays')
-  const prior = new Map([
-    [schedulePath, require.cache[schedulePath]],
-    [dbPath, require.cache[dbPath]],
-    [jobPath, require.cache[jobPath]],
-  ])
-  require.cache[schedulePath] = {
-    id: schedulePath,
-    filename: schedulePath,
-    loaded: true,
-    exports: { scheduleJob() { return {} } },
-  }
-  require.cache[dbPath] = {
-    id: dbPath,
-    filename: dbPath,
-    loaded: true,
-    exports: { pool: {}, query: async () => [] },
-  }
-  delete require.cache[jobPath]
-  const loaded = require('../../jobs/updateBirthdays')
-  for (const [modulePath, cached] of prior) {
-    if (cached) require.cache[modulePath] = cached
-    else delete require.cache[modulePath]
-  }
-  return loaded
+function loadBirthdayJob() {
+  return require('../../jobs/updateBirthdays')
 }
 
 test('update job filters tombstones from birthdays, self-heal, and derived reminder writes without version changes', async () => {
-  const { runUpdateBirthdaysJob } = loadJobWithHarmlessDefaults()
+  const { runUpdateBirthdaysJob } = loadBirthdayJob()
   const queries = []
   const connection = {
     lifecycle: [],
@@ -49,6 +23,7 @@ test('update job filters tombstones from birthdays, self-heal, and derived remin
       if (/^SELECT \* FROM birthdays WHERE deleted_at IS NULL$/.test(sql)) {
         return [[{
           id: '11111111-1111-4111-8111-111111111111',
+          version: '4',
           lunarMonth: 8,
           lunarDay: 15,
           isLeapMonth: 0,
@@ -78,9 +53,171 @@ test('update job filters tombstones from birthdays, self-heal, and derived remin
   assert.match(heal, /b\.deleted_at IS NULL/)
   const birthdayUpdate = queries.find(sql => /^UPDATE birthdays SET nextSolarDate/.test(sql))
   assert.match(birthdayUpdate, /deleted_at IS NULL/)
-  assert.doesNotMatch(birthdayUpdate, /version|mobile_sync_changes|mobile_sync_operations/)
+  assert.match(birthdayUpdate, /version = \?/)
+  assert.match(birthdayUpdate, /nextSolarDate <=> \?/)
+  assert.doesNotMatch(birthdayUpdate, /SET nextSolarDate = \?, version|mobile_sync_changes|mobile_sync_operations/)
   const reminderQueries = queries.filter(sql => /email_reminders r JOIN birthdays b/.test(sql))
   assert.ok(reminderQueries.length >= 3)
   for (const sql of reminderQueries) assert.match(sql, /b\.deleted_at IS NULL/)
   assert.equal(queries.some(sql => /mobile_sync_changes|mobile_sync_operations/.test(sql)), false)
+})
+
+test('derived refresh advances only reminders still equal to the old birthday nextSolarDate', async () => {
+  const { runUpdateBirthdaysJob } = loadBirthdayJob()
+  const STANDARD_ID = '11111111-1111-4111-8111-111111111111'
+  const LEGACY_ID = '22222222-2222-4222-8222-222222222222'
+  const OLD_STANDARD = '2026-08-20 09:00:00'
+  const OLD_LEGACY_BIRTHDAY = '2026-08-19 09:00:00'
+  const LEGACY_EXACT = '2026-12-31 18:30:00'
+  const NEW_NEXT = '2027-09-15 09:00:00'
+  const reminders = new Map([
+    [STANDARD_ID, { remind_time: OLD_STANDARD, status: 1 }],
+    [LEGACY_ID, { remind_time: LEGACY_EXACT, status: 0 }],
+  ])
+  const birthdayRows = [
+    {
+      id: STANDARD_ID,
+      version: '3',
+      lunarMonth: 8,
+      lunarDay: 15,
+      isLeapMonth: 0,
+      remindTime: '09:00:00',
+      nextSolarDate: OLD_STANDARD,
+    },
+    {
+      id: LEGACY_ID,
+      version: '8',
+      lunarMonth: 8,
+      lunarDay: 15,
+      isLeapMonth: 0,
+      remindTime: '09:00:00',
+      nextSolarDate: OLD_LEGACY_BIRTHDAY,
+    },
+  ]
+  const connection = {
+    async beginTransaction() {},
+    async commit() {},
+    async rollback() {},
+    release() {},
+    async query(sqlInput, params = []) {
+      const sql = sqlInput.replace(/\s+/g, ' ').trim()
+      if (/^UPDATE email_reminders r JOIN birthdays b/.test(sql) && /remind_time > NOW/.test(sql)) {
+        return [{ affectedRows: 0 }]
+      }
+      if (/^SELECT \* FROM birthdays/.test(sql)) return [birthdayRows]
+      if (/^SELECT r\.id FROM email_reminders/.test(sql)) return [[]]
+      if (/^UPDATE birthdays SET nextSolarDate/.test(sql)) return [{ affectedRows: 1 }]
+      if (/^UPDATE email_reminders r JOIN birthdays b/.test(sql)) {
+        const [newNext, birthdayId, expectedOldNext] = params
+        const reminder = reminders.get(birthdayId)
+        const matched = reminder && reminder.remind_time === expectedOldNext
+        if (matched) reminders.set(birthdayId, { remind_time: newNext, status: 0 })
+        return [{ affectedRows: matched ? 1 : 0 }]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    },
+  }
+
+  await runUpdateBirthdaysJob({
+    poolRef: { getConnection: async () => connection },
+    calculateNextSolarDateFn: () => NEW_NEXT,
+    toMomentFn: () => ({ isSameOrBefore: () => true }),
+  })
+
+  assert.deepEqual(reminders.get(STANDARD_ID), { remind_time: NEW_NEXT, status: 0 })
+  assert.deepEqual(reminders.get(LEGACY_ID), { remind_time: LEGACY_EXACT, status: 0 })
+})
+
+test('stale birthday candidates cannot overwrite a concurrent versioned web or mobile update', async () => {
+  const { runUpdateBirthdaysJob } = loadBirthdayJob()
+  const BIRTHDAY_ID = '11111111-1111-4111-8111-111111111111'
+  let reminderWrites = 0
+  let optimisticParams
+  const stale = {
+    id: BIRTHDAY_ID,
+    version: '4',
+    lunarMonth: 8,
+    lunarDay: 15,
+    isLeapMonth: 0,
+    remindTime: '09:00:00',
+    nextSolarDate: '2026-08-20 09:00:00',
+  }
+  const connection = {
+    async beginTransaction() {},
+    async commit() {},
+    async rollback() {},
+    release() {},
+    async query(sqlInput, params = []) {
+      const sql = sqlInput.replace(/\s+/g, ' ').trim()
+      if (/^UPDATE email_reminders r JOIN birthdays b/.test(sql) && /remind_time > NOW/.test(sql)) {
+        return [{ affectedRows: 0 }]
+      }
+      if (/^SELECT \* FROM birthdays/.test(sql)) return [[stale]]
+      if (/^SELECT r\.id FROM email_reminders/.test(sql)) return [[]]
+      if (/^UPDATE birthdays SET nextSolarDate/.test(sql)) {
+        optimisticParams = params
+        return [{ affectedRows: 0 }]
+      }
+      if (/^UPDATE email_reminders/.test(sql)) {
+        reminderWrites += 1
+        return [{ affectedRows: 1 }]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    },
+  }
+
+  await runUpdateBirthdaysJob({
+    poolRef: { getConnection: async () => connection },
+    calculateNextSolarDateFn: () => '2027-09-15 09:00:00',
+    toMomentFn: () => ({ isSameOrBefore: () => true }),
+  })
+
+  assert.deepEqual(optimisticParams, [
+    '2027-09-15 09:00:00',
+    BIRTHDAY_ID,
+    '4',
+    8,
+    15,
+    0,
+    '09:00:00',
+    '2026-08-20 09:00:00',
+  ])
+  assert.equal(reminderWrites, 0)
+})
+
+test('update job destroys on rollback failure and logs only safe error metadata', async () => {
+  const { runUpdateBirthdaysJob } = loadBirthdayJob()
+  const lifecycle = []
+  const entries = []
+  const primary = new Error('primary raw payload user@example.com token')
+  primary.code = 'ER_PRIMARY_SECRET'
+  const connection = {
+    async beginTransaction() { lifecycle.push('begin') },
+    async query() { throw primary },
+    async rollback() {
+      lifecycle.push('rollback')
+      const error = new Error('rollback raw payload user@example.com token')
+      error.code = 'ER_ROLLBACK_SECRET'
+      throw error
+    },
+    destroy() { lifecycle.push('destroy') },
+    release() { lifecycle.push('release') },
+  }
+  const logger = {
+    log(...args) { entries.push(['log', ...args]) },
+    warn(...args) { entries.push(['warn', ...args]) },
+    error(...args) { entries.push(['error', ...args]) },
+  }
+
+  await runUpdateBirthdaysJob({
+    poolRef: { getConnection: async () => connection },
+    logger,
+  })
+
+  assert.deepEqual(lifecycle, ['begin', 'rollback', 'destroy'])
+  const logged = JSON.stringify(entries)
+  assert.match(logged, /"name":"Error"/)
+  assert.match(logged, /"code":"ER_PRIMARY_SECRET"/)
+  assert.match(logged, /"code":"ER_ROLLBACK_SECRET"/)
+  assert.doesNotMatch(logged, /raw payload|user@example|message|email|token/)
 })

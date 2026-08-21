@@ -1,5 +1,3 @@
-console.log('✅ Loaded updateBirthdays job')
-
 const schedule = require('node-schedule')
 const { pool } = require('../utils/db')
 const { calculateNextSolarDate, toMoment, TZ } = require('../utils/helpers')
@@ -10,12 +8,12 @@ function sanitizedError(error) {
   return details
 }
 
-async function rollbackAndDispose(connection, primaryError) {
+async function rollbackAndDispose(connection, primaryError, logger) {
   try {
     await connection.rollback()
     return false
   } catch (rollbackError) {
-    console.error('回滚失败:', sanitizedError(rollbackError))
+    logger.error('回滚失败:', sanitizedError(rollbackError))
     try {
       Object.defineProperty(primaryError, 'rollbackFailure', {
         enumerable: false,
@@ -37,8 +35,9 @@ async function runUpdateBirthdaysJob({
   poolRef = pool,
   calculateNextSolarDateFn = calculateNextSolarDate,
   toMomentFn = toMoment,
+  logger = console,
 } = {}) {
-  console.log('更新过期生日提醒')
+  logger.log('更新过期生日提醒')
   let connection
   let destroyed = false
   try {
@@ -54,7 +53,7 @@ async function runUpdateBirthdaysJob({
           AND b.deleted_at IS NULL`,
     )
     if (healed.affectedRows) {
-      console.log(`[heal] 重新置为待发的提醒条数: ${healed.affectedRows}`)
+      logger.log(`[heal] 重新置为待发的提醒条数: ${healed.affectedRows}`)
     }
 
     const [birthdays] = await connection.query(
@@ -81,7 +80,7 @@ async function runUpdateBirthdaysJob({
           [item.id],
         )
         if (pending.length) {
-          console.log(`birthday ${item.id} 有待发提醒，本次跳过推进`)
+          logger.log(`birthday ${item.id} 有待发提醒，本次跳过推进`)
           continue
         }
 
@@ -92,41 +91,56 @@ async function runUpdateBirthdaysJob({
           remindTime: item.remindTime,
         })
 
-        await connection.query(
-          'UPDATE birthdays SET nextSolarDate = ? WHERE id = ? AND deleted_at IS NULL',
-          [newNext, item.id],
+        const [birthdayUpdate] = await connection.query(
+          `UPDATE birthdays
+              SET nextSolarDate = ?
+            WHERE id = ?
+              AND version = ?
+              AND lunarMonth = ?
+              AND lunarDay = ?
+              AND isLeapMonth = ?
+              AND (remindTime <=> ?)
+              AND (nextSolarDate <=> ?)
+              AND deleted_at IS NULL`,
+          [
+            newNext,
+            item.id,
+            String(item.version),
+            item.lunarMonth,
+            item.lunarDay,
+            item.isLeapMonth,
+            item.remindTime,
+            item.nextSolarDate,
+          ],
         )
-        console.log(`birthday ${item.id} → ${newNext}`)
+        if (!birthdayUpdate.affectedRows) {
+          logger.log(`birthday ${item.id} 已并发变更，本次跳过推进`)
+          continue
+        }
+        logger.log(`birthday ${item.id} → ${newNext}`)
 
-        const [reminders] = await connection.query(
-          `SELECT r.id
-             FROM email_reminders r
-             JOIN birthdays b ON b.id = r.birthday_id
+        const [reminderUpdate] = await connection.query(
+          `UPDATE email_reminders r
+           JOIN birthdays b ON b.id = r.birthday_id
+              SET r.remind_time = ?, r.status = 0
             WHERE r.birthday_id = ?
+              AND (r.remind_time <=> ?)
               AND b.deleted_at IS NULL`,
-          [item.id],
+          [newNext, item.id, item.nextSolarDate],
         )
-        if (reminders.length) {
-          await connection.query(
-            `UPDATE email_reminders r
-             JOIN birthdays b ON b.id = r.birthday_id
-                SET r.remind_time = ?, r.status = 0
-              WHERE r.birthday_id = ?
-                AND b.deleted_at IS NULL`,
-            [newNext, item.id],
-          )
-          console.log(`email_reminder for birthday ${item.id} 重置提醒 → ${newNext}`)
+        if (reminderUpdate.affectedRows) {
+          logger.log(`email_reminder for birthday ${item.id} 重置提醒 → ${newNext}`)
         }
       } catch (error) {
-        console.error('计算下一次提醒日期失败:', sanitizedError(error))
+        logger.error('计算下一次提醒日期失败:', sanitizedError(error))
       }
     }
 
     await connection.commit()
-    console.log('✅ 更新完成')
+    logger.log('✅ 更新完成')
   } catch (error) {
-    if (connection) destroyed = await rollbackAndDispose(connection, error)
-    console.error('更新失败:', sanitizedError(error))
+    if (connection) destroyed = await rollbackAndDispose(connection, error, logger)
+    logger.error('更新失败:', sanitizedError(error))
   } finally {
     if (connection && !destroyed) connection.release()
   }
@@ -137,15 +151,15 @@ function scheduleUpdateBirthdaysJob({
   poolRef = pool,
   calculateNextSolarDateFn = calculateNextSolarDate,
   toMomentFn = toMoment,
+  logger = console,
 } = {}) {
   return scheduleRef.scheduleJob({ rule: '0 0 * * *', tz: TZ }, () => runUpdateBirthdaysJob({
     poolRef,
     calculateNextSolarDateFn,
     toMomentFn,
+    logger,
   }))
 }
-
-scheduleUpdateBirthdaysJob()
 
 module.exports = {
   runUpdateBirthdaysJob,

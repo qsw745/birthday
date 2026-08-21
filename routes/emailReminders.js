@@ -3,7 +3,6 @@ const schedule = require('node-schedule')
 const { query, pool, formatDate } = require('../utils/db')
 const { generateUUID } = require('../utils/helpers')
 const { requireAuth } = require('../utils/auth')
-const transporter = require('../utils/emailConfig')
 const { buildBirthdayEmailHtml } = require('../utils/emailTemplate')
 const {
   applyWebDelete,
@@ -18,11 +17,12 @@ function sanitizedError(error) {
   return details
 }
 
-async function rollbackAndDispose(connection, primaryError) {
+async function rollbackAndDispose(connection, primaryError, logger) {
   try {
     await connection.rollback()
     return false
   } catch (rollbackError) {
+    logger.error('回滚失败:', sanitizedError(rollbackError))
     try {
       Object.defineProperty(primaryError, 'rollbackFailure', {
         enumerable: false,
@@ -40,7 +40,7 @@ async function rollbackAndDispose(connection, primaryError) {
   }
 }
 
-async function inTransaction(poolRef, work) {
+async function inTransaction(poolRef, work, logger) {
   const connection = await poolRef.getConnection()
   let destroyed = false
   try {
@@ -49,7 +49,7 @@ async function inTransaction(poolRef, work) {
     await connection.commit()
     return result
   } catch (error) {
-    destroyed = await rollbackAndDispose(connection, error)
+    destroyed = await rollbackAndDispose(connection, error, logger)
     throw error
   } finally {
     if (!destroyed) connection.release()
@@ -62,32 +62,26 @@ function safeDetails(error, fallback = '内部错误') {
   return fallback
 }
 
-function createEmailRemindersRouter({
-  queryFn = query,
-  poolRef = pool,
-  formatDateFn = formatDate,
-  generateUUIDFn = generateUUID,
-  requireAuthMiddleware = requireAuth,
-  scheduleRef = schedule,
-  transporterRef = transporter,
-  buildBirthdayEmailHtmlFn = buildBirthdayEmailHtml,
-  applyWebDeleteFn = applyWebDelete,
-  applyWebReminderUpsertFn = applyWebReminderUpsert,
-  now = () => new Date(),
-  startSchedulers = true,
-} = {}) {
-  const router = express.Router()
-  router.use(requireAuthMiddleware)
-
-  async function sendReminderEmail(reminder) {
+function createReminderRuntime({
+  queryFn,
+  formatDateFn,
+  scheduleRef,
+  transporterRef,
+  buildBirthdayEmailHtmlFn,
+  now,
+  logger,
+}) {
+  async function sendReminderEmail(reminder, expectedRemindTime = reminder.remind_time) {
     const claim = await queryFn(
       `UPDATE email_reminders r
        ${ACTIVE_REMINDER_JOIN}
           SET r.status = 1
         WHERE r.id = ?
+          AND r.remind_time = ?
+          AND r.remind_time <= NOW()
           AND r.status = 0
           AND b.deleted_at IS NULL`,
-      [reminder.id],
+      [reminder.id, expectedRemindTime],
     )
     if (!claim.affectedRows) return
 
@@ -101,43 +95,146 @@ function createEmailRemindersRouter({
 
     try {
       await transporterRef.sendMail(mailOptions)
-      console.log('[email] sent & marked delivered:', reminder.id)
+      logger.log('[email] sent & marked delivered:', reminder.id)
     } catch (error) {
-      console.error('[email] send failed:', reminder.id, sanitizedError(error))
+      logger.error('[email] send failed:', reminder.id, sanitizedError(error))
       try {
         await queryFn(
           `UPDATE email_reminders r
            ${ACTIVE_REMINDER_JOIN}
               SET r.status = 0
             WHERE r.id = ?
+              AND r.remind_time = ?
+              AND r.status = 1
               AND b.deleted_at IS NULL`,
-          [reminder.id],
+          [reminder.id, expectedRemindTime],
         )
       } catch (resetError) {
-        console.error('[email] reset status failed:', reminder.id, sanitizedError(resetError))
+        logger.error('[email] reset status failed:', reminder.id, sanitizedError(resetError))
       }
     }
   }
 
-  function registerOneTimeJob(id, runAt) {
-    scheduleRef.scheduleJob(runAt, async () => {
+  function registerOneTimeJob(id, runAt, expectedRemindTime) {
+    return scheduleRef.scheduleJob(runAt, async () => {
       try {
         const rows = await queryFn(
           `SELECT r.*
              FROM email_reminders r
              ${ACTIVE_REMINDER_JOIN}
             WHERE r.id = ?
+              AND r.remind_time = ?
+              AND r.remind_time <= NOW()
+              AND r.status = 0
               AND b.deleted_at IS NULL`,
-          [id],
+          [id, expectedRemindTime],
         )
         const row = rows[0]
-        if (!row || row.status === 1) return
-        await sendReminderEmail(row)
+        if (!row) return
+        await sendReminderEmail(row, expectedRemindTime)
       } catch (error) {
-        console.error('[schedule] reminder callback failed:', id, sanitizedError(error))
+        logger.error('[schedule] reminder callback failed:', id, sanitizedError(error))
       }
     })
   }
+
+  async function runDueReminderPoll() {
+    try {
+      const reminders = await queryFn(
+        `SELECT r.*
+           FROM email_reminders r
+           ${ACTIVE_REMINDER_JOIN}
+          WHERE r.status = 0
+            AND r.remind_time <= NOW()
+            AND b.deleted_at IS NULL`,
+      )
+      for (const reminder of reminders) {
+        await sendReminderEmail(reminder, reminder.remind_time)
+      }
+    } catch (error) {
+      logger.error('[cron] batch send failed:', sanitizedError(error))
+    }
+  }
+
+  async function reschedulePendingReminders() {
+    try {
+      const nowStr = formatDateFn(now())
+      const reminders = await queryFn(
+        `SELECT r.*
+           FROM email_reminders r
+           ${ACTIVE_REMINDER_JOIN}
+          WHERE r.status = 0
+            AND r.remind_time > ?
+            AND b.deleted_at IS NULL`,
+        [nowStr],
+      )
+
+      for (const reminder of reminders) {
+        const runAt = new Date(reminder.remind_time)
+        if (Number.isNaN(runAt.getTime())) {
+          logger.warn('[reschedule] invalid remind_time, skip:', reminder.id, reminder.remind_time)
+          continue
+        }
+        registerOneTimeJob(reminder.id, runAt, reminder.remind_time)
+        logger.log('[reschedule] job restored for', reminder.id, runAt.toISOString())
+      }
+    } catch (error) {
+      logger.error('[reschedule] failed:', sanitizedError(error))
+    }
+  }
+
+  return {
+    registerOneTimeJob,
+    reschedulePendingReminders,
+    runDueReminderPoll,
+  }
+}
+
+function runtimeOptions({
+  queryFn = query,
+  formatDateFn = formatDate,
+  scheduleRef = schedule,
+  transporterRef,
+  buildBirthdayEmailHtmlFn = buildBirthdayEmailHtml,
+  now = () => new Date(),
+  logger = console,
+} = {}) {
+  return {
+    queryFn,
+    formatDateFn,
+    scheduleRef,
+    transporterRef: transporterRef || require('../utils/emailConfig'),
+    buildBirthdayEmailHtmlFn,
+    now,
+    logger,
+  }
+}
+
+function createEmailRemindersRouter({
+  queryFn = query,
+  poolRef = pool,
+  formatDateFn = formatDate,
+  generateUUIDFn = generateUUID,
+  requireAuthMiddleware = requireAuth,
+  scheduleRef = schedule,
+  transporterRef,
+  buildBirthdayEmailHtmlFn = buildBirthdayEmailHtml,
+  applyWebDeleteFn = applyWebDelete,
+  applyWebReminderUpsertFn = applyWebReminderUpsert,
+  now = () => new Date(),
+  logger = console,
+} = {}) {
+  const router = express.Router()
+  const runtime = createReminderRuntime(runtimeOptions({
+    queryFn,
+    formatDateFn,
+    scheduleRef,
+    transporterRef,
+    buildBirthdayEmailHtmlFn,
+    now,
+    logger,
+  }))
+  router.use(requireAuthMiddleware)
 
   router.post('/', async (req, res) => {
     const { name, email, remindTime, message, birthdayId } = req.body
@@ -158,13 +255,14 @@ function createEmailRemindersRouter({
           remindTime: scheduleTimeStr,
           message,
         },
-      }))
+      }), logger)
 
       if (remindAt.getTime() > now().getTime()) {
-        registerOneTimeJob(record.emailReminderId || id, remindAt)
-        console.log('[schedule] job registered for', record.emailReminderId || id, remindAt.toISOString())
+        const reminderId = record.emailReminderId || id
+        runtime.registerOneTimeJob(reminderId, remindAt, scheduleTimeStr)
+        logger.log('[schedule] job registered for', reminderId, remindAt.toISOString())
       } else {
-        console.log('[schedule] remindTime is in the past; will be handled by cron worker.')
+        logger.log('[schedule] remindTime is in the past; will be handled by cron worker.')
       }
       return res.json({
         success: true,
@@ -172,7 +270,7 @@ function createEmailRemindersRouter({
         scheduledTime: scheduleTimeStr,
       })
     } catch (error) {
-      console.error('[create reminder] failed', sanitizedError(error))
+      logger.error('[create reminder] failed', sanitizedError(error))
       return res.status(500).json({ error: '数据库错误', details: safeDetails(error) })
     }
   })
@@ -191,67 +289,28 @@ function createEmailRemindersRouter({
           throw error
         }
         await applyWebDeleteFn(connection, { id: reminder.birthday_id })
-      })
+      }, logger)
       return res.json({ success: true, message: '删除成功' })
     } catch (error) {
-      console.error('删除操作失败:', sanitizedError(error))
+      logger.error('删除操作失败:', sanitizedError(error))
       return res.status(500).json({ error: '删除失败', details: safeDetails(error) })
     }
   })
 
-  async function runDueReminderPoll() {
-    try {
-      const reminders = await queryFn(
-        `SELECT r.*
-           FROM email_reminders r
-           ${ACTIVE_REMINDER_JOIN}
-          WHERE r.status = 0
-            AND r.remind_time <= NOW()
-            AND b.deleted_at IS NULL`,
-      )
-      for (const reminder of reminders) await sendReminderEmail(reminder)
-    } catch (error) {
-      console.error('[cron] batch send failed:', sanitizedError(error))
-    }
-  }
-
-  async function reschedulePendingReminders() {
-    try {
-      const nowStr = formatDateFn(now())
-      const reminders = await queryFn(
-        `SELECT r.*
-           FROM email_reminders r
-           ${ACTIVE_REMINDER_JOIN}
-          WHERE r.status = 0
-            AND r.remind_time > ?
-            AND b.deleted_at IS NULL`,
-        [nowStr],
-      )
-
-      for (const reminder of reminders) {
-        const runAt = new Date(reminder.remind_time)
-        if (Number.isNaN(runAt.getTime())) {
-          console.warn('[reschedule] invalid remind_time, skip:', reminder.id, reminder.remind_time)
-          continue
-        }
-        registerOneTimeJob(reminder.id, runAt)
-        console.log('[reschedule] job restored for', reminder.id, runAt.toISOString())
-      }
-    } catch (error) {
-      console.error('[reschedule] failed:', sanitizedError(error))
-    }
-  }
-
-  if (startSchedulers) {
-    scheduleRef.scheduleJob('*/1 * * * *', runDueReminderPoll)
-    router.schedulerReady = reschedulePendingReminders()
-  } else {
-    router.schedulerReady = Promise.resolve()
-  }
-
   return router
 }
 
-const router = createEmailRemindersRouter()
-module.exports = router
-module.exports.createEmailRemindersRouter = createEmailRemindersRouter
+function registerEmailReminderSchedulers(options = {}) {
+  const resolved = runtimeOptions(options)
+  const runtime = createReminderRuntime(resolved)
+  const pollJob = resolved.scheduleRef.scheduleJob('*/1 * * * *', runtime.runDueReminderPoll)
+  return {
+    pollJob,
+    ready: runtime.reschedulePendingReminders(),
+  }
+}
+
+module.exports = {
+  createEmailRemindersRouter,
+  registerEmailReminderSchedulers,
+}

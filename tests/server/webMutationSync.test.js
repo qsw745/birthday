@@ -47,42 +47,22 @@ function webPayload(overrides = {}) {
   }
 }
 
+function recordingLogger() {
+  const entries = []
+  return {
+    entries,
+    log(...args) { entries.push(['log', ...args]) },
+    warn(...args) { entries.push(['warn', ...args]) },
+    error(...args) { entries.push(['error', ...args]) },
+  }
+}
+
+function loadEmailReminderModule() {
+  return require('../../routes/emailReminders')
+}
+
 function loadEmailReminderFactory() {
-  const schedulePath = require.resolve('node-schedule')
-  const dbPath = require.resolve('../../utils/db')
-  const emailPath = require.resolve('../../utils/emailConfig')
-  const routePath = require.resolve('../../routes/emailReminders')
-  const prior = new Map([
-    [schedulePath, require.cache[schedulePath]],
-    [dbPath, require.cache[dbPath]],
-    [emailPath, require.cache[emailPath]],
-    [routePath, require.cache[routePath]],
-  ])
-  const harmlessSchedule = { scheduleJob() { return { cancel() {} } } }
-  require.cache[schedulePath] = { id: schedulePath, filename: schedulePath, loaded: true, exports: harmlessSchedule }
-  require.cache[dbPath] = {
-    id: dbPath,
-    filename: dbPath,
-    loaded: true,
-    exports: {
-      query: async () => [],
-      pool: { getConnection: async () => { throw new Error('unexpected default pool use') } },
-      formatDate: () => '2026-08-22 12:00:00',
-    },
-  }
-  require.cache[emailPath] = {
-    id: emailPath,
-    filename: emailPath,
-    loaded: true,
-    exports: { sendMail: async () => {} },
-  }
-  delete require.cache[routePath]
-  const loaded = require('../../routes/emailReminders')
-  for (const [modulePath, cached] of prior) {
-    if (cached) require.cache[modulePath] = cached
-    else delete require.cache[modulePath]
-  }
-  return loaded.createEmailRemindersRouter
+  return loadEmailReminderModule().createEmailRemindersRouter
 }
 
 test('applyWebUpsert updates under the caller transaction, increments version, and appends exactly one change', async () => {
@@ -234,11 +214,13 @@ test('birthday route destroys a tainted connection on rollback failure and does 
     throw new Error(`rollback ${secret}`)
   }
   const pool = { getConnection: async () => connection }
+  const logger = recordingLogger()
   const router = createBirthdaysRouter({
     poolRef: pool,
     queryFn: async () => [],
     requireAuthMiddleware: auth,
     now: () => FIXED_NOW,
+    logger,
   })
 
   const response = await request(appAt('/api/birthdays', router))
@@ -250,6 +232,9 @@ test('birthday route destroys a tainted connection on rollback failure and does 
   assert.deepEqual(response.body, { error: '更新生日记录失败' })
   assert.doesNotMatch(JSON.stringify(response.body), /smtp-secret|raw payload/)
   assert.deepEqual(connection.lifecycle, ['begin', 'rollback', 'destroy'])
+  const logged = JSON.stringify(logger.entries)
+  assert.match(logged, /"name":"Error"/)
+  assert.doesNotMatch(logged, /smtp-secret|raw payload|message|email|token/)
 })
 
 test('birthday PUT keeps the web email-required contract instead of treating an empty email as disable', async () => {
@@ -353,6 +338,47 @@ test('legacy reminder POST rejects missing birthdays without creating an orphan'
   assert.deepEqual(pool.database.connections[0].lifecycle, ['begin', 'rollback', 'release'])
 })
 
+test('legacy reminder rollback failure destroys the connection and logs only safe metadata', async () => {
+  const createEmailRemindersRouter = loadEmailReminderFactory()
+  const database = new FakeDatabase()
+  const connection = database.createConnection()
+  connection.rollback = async function rollback() {
+    this.lifecycle.push('rollback')
+    const error = new Error('rollback leaked@example.com token raw payload')
+    error.code = 'ER_ROLLBACK_SECRET'
+    throw error
+  }
+  const logger = recordingLogger()
+  const router = createEmailRemindersRouter({
+    poolRef: { getConnection: async () => connection },
+    queryFn: async () => [],
+    scheduleRef: { scheduleJob() { return {} } },
+    transporterRef: { sendMail: async () => {} },
+    requireAuthMiddleware: auth,
+    generateUUIDFn: () => REMINDER_ID,
+    formatDateFn: () => '2027-01-02 03:04:05',
+    logger,
+  })
+
+  const response = await request(appAt('/api/email-reminders', router))
+    .post('/api/email-reminders')
+    .set('x-test-auth', 'yes')
+    .send({
+      birthdayId: DEFAULT_BIRTHDAY_ID,
+      name: 'raw payload',
+      email: 'leaked@example.com',
+      remindTime: '2027-01-02T03:04:05+08:00',
+      message: 'token',
+    })
+
+  assert.equal(response.status, 500)
+  assert.deepEqual(connection.lifecycle, ['begin', 'rollback', 'destroy'])
+  const logged = JSON.stringify(logger.entries)
+  assert.match(logged, /"name":"Error"/)
+  assert.match(logged, /"code":"ER_ROLLBACK_SECRET"/)
+  assert.doesNotMatch(logged, /rollback leaked|leaked@example|raw payload|message|email|token/)
+})
+
 test('legacy reminder DELETE resolves birthday_id and uses the shared tombstone path', async () => {
   const createEmailRemindersRouter = loadEmailReminderFactory()
   const database = new FakeDatabase({
@@ -408,7 +434,7 @@ test('legacy reminder DELETE does not silently succeed for a missing reminder', 
 })
 
 test('all send-capable reminder reads and the atomic claim require an active birthday and select r.*', async () => {
-  const createEmailRemindersRouter = loadEmailReminderFactory()
+  const { registerEmailReminderSchedulers } = loadEmailReminderModule()
   const queryLog = []
   const recurringJobs = []
   const datedJobs = []
@@ -435,16 +461,13 @@ test('all send-capable reminder reads and the atomic claim require an active bir
     },
   }
   const sent = []
-  const router = createEmailRemindersRouter({
-    poolRef: { getConnection: async () => assert.fail('no route transaction expected') },
+  const schedulers = registerEmailReminderSchedulers({
     queryFn,
     scheduleRef,
     transporterRef: { sendMail: async options => sent.push(options) },
-    requireAuthMiddleware: auth,
-    startSchedulers: true,
     formatDateFn: () => '2026-08-22 12:00:00',
   })
-  await router.schedulerReady
+  await schedulers.ready
   await recurringJobs[0]()
   for (const callback of datedJobs) await callback()
 
@@ -462,7 +485,7 @@ test('all send-capable reminder reads and the atomic claim require an active bir
 })
 
 test('a tombstone committed before the atomic claim makes claim=0 and sends no email', async () => {
-  const createEmailRemindersRouter = loadEmailReminderFactory()
+  const { registerEmailReminderSchedulers } = loadEmailReminderModule()
   const recurringJobs = []
   const stale = reminderRow({ remind_time: '2026-08-22 11:00:00' })
   const queryLog = []
@@ -475,8 +498,7 @@ test('a tombstone committed before the atomic claim makes claim=0 and sends no e
     return []
   }
   const sent = []
-  const router = createEmailRemindersRouter({
-    poolRef: {},
+  const schedulers = registerEmailReminderSchedulers({
     queryFn,
     scheduleRef: {
       scheduleJob(spec, callback) {
@@ -485,13 +507,134 @@ test('a tombstone committed before the atomic claim makes claim=0 and sends no e
       },
     },
     transporterRef: { sendMail: async options => sent.push(options) },
-    requireAuthMiddleware: auth,
-    startSchedulers: true,
     formatDateFn: () => '2026-08-22 12:00:00',
   })
-  await router.schedulerReady
+  await schedulers.ready
   await recurringJobs[0]()
 
   assert.equal(queryLog.some(sql => /^UPDATE email_reminders r JOIN birthdays b/.test(sql)), true)
   assert.equal(sent.length, 0)
+})
+
+test('an old T1 callback neither reads nor claims a reminder rescheduled to T2', async () => {
+  const { registerEmailReminderSchedulers } = loadEmailReminderModule()
+  const T1 = '2026-08-22 11:00:00'
+  const T2 = '2026-08-23 11:00:00'
+  let current = reminderRow({ remind_time: T1 })
+  const datedJobs = []
+  const claims = []
+  const queryFn = async (sqlInput, params = []) => {
+    const sql = sqlInput.replace(/\s+/g, ' ').trim()
+    if (/r\.status = 0 AND r\.remind_time > \?/.test(sql)) return [{ ...current }]
+    if (/^SELECT r\.\*/.test(sql) && /WHERE r\.id = \?/.test(sql)) {
+      if (params.length >= 2 && params[1] !== current.remind_time) return []
+      return [{ ...current }]
+    }
+    if (/SET r\.status = 1/.test(sql)) {
+      claims.push(params)
+      return { affectedRows: params.length < 2 || params[1] === current.remind_time ? 1 : 0 }
+    }
+    return []
+  }
+  const sent = []
+  const schedulers = registerEmailReminderSchedulers({
+    queryFn,
+    scheduleRef: {
+      scheduleJob(spec, callback) {
+        if (typeof spec !== 'string') datedJobs.push(callback)
+        return {}
+      },
+    },
+    transporterRef: { sendMail: async options => sent.push(options) },
+    formatDateFn: () => '2026-08-22 10:00:00',
+  })
+  await schedulers.ready
+  current = { ...current, remind_time: T2 }
+  await datedJobs[0]()
+
+  assert.deepEqual(claims, [])
+  assert.deepEqual(sent, [])
+})
+
+test('a callback-to-claim reschedule race makes the expected-time claim fail without sending', async () => {
+  const { registerEmailReminderSchedulers } = loadEmailReminderModule()
+  const T1 = '2026-08-22 11:00:00'
+  const T2 = '2026-08-23 11:00:00'
+  let current = reminderRow({ remind_time: T1 })
+  const datedJobs = []
+  const claims = []
+  const queryFn = async (sqlInput, params = []) => {
+    const sql = sqlInput.replace(/\s+/g, ' ').trim()
+    if (/r\.status = 0 AND r\.remind_time > \?/.test(sql)) return [{ ...current }]
+    if (/^SELECT r\.\*/.test(sql) && /WHERE r\.id = \?/.test(sql)) {
+      const selected = { ...current }
+      current = { ...current, remind_time: T2 }
+      return [selected]
+    }
+    if (/SET r\.status = 1/.test(sql)) {
+      claims.push(params)
+      return { affectedRows: params[1] === current.remind_time ? 1 : 0 }
+    }
+    return []
+  }
+  const sent = []
+  const schedulers = registerEmailReminderSchedulers({
+    queryFn,
+    scheduleRef: {
+      scheduleJob(spec, callback) {
+        if (typeof spec !== 'string') datedJobs.push(callback)
+        return {}
+      },
+    },
+    transporterRef: { sendMail: async options => sent.push(options) },
+    formatDateFn: () => '2026-08-22 10:00:00',
+  })
+  await schedulers.ready
+  await datedJobs[0]()
+
+  assert.deepEqual(claims, [[REMINDER_ID, T1]])
+  assert.deepEqual(sent, [])
+})
+
+test('SMTP failure reset cannot reset a newly rescheduled expected time', async () => {
+  const { registerEmailReminderSchedulers } = loadEmailReminderModule()
+  const T1 = '2026-08-22 11:00:00'
+  const T2 = '2026-08-23 11:00:00'
+  let current = reminderRow({ remind_time: T1 })
+  const recurringJobs = []
+  const resets = []
+  const queryFn = async (sqlInput, params = []) => {
+    const sql = sqlInput.replace(/\s+/g, ' ').trim()
+    if (/r\.status = 0 AND r\.remind_time > \?/.test(sql)) return []
+    if (/r\.status = 0 AND r\.remind_time <= NOW\(\)/.test(sql)) return [{ ...current }]
+    if (/SET r\.status = 1/.test(sql)) return { affectedRows: 1 }
+    if (/SET r\.status = 0/.test(sql)) {
+      resets.push(params)
+      if (params[1] === current.remind_time) current = { ...current, status: 0 }
+      return { affectedRows: params[1] === current.remind_time ? 1 : 0 }
+    }
+    return []
+  }
+  const schedulers = registerEmailReminderSchedulers({
+    queryFn,
+    scheduleRef: {
+      scheduleJob(spec, callback) {
+        if (typeof spec === 'string') recurringJobs.push(callback)
+        return {}
+      },
+    },
+    transporterRef: {
+      async sendMail() {
+        current = { ...current, remind_time: T2, status: 0 }
+        throw new Error('smtp secret payload@example.com token')
+      },
+    },
+    formatDateFn: () => '2026-08-22 12:00:00',
+  })
+  await schedulers.ready
+  await recurringJobs[0]()
+
+  assert.deepEqual(resets, [[REMINDER_ID, T1]])
+  assert.equal(current.remind_time, T2)
+  assert.equal(current.status, 0)
 })

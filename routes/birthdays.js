@@ -20,11 +20,12 @@ function sanitizedError(error) {
   return details
 }
 
-async function rollbackAndDispose(connection, primaryError) {
+async function rollbackAndDispose(connection, primaryError, logger) {
   try {
     await connection.rollback()
     return false
   } catch (rollbackError) {
+    logger.error('回滚失败:', sanitizedError(rollbackError))
     try {
       Object.defineProperty(primaryError, 'rollbackFailure', {
         enumerable: false,
@@ -42,7 +43,7 @@ async function rollbackAndDispose(connection, primaryError) {
   }
 }
 
-async function inTransaction(poolRef, work) {
+async function inTransaction(poolRef, work, logger) {
   const connection = await poolRef.getConnection()
   let destroyed = false
   try {
@@ -51,7 +52,7 @@ async function inTransaction(poolRef, work) {
     await connection.commit()
     return result
   } catch (error) {
-    destroyed = await rollbackAndDispose(connection, error)
+    destroyed = await rollbackAndDispose(connection, error, logger)
     throw error
   } finally {
     if (!destroyed) connection.release()
@@ -119,6 +120,7 @@ function createBirthdaysRouter({
   applyWebUpsertFn = applyWebUpsert,
   applyWebDeleteFn = applyWebDelete,
   now = () => new Date(),
+  logger = console,
 } = {}) {
   const router = express.Router()
   router.use(requireAuthMiddleware)
@@ -150,7 +152,7 @@ function createBirthdaysRouter({
       })
       return res.json(formatted)
     } catch (error) {
-      console.error('读取生日记录失败:', sanitizedError(error))
+      logger.error('读取生日记录失败:', sanitizedError(error))
       return res.status(500).json({ error: '加载生日记录失败' })
     }
   })
@@ -184,24 +186,28 @@ function createBirthdaysRouter({
           calculateNextSolarDateFn: () => nextSolarDate,
         },
         generateUUIDFn,
-      }))
+      }), logger)
       return res.json({
         success: true,
         birthday: birthdayResponse(record, formatDateForStorageFn),
         emailReminder: reminderResponse(record, formatDateForStorageFn, { includeId: true }),
       })
     } catch (error) {
-      console.error('数据库事务失败:', sanitizedError(error))
+      logger.error('数据库事务失败:', sanitizedError(error))
       return res.status(500).json({ error: '数据库插入失败', details: '内部错误' })
     }
   })
 
   router.delete('/:id', async (req, res) => {
     try {
-      await inTransaction(poolRef, connection => applyWebDeleteFn(connection, { id: req.params.id }))
+      await inTransaction(
+        poolRef,
+        connection => applyWebDeleteFn(connection, { id: req.params.id }),
+        logger,
+      )
       return res.json({ success: true, message: '删除成功' })
     } catch (error) {
-      console.error('删除操作失败:', sanitizedError(error))
+      logger.error('删除操作失败:', sanitizedError(error))
       return res.status(500).json({
         error: '删除失败',
         details: safeMutationDetails(error, '内部错误'),
@@ -235,14 +241,14 @@ function createBirthdaysRouter({
           calculateNextSolarDateFn: () => nextSolarDate,
         },
         generateUUIDFn,
-      }))
+      }), logger)
       return res.json({
         success: true,
         birthday: birthdayResponse(record, formatDateForStorageFn),
         emailReminder: reminderResponse(record, formatDateForStorageFn, { includeId: false }),
       })
     } catch (error) {
-      console.error('更新生日记录失败:', sanitizedError(error))
+      logger.error('更新生日记录失败:', sanitizedError(error))
       return res.status(500).json({ error: '更新生日记录失败' })
     }
   })
