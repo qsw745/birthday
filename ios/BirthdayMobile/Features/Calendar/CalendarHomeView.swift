@@ -6,12 +6,10 @@ import BirthdayCore
 struct CalendarHomeView: View {
   @Bindable var model: AppModel
   @Environment(\.timeZone) private var timeZone
+  @ScaledMetric(relativeTo: .caption) private var scaledBirthdayMarkerSize: CGFloat = 10
+  @ScaledMetric(relativeTo: .body) private var scaledDayRingSize: CGFloat = 36
 
   private let weekSymbols = ["一", "二", "三", "四", "五", "六", "日"]
-  private let columns = Array(
-    repeating: GridItem(.flexible(minimum: 44), spacing: 4),
-    count: 7
-  )
 
   private var calendar: Calendar {
     var calendar = Calendar(identifier: .gregorian)
@@ -29,22 +27,31 @@ struct CalendarHomeView: View {
   }
 
   var body: some View {
-    ScrollView {
-      VStack(spacing: 22) {
-        monthHeader
+    GeometryReader { proxy in
+      let layout = SevenColumnGridMetrics.make(containerWidth: proxy.size.width)
 
-        if model.isLoading || model.loadState == .idle {
-          loadingState
-        } else if let errorMessage = model.errorMessage {
-          errorState(message: errorMessage)
-        } else {
-          calendarSurface
-          selectedDaySection
+      ScrollView {
+        VStack(spacing: 22) {
+          monthHeader
+
+          if model.isLoading || model.loadState == .idle {
+            loadingState
+          } else if let errorMessage = model.errorMessage {
+            errorState(message: errorMessage)
+          } else {
+            calendarSurface(layout: layout)
+            selectedDaySection
+          }
         }
+        .padding(.horizontal, layout.pageHorizontalPadding)
+        .padding(.top, 12)
+        .padding(.bottom, 28)
       }
-      .padding(.horizontal, 16)
-      .padding(.top, 12)
-      .padding(.bottom, 28)
+      .contentMargins(
+        .bottom,
+        max(120, proxy.safeAreaInsets.bottom + 96),
+        for: .scrollContent
+      )
     }
     .background(ModernAirTheme.mist.ignoresSafeArea())
     .navigationTitle("岁时")
@@ -85,9 +92,11 @@ struct CalendarHomeView: View {
           .font(.system(.title2, design: .rounded, weight: .semibold))
           .foregroundStyle(ModernAirTheme.ink)
           .monospacedDigit()
-        Text(monthSubtitle)
-          .font(.caption)
-          .foregroundStyle(ModernAirTheme.secondaryInk)
+        if let monthSubtitle {
+          Text(monthSubtitle)
+            .font(.caption)
+            .foregroundStyle(ModernAirTheme.secondaryInk)
+        }
       }
       .accessibilityElement(children: .combine)
 
@@ -151,14 +160,26 @@ struct CalendarHomeView: View {
     .frame(maxWidth: .infinity, minHeight: 280)
   }
 
-  private var calendarSurface: some View {
-    VStack(spacing: 10) {
+  private func calendarSurface(layout: SevenColumnGridMetrics) -> some View {
+    let columns = Array(
+      repeating: GridItem(
+        .flexible(minimum: SevenColumnGridMetrics.minimumCellWidth),
+        spacing: layout.columnSpacing
+      ),
+      count: SevenColumnGridMetrics.columnCount
+    )
+
+    return VStack(spacing: 10) {
       LazyVGrid(columns: columns, spacing: 4) {
         ForEach(weekSymbols, id: \.self) { symbol in
           Text(symbol)
             .font(.caption.weight(.semibold))
             .foregroundStyle(ModernAirTheme.secondaryInk)
-            .frame(maxWidth: .infinity, minHeight: 28)
+            .frame(
+              minWidth: SevenColumnGridMetrics.minimumCellWidth,
+              maxWidth: .infinity,
+              minHeight: 28
+            )
             .accessibilityLabel("星期\(symbol)")
         }
       }
@@ -171,13 +192,16 @@ struct CalendarHomeView: View {
             dayButton(day)
           } else {
             Color.clear
-              .frame(minHeight: 52)
+              .frame(
+                minWidth: SevenColumnGridMetrics.minimumCellWidth,
+                minHeight: dayCellMinimumHeight
+              )
               .accessibilityHidden(true)
           }
         }
       }
     }
-    .padding(.horizontal, 12)
+    .padding(.horizontal, layout.cardHorizontalPadding)
     .padding(.vertical, 14)
     .modernAirSurface()
   }
@@ -203,7 +227,7 @@ struct CalendarHomeView: View {
                 )
               )
               .rotationEffect(.degrees(-72))
-              .frame(width: 36, height: 36)
+              .frame(width: dayRingSize, height: dayRingSize)
               .accessibilityHidden(true)
           }
 
@@ -216,19 +240,25 @@ struct CalendarHomeView: View {
               )
             )
             .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.65)
             .foregroundStyle(ModernAirTheme.ink)
         }
 
         if hasBirthday {
           Image(systemName: "gift.fill")
-            .font(.system(size: 8, weight: .semibold))
+            .font(.system(size: birthdayMarkerSize, weight: .semibold))
             .foregroundStyle(ModernAirTheme.tide)
             .accessibilityHidden(true)
         } else {
-          Color.clear.frame(height: 8)
+          Color.clear.frame(height: birthdayMarkerSize)
         }
       }
-      .frame(maxWidth: .infinity, minHeight: 52)
+      .frame(
+        minWidth: SevenColumnGridMetrics.minimumCellWidth,
+        maxWidth: .infinity,
+        minHeight: dayCellMinimumHeight
+      )
       .contentShape(Rectangle())
       .overlay {
         if isSelected {
@@ -255,35 +285,15 @@ struct CalendarHomeView: View {
             .monospacedDigit()
             .foregroundStyle(ModernAirTheme.ink)
           Spacer()
-          Text(records.isEmpty ? "无生日" : "\(records.count) 位")
-            .font(.caption.weight(.medium))
-            .foregroundStyle(ModernAirTheme.secondaryInk)
+          if !records.isEmpty {
+            Text("\(records.count) 位")
+              .font(.caption.weight(.medium))
+              .foregroundStyle(ModernAirTheme.secondaryInk)
+          }
         }
 
         if records.isEmpty {
-          VStack(spacing: 10) {
-            Image(systemName: model.isEmpty ? "gift" : "calendar.badge.checkmark")
-              .font(.title2)
-              .foregroundStyle(ModernAirTheme.dusk)
-            Text(model.isEmpty ? "还没有生日记录" : "这一天没有生日")
-              .font(.headline)
-              .foregroundStyle(ModernAirTheme.ink)
-            Text(model.isEmpty ? "点右上角的加号，添加第一个农历生日。" : "选择带礼物标记的日期查看生日。")
-              .font(.subheadline)
-              .multilineTextAlignment(.center)
-              .foregroundStyle(ModernAirTheme.secondaryInk)
-
-            if model.isEmpty {
-              Button("添加生日") {
-                model.isPresentingEditor = true
-              }
-              .buttonStyle(.bordered)
-              .tint(ModernAirTheme.tide)
-              .frame(minHeight: 44)
-            }
-          }
-          .frame(maxWidth: .infinity)
-          .padding(.vertical, 24)
+          selectedDayEmptyState
         } else {
           VStack(spacing: 0) {
             ForEach(Array(records.enumerated()), id: \.element.id) { index, record in
@@ -297,6 +307,39 @@ struct CalendarHomeView: View {
       }
       .padding(.horizontal, 4)
     }
+  }
+
+  private var selectedDayEmptyState: some View {
+    let monthIsEmpty = projection.daysWithBirthdays.isEmpty
+    let offersAddAction = model.isEmpty || monthIsEmpty
+
+    return VStack(spacing: 10) {
+      Image(
+        systemName: offersAddAction ? "gift" : "calendar.badge.checkmark"
+      )
+      .font(.title2)
+      .foregroundStyle(ModernAirTheme.dusk)
+
+      Text(emptyStateTitle(monthIsEmpty: monthIsEmpty))
+        .font(.headline)
+        .foregroundStyle(ModernAirTheme.ink)
+
+      Text(emptyStateDescription(monthIsEmpty: monthIsEmpty))
+        .font(.subheadline)
+        .multilineTextAlignment(.center)
+        .foregroundStyle(ModernAirTheme.secondaryInk)
+
+      if offersAddAction {
+        Button("添加生日") {
+          model.isPresentingEditor = true
+        }
+        .buttonStyle(.bordered)
+        .tint(ModernAirTheme.tide)
+        .frame(minHeight: 44)
+      }
+    }
+    .frame(maxWidth: .infinity)
+    .padding(.vertical, 24)
   }
 
   private func birthdayRow(_ record: BirthdayRecord) -> some View {
@@ -343,9 +386,47 @@ struct CalendarHomeView: View {
     return "\(components.year ?? 0) 年 \(components.month ?? 0) 月"
   }
 
-  private var monthSubtitle: String {
+  private var monthSubtitle: String? {
+    switch model.loadState {
+    case .idle, .loading:
+      return "正在读取本月生日"
+    case .failed:
+      return "本月生日读取失败"
+    case .loaded:
+      break
+    }
+
     let count = projection.recordsByDay.values.reduce(0) { $0 + $1.count }
-    return count == 0 ? "本月暂无生日" : "本月 \(count) 位生日"
+    return count == 0 ? nil : "本月 \(count) 位生日"
+  }
+
+  private var dayRingSize: CGFloat {
+    min(max(scaledDayRingSize, 36), 40)
+  }
+
+  private var birthdayMarkerSize: CGFloat {
+    min(max(scaledBirthdayMarkerSize, 10), 14)
+  }
+
+  private var dayCellMinimumHeight: CGFloat {
+    max(56, dayRingSize + birthdayMarkerSize + 2)
+  }
+
+  private func emptyStateTitle(monthIsEmpty: Bool) -> String {
+    if model.isEmpty {
+      return "还没有生日记录"
+    }
+    return monthIsEmpty ? "本月没有生日" : "这一天没有生日"
+  }
+
+  private func emptyStateDescription(monthIsEmpty: Bool) -> String {
+    if model.isEmpty {
+      return "添加第一个农历生日，开始使用月历提醒。"
+    }
+    if monthIsEmpty {
+      return "切换月份查看已有生日，或添加新的农历生日。"
+    }
+    return "选择带礼物标记的日期查看生日。"
   }
 
   private func selectedDayTitle(_ day: Int) -> String {

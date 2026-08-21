@@ -90,33 +90,7 @@ struct RootTabView: View {
     }
     .tint(ModernAirTheme.tide)
     .sheet(isPresented: $model.isPresentingEditor) {
-      BirthdayEditorPlaceholderView(model: model)
-    }
-  }
-}
-
-private struct BirthdayEditorPlaceholderView: View {
-  @Bindable var model: AppModel
-
-  var body: some View {
-    NavigationStack {
-      ContentUnavailableView {
-        Label("添加生日", systemImage: "gift")
-      } description: {
-        Text("新增生日表单将在下一步接入。")
-      }
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .background(ModernAirTheme.mist.ignoresSafeArea())
-      .navigationTitle("添加生日")
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        ToolbarItem(placement: .cancellationAction) {
-          Button("关闭") {
-            model.isPresentingEditor = false
-          }
-          .frame(minHeight: 44)
-        }
-      }
+      BirthdayEditorView(model: model)
     }
   }
 }

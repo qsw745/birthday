@@ -104,3 +104,11 @@ import Testing
 
   #expect(projection.monthStart == formatter.date(from: "2026-08-31T16:00:00Z")!)
 }
+
+@Test func keepsSevenCalendarColumnsAtLeastFortyFourPointsWideOnNarrowPhones() {
+  for containerWidth in [CGFloat(320), CGFloat(375)] {
+    let metrics = SevenColumnGridMetrics.make(containerWidth: containerWidth)
+
+    #expect(metrics.availableCellWidth >= 44)
+  }
+}
