@@ -29,6 +29,12 @@ enum BirthdayErrorMessage {
 @MainActor
 @Observable
 final class BirthdayEditorModel {
+  enum SaveOutcome: Equatable {
+    case saved(immediateReminder: OneShotNotificationResult?)
+    case requiresPassedReminderChoice
+    case failed
+  }
+
   enum SectionLocation: Hashable {
     case basicInformation
     case reminder
@@ -63,13 +69,20 @@ final class BirthdayEditorModel {
   private(set) var errorField: FieldLocation?
   private(set) var isSaving = false
   private(set) var isDeleting = false
+  private(set) var hasSaved = false
 
   let recordID: UUID?
 
   private let store: BirthdayStore
+  private let oneShotNotificationScheduler: any OneShotNotificationScheduling
 
-  init(store: BirthdayStore, record: BirthdayRecord?) {
+  init(
+    store: BirthdayStore,
+    record: BirthdayRecord?,
+    oneShotNotificationScheduler: any OneShotNotificationScheduling
+  ) {
     self.store = store
+    self.oneShotNotificationScheduler = oneShotNotificationScheduler
     recordID = record?.id
     draft =
       record.map(BirthdayDraft.init(record:))
@@ -81,23 +94,46 @@ final class BirthdayEditorModel {
   }
 
   var isBusy: Bool {
-    isSaving || isDeleting
+    isSaving || isDeleting || hasSaved
   }
 
-  func save(now: Date = .now, timeZone: TimeZone = .current) async -> Bool {
-    guard !isBusy else { return false }
+  func save(
+    resolution: PassedSameDayReminderResolution? = nil,
+    now: Date = .now,
+    timeZone: TimeZone = .current
+  ) async -> SaveOutcome {
+    guard !isBusy else { return .failed }
     isSaving = true
     defer { isSaving = false }
 
     do {
-      _ = try await store.save(draft, id: recordID, now: now, timeZone: timeZone)
+      let decision = try SameDayReminderDecision.evaluate(
+        draft: draft,
+        now: now,
+        timeZone: timeZone
+      )
+      if decision == .chooseImmediateOrNextYear, resolution == nil {
+        return .requiresPassedReminderChoice
+      }
+
+      let saved = try await store.save(draft, id: recordID, now: now, timeZone: timeZone)
       errorMessage = nil
       errorField = nil
-      return true
+      hasSaved = true
+
+      guard resolution == .remindNow else {
+        return .saved(immediateReminder: nil)
+      }
+      let result = await oneShotNotificationScheduler.schedule(
+        birthdayID: saved.id,
+        name: saved.name,
+        now: now
+      )
+      return .saved(immediateReminder: result)
     } catch {
       errorMessage = BirthdayErrorMessage.text(for: error)
       errorField = Self.location(for: error)
-      return false
+      return .failed
     }
   }
 

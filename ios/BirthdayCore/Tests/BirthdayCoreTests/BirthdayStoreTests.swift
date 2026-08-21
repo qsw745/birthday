@@ -57,6 +57,41 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   )
 }
 
+private struct Plan3BirthdayPayloadDTO: Decodable, Equatable {
+  let id: UUID
+  let name: String
+  let lunarMonth: Int
+  let lunarDay: Int
+  let isLeapMonth: Bool
+  let reminderTimeMinutes: Int
+  let notifyDayBefore: Bool
+  let notifySameDay: Bool
+  let emailEnabled: Bool
+  let emailAddress: String
+  let emailMessage: String
+}
+
+private func insertSyncedBirthday(
+  into container: ModelContainer,
+  id: UUID = UUID(),
+  version: Int64 = 3,
+  deletedAt: Date? = nil
+) throws -> UUID {
+  let context = ModelContext(container)
+  let entity = BirthdayEntity(
+    id: id,
+    draft: draft(name: "服务器已有记录"),
+    nextSolarDate: storeNow.addingTimeInterval(86_400),
+    now: storeNow.addingTimeInterval(-60)
+  )
+  entity.version = version
+  entity.deletedAt = deletedAt
+  entity.syncStateRaw = deletedAt == nil ? SyncState.synced.rawValue : SyncState.pendingDelete.rawValue
+  context.insert(entity)
+  try context.save()
+  return id
+}
+
 @Suite(.serialized) struct BirthdayStoreTests {
 
 @Test func savePersistsBirthdayAndOutboxAtomically() async throws {
@@ -95,7 +130,7 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   #expect(try await store.activeBirthdays() == [saved])
 }
 
-@Test func updatingExistingBirthdayPreservesCreatedAtAndVersionAndQueuesFullPayload() async throws {
+@Test func createThenRepeatedEditsCoalesceIntoOneLatestUpsert() async throws {
   let store = makeStore(try makeContainer())
   let original = try await store.save(
     draft(name: "妈妈"), id: nil, now: storeNow, timeZone: storeTimeZone)
@@ -109,6 +144,13 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   )
   let updatedAt = storeNow.addingTimeInterval(60)
 
+  let firstOperation = try #require(try await store.pendingOperations().first)
+  _ = try await store.save(
+    draft(name: "中间名字"),
+    id: original.id,
+    now: updatedAt.addingTimeInterval(-1),
+    timeZone: storeTimeZone
+  )
   let updated = try await store.save(
     .init(
       name: "  妈妈的新名字  ",
@@ -120,7 +162,7 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
     timeZone: storeTimeZone
   )
   let operations = try await store.pendingOperations()
-  let secondOperation = try #require(operations.last)
+  let operation = try #require(operations.last)
 
   #expect(updated.id == original.id)
   #expect(updated.name == "妈妈的新名字")
@@ -129,13 +171,13 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   #expect(updated.createdAt == original.createdAt)
   #expect(updated.updatedAt == updatedAt)
   #expect(updated.version == original.version)
-  #expect(operations.count == 2)
-  #expect(secondOperation.operationType == "upsert")
-  #expect(secondOperation.entityId == original.id)
-  #expect(secondOperation.baseVersion == original.version)
-  #expect(secondOperation.createdAt == updatedAt)
-  #expect(
-    try JSONDecoder().decode(BirthdayRecord.self, from: secondOperation.payloadJSON) == updated)
+  #expect(operations.count == 1)
+  #expect(operation.operationId == firstOperation.operationId)
+  #expect(operation.operationType == "upsert")
+  #expect(operation.entityId == original.id)
+  #expect(operation.baseVersion == original.version)
+  #expect(operation.createdAt == firstOperation.createdAt)
+  #expect(try JSONDecoder().decode(BirthdayOutboxPayload.self, from: operation.payloadJSON).name == updated.name)
 }
 
 @Test func activeBirthdaysSortEqualDatesByCreationOrder() async throws {
@@ -150,7 +192,7 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   #expect(try await store.activeBirthdays().map(\.id) == [firstID, secondID])
 }
 
-@Test func softDeleteHidesRecordAndCreatesDeleteOperation() async throws {
+@Test func createThenDeleteLeavesNoRemoteOperation() async throws {
   let store = makeStore(try makeContainer())
   let saved = try await store.save(
     draft(name: "爸爸"), id: nil, now: storeNow, timeZone: storeTimeZone)
@@ -158,7 +200,7 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   try await store.softDelete(id: saved.id, now: storeNow.addingTimeInterval(1))
 
   #expect(try await store.activeBirthdays().isEmpty)
-  #expect(try await store.pendingOperations().last?.operationType == "delete")
+  #expect(try await store.pendingOperations().isEmpty)
 }
 
 @Test func restoreQueuesCompleteUpsertPayloadAndDefaultMetadata() async throws {
@@ -183,7 +225,111 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   #expect(operation.attemptCount == 0)
   #expect(operation.nextRetryAt == nil)
   #expect(operation.lastErrorCategory == nil)
-  #expect(try JSONDecoder().decode(BirthdayRecord.self, from: operation.payloadJSON) == restored)
+  #expect(try JSONDecoder().decode(BirthdayOutboxPayload.self, from: operation.payloadJSON).id == restored.id)
+}
+
+@Test func editThenDeleteCoalescesToOneDeleteAtServerBaseVersion() async throws {
+  let container = try makeContainer()
+  let id = try insertSyncedBirthday(into: container, version: 7)
+  let store = makeStore(container)
+
+  _ = try await store.save(
+    draft(name: "本机编辑"),
+    id: id,
+    now: storeNow,
+    timeZone: storeTimeZone
+  )
+  try await store.softDelete(id: id, now: storeNow.addingTimeInterval(1))
+
+  let operation = try #require(try await store.pendingOperations().only)
+  #expect(operation.operationType == "delete")
+  #expect(operation.baseVersion == 7)
+}
+
+@Test func deleteThenRestoreCoalescesToOneCompleteUpsert() async throws {
+  let container = try makeContainer()
+  let id = try insertSyncedBirthday(into: container, version: 9)
+  let store = makeStore(container)
+
+  try await store.softDelete(id: id, now: storeNow)
+  let deleteOperation = try #require(try await store.pendingOperations().only)
+  try await store.restore(id: id, now: storeNow.addingTimeInterval(1))
+
+  let operation = try #require(try await store.pendingOperations().only)
+  let payload = try JSONDecoder().decode(BirthdayOutboxPayload.self, from: operation.payloadJSON)
+  #expect(operation.operationId == deleteOperation.operationId)
+  #expect(operation.operationType == "upsert")
+  #expect(operation.baseVersion == 9)
+  #expect(payload.id == id)
+  #expect(payload.name == "服务器已有记录")
+}
+
+@Test func outboxPayloadIsVersionedFlatAndDecodesAsPlan3BirthdayPayload() async throws {
+  let store = makeStore(try makeContainer())
+  let saved = try await store.save(
+    draft(name: "妈妈"), id: nil, now: storeNow, timeZone: storeTimeZone)
+  let operation = try #require(try await store.pendingOperations().only)
+
+  let versioned = try JSONDecoder().decode(BirthdayOutboxPayload.self, from: operation.payloadJSON)
+  let plan3 = try JSONDecoder().decode(Plan3BirthdayPayloadDTO.self, from: operation.payloadJSON)
+  let object = try #require(
+    JSONSerialization.jsonObject(with: operation.payloadJSON) as? [String: Any]
+  )
+
+  #expect(versioned.schemaVersion == 1)
+  #expect(plan3.id == saved.id)
+  #expect(plan3.name == "妈妈")
+  #expect(plan3.lunarMonth == 8)
+  #expect(plan3.reminderTimeMinutes == 540)
+  #expect(object["lunarBirthday"] == nil)
+  #expect(object["reminder"] == nil)
+  #expect(object["nextSolarDate"] == nil)
+}
+
+@Test func derivedDateRefreshRollsYearWithoutOutboxOrServerVersionMutation() async throws {
+  let store = makeStore(try makeContainer())
+  let saved = try await store.save(
+    draft(name: "妈妈"),
+    id: nil,
+    now: ISO8601DateFormatter().date(from: "2026-01-01T00:00:00Z")!,
+    timeZone: storeTimeZone
+  )
+  let outboxBefore = try await store.pendingOperations()
+  let afterOccurrence = ISO8601DateFormatter().date(from: "2026-09-25T02:00:00Z")!
+
+  let refreshedCount = try await store.refreshNextSolarDates(
+    now: afterOccurrence,
+    timeZone: storeTimeZone
+  )
+  let refreshed = try #require(try await store.activeBirthdays().first)
+
+  #expect(refreshedCount == 1)
+  #expect(refreshed.nextSolarDate != saved.nextSolarDate)
+  #expect(refreshed.nextSolarDate! > ISO8601DateFormatter().date(from: "2027-01-01T00:00:00Z")!)
+  #expect(refreshed.version == saved.version)
+  #expect(refreshed.updatedAt == saved.updatedAt)
+  #expect(try await store.pendingOperations() == outboxBefore)
+}
+
+@Test func derivedDateRefreshReinterpretsWallTimeAfterTimeZoneChangeWithoutOutbox() async throws {
+  let store = makeStore(try makeContainer())
+  let reference = ISO8601DateFormatter().date(from: "2026-01-01T00:00:00Z")!
+  let saved = try await store.save(
+    draft(name: "妈妈"), id: nil, now: reference, timeZone: storeTimeZone)
+  let outboxBefore = try await store.pendingOperations()
+  let losAngeles = TimeZone(identifier: "America/Los_Angeles")!
+
+  _ = try await store.refreshNextSolarDates(now: reference, timeZone: losAngeles)
+  let refreshed = try #require(try await store.activeBirthdays().first)
+  let localComponents = Calendar(identifier: .gregorian).dateComponents(
+    in: losAngeles,
+    from: refreshed.nextSolarDate!
+  )
+
+  #expect(refreshed.nextSolarDate != saved.nextSolarDate)
+  #expect(localComponents.hour == 9)
+  #expect(localComponents.minute == 0)
+  #expect(try await store.pendingOperations() == outboxBefore)
 }
 
 @Test func activeBirthdaysRejectsUnknownSyncStateInsteadOfMaskingIt() async throws {
@@ -254,7 +400,7 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   #expect(try await store.pendingOperations().count == 1)
   #expect(operation.operationType == "upsert")
   #expect(operation.entityId == saved.id)
-  #expect(try JSONDecoder().decode(BirthdayRecord.self, from: operation.payloadJSON) == saved)
+  #expect(try JSONDecoder().decode(BirthdayOutboxPayload.self, from: operation.payloadJSON).id == saved.id)
 }
 
 @Test func failedUpdateLeavesSameStoreReadyForOneCleanLaterCommit() async throws {
@@ -282,10 +428,10 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   let operation = try #require(try await failingStore.pendingOperations().last)
 
   #expect(try await failingStore.activeBirthdays() == [updated])
-  #expect(try await failingStore.pendingOperations().count == 2)
+  #expect(try await failingStore.pendingOperations().count == 1)
   #expect(operation.operationType == "upsert")
   #expect(operation.entityId == original.id)
-  #expect(try JSONDecoder().decode(BirthdayRecord.self, from: operation.payloadJSON) == updated)
+  #expect(try JSONDecoder().decode(BirthdayOutboxPayload.self, from: operation.payloadJSON).name == updated.name)
 }
 
 @Test func failedSoftDeleteLeavesSameStoreReadyForOneCleanLaterCommit() async throws {
@@ -301,16 +447,8 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
 
   let deletedAt = storeNow.addingTimeInterval(2)
   try await failingStore.softDelete(id: original.id, now: deletedAt)
-  let operation = try #require(try await failingStore.pendingOperations().last)
-  let payload = try JSONDecoder().decode(BirthdayRecord.self, from: operation.payloadJSON)
-
   #expect(try await failingStore.activeBirthdays().isEmpty)
-  #expect(try await failingStore.pendingOperations().count == 2)
-  #expect(operation.operationType == "delete")
-  #expect(operation.entityId == original.id)
-  #expect(payload.id == original.id)
-  #expect(payload.deletedAt == deletedAt)
-  #expect(payload.syncState == .pendingDelete)
+  #expect(try await failingStore.pendingOperations().isEmpty)
 }
 
 @Test func failedRestoreLeavesSameStoreReadyForOneCleanLaterCommit() async throws {
@@ -332,10 +470,16 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   #expect(restored.id == saved.id)
   #expect(restored.deletedAt == nil)
   #expect(restored.syncState == .pending)
-  #expect(try await failingStore.pendingOperations().count == 3)
+  #expect(try await failingStore.pendingOperations().count == 1)
   #expect(operation.operationType == "upsert")
   #expect(operation.entityId == saved.id)
-  #expect(try JSONDecoder().decode(BirthdayRecord.self, from: operation.payloadJSON) == restored)
+  #expect(try JSONDecoder().decode(BirthdayOutboxPayload.self, from: operation.payloadJSON).id == restored.id)
 }
 
+}
+
+private extension Array {
+  var only: Element? {
+    count == 1 ? first : nil
+  }
 }

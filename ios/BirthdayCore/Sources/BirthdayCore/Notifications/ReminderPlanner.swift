@@ -122,12 +122,20 @@ public struct ReminderPlanner: Sendable {
     now: Date,
     calendar: Calendar
   ) -> ReminderCandidate? {
-    guard let coverageEnd,
-      let trigger = calendar.date(byAdding: .day, value: -30, to: coverageEnd),
-      trigger > now
-    else {
+    guard let coverageEnd, coverageEnd > now else {
       return nil
     }
+
+    let preferred = calendar.date(byAdding: .day, value: -30, to: coverageEnd)
+    let trigger: Date
+    if let preferred, preferred > now {
+      trigger = preferred
+    } else {
+      let availableInterval = coverageEnd.timeIntervalSince(now)
+      trigger = now.addingTimeInterval(min(86_400, availableInterval / 2))
+    }
+
+    guard trigger > now, trigger < coverageEnd else { return nil }
 
     return ReminderCandidate(
       identifier: "birthday.maintenance.\(Int(coverageEnd.timeIntervalSince1970))",

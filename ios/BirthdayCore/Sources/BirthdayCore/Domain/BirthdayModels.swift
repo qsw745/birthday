@@ -133,3 +133,35 @@ public struct SyncOperation: Identifiable, Equatable, Sendable {
         self.lastErrorCategory = lastErrorCategory
     }
 }
+
+public struct BirthdayOutboxPayload: Codable, Equatable, Sendable {
+    public static let currentSchemaVersion = 1
+
+    public let schemaVersion: Int
+    public let id: UUID
+    public let name: String
+    public let lunarMonth: Int
+    public let lunarDay: Int
+    public let isLeapMonth: Bool
+    public let reminderTimeMinutes: Int
+    public let notifyDayBefore: Bool
+    public let notifySameDay: Bool
+    public let emailEnabled: Bool
+    public let emailAddress: String
+    public let emailMessage: String
+
+    public init(record: BirthdayRecord) {
+        schemaVersion = Self.currentSchemaVersion
+        id = record.id
+        name = record.name
+        lunarMonth = record.lunarBirthday.month
+        lunarDay = record.lunarBirthday.day
+        isLeapMonth = record.lunarBirthday.isLeapMonth
+        reminderTimeMinutes = record.reminder.timeMinutes
+        notifyDayBefore = record.reminder.notifyDayBefore
+        notifySameDay = record.reminder.notifySameDay
+        emailEnabled = record.reminder.emailEnabled
+        emailAddress = record.reminder.emailAddress
+        emailMessage = record.reminder.emailMessage
+    }
+}

@@ -36,15 +36,72 @@ public struct NotificationHealth: Equatable, Sendable {
   }
 }
 
+public struct NotificationRequestSnapshot: Equatable, Sendable {
+  public let identifier: String
+  public let triggerDate: Date?
+  public let title: String
+  public let body: String
+  public let playsSound: Bool
+
+  public init(
+    identifier: String,
+    triggerDate: Date,
+    title: String,
+    body: String,
+    playsSound: Bool = true
+  ) {
+    self.identifier = identifier
+    self.triggerDate = Date(
+      timeIntervalSince1970: triggerDate.timeIntervalSince1970.rounded(.up)
+    )
+    self.title = title
+    self.body = body
+    self.playsSound = playsSound
+  }
+
+  public init(candidate: ReminderCandidate) {
+    self.init(
+      identifier: candidate.identifier,
+      triggerDate: candidate.triggerDate,
+      title: candidate.title,
+      body: candidate.body
+    )
+  }
+
+  fileprivate init(
+    identifier: String,
+    triggerDate: Date?,
+    title: String,
+    body: String,
+    playsSound: Bool
+  ) {
+    self.identifier = identifier
+    self.triggerDate = triggerDate
+    self.title = title
+    self.body = body
+    self.playsSound = playsSound
+  }
+}
+
 public protocol NotificationCenterClient: Sendable {
   func authorization() async -> NotificationAuthorization
-  func pendingIdentifiers() async -> [String]
+  func pendingRequests() async -> [NotificationRequestSnapshot]
   func remove(identifiers: [String]) async
-  func add(_ candidate: ReminderCandidate) async throws
+  func add(_ request: NotificationRequestSnapshot) async throws
 }
 
 public protocol NotificationScheduling: Sendable {
   func apply(_ plan: ReminderPlan) async throws -> NotificationHealth
+}
+
+public enum OneShotNotificationResult: Equatable, Sendable {
+  case scheduled
+  case notAuthorized
+  case failed
+}
+
+public protocol OneShotNotificationScheduling: Sendable {
+  func schedule(birthdayID: UUID, name: String, now: Date) async -> OneShotNotificationResult
 }
 
 private actor NotificationSchedulingGate {
@@ -59,9 +116,7 @@ private actor NotificationSchedulingGate {
 
   private func lock() async {
     guard !isLocked else {
-      await withCheckedContinuation { continuation in
-        waiters.append(continuation)
-      }
+      await withCheckedContinuation { continuation in waiters.append(continuation) }
       return
     }
     isLocked = true
@@ -78,7 +133,10 @@ private actor NotificationSchedulingGate {
 }
 
 public struct UserNotificationScheduler: NotificationScheduling {
-  private static let namespace = "birthday."
+  private static let rollingNamespace = "birthday."
+  private static let immediateNamespace = "birthday.immediate."
+  private static let conservativeCapacity = 64
+
   private let center: any NotificationCenterClient
   private let gate = NotificationSchedulingGate()
 
@@ -107,40 +165,90 @@ public struct UserNotificationScheduler: NotificationScheduling {
     }
 
     let candidates = plan.birthdayNotifications + [plan.maintenanceNotification].compactMap { $0 }
-    guard candidates.allSatisfy({ $0.identifier.hasPrefix(Self.namespace) }) else {
+    guard candidates.allSatisfy({ isRollingIdentifier($0.identifier) }) else {
       return failedHealth(category: "invalid_identifier")
     }
     guard Set(candidates.map(\.identifier)).count == candidates.count else {
       return failedHealth(category: "duplicate_identifier")
     }
 
-    let existingOwnedIdentifiers = Set(
-      await center.pendingIdentifiers().filter { $0.hasPrefix(Self.namespace) }
-    )
-    var addedIdentifiers: Set<String> = []
-    do {
-      for candidate in candidates {
-        try await center.add(candidate)
-        addedIdentifiers.insert(candidate.identifier)
-      }
-    } catch {
-      let newlyAddedIdentifiers = addedIdentifiers.subtracting(existingOwnedIdentifiers).sorted()
-      await center.remove(identifiers: newlyAddedIdentifiers)
-      return failedHealth(category: "schedule_failed")
+    let desired = candidates.map(NotificationRequestSnapshot.init(candidate:)).sorted(by: requestOrder)
+    let initialAll = await center.pendingRequests()
+    let initialOwned = initialAll.filter { isRollingIdentifier($0.identifier) }.sorted(by: requestOrder)
+    let nonOwnedCount = initialAll.count - initialOwned.count
+    guard nonOwnedCount + desired.count <= conservativeCapacity else {
+      return failedHealth(category: "capacity_exceeded")
+    }
+    guard initialOwned.allSatisfy({ $0.triggerDate != nil }) else {
+      return failedHealth(category: "snapshot_unavailable")
     }
 
-    let desiredIdentifiers = Set(candidates.map(\.identifier))
-    let staleOwnedIdentifiers = await center.pendingIdentifiers().filter {
-      $0.hasPrefix(Self.namespace) && !desiredIdentifiers.contains($0)
+    let initialByIdentifier = Dictionary(uniqueKeysWithValues: initialOwned.map { ($0.identifier, $0) })
+    let desiredByIdentifier = Dictionary(uniqueKeysWithValues: desired.map { ($0.identifier, $0) })
+    let identifiersToRemove = initialOwned.compactMap { request -> String? in
+      desiredByIdentifier[request.identifier] == request ? nil : request.identifier
+    }.sorted()
+    let requestsToAdd = desired.filter { initialByIdentifier[$0.identifier] != $0 }
+
+    await center.remove(identifiers: identifiersToRemove)
+    do {
+      for request in requestsToAdd { try await center.add(request) }
+    } catch {
+      let restored = await restore(initialOwned, using: center)
+      return failedHealth(category: restored ? "schedule_failed" : "schedule_restore_failed")
     }
-    await center.remove(identifiers: staleOwnedIdentifiers)
+
+    let finalOwned = await center.pendingRequests()
+      .filter { isRollingIdentifier($0.identifier) }
+      .sorted(by: requestOrder)
+    guard finalOwned == desired else {
+      let restored = await restore(initialOwned, using: center)
+      return failedHealth(
+        category: restored ? "schedule_verification_failed" : "schedule_restore_failed"
+      )
+    }
 
     return NotificationHealth(
       state: .scheduled,
-      scheduledCount: candidates.count,
+      scheduledCount: desired.count,
       coverageEnd: plan.coverageEnd,
       errorCategory: nil
     )
+  }
+
+  private static func restore(
+    _ snapshot: [NotificationRequestSnapshot],
+    using center: any NotificationCenterClient
+  ) async -> Bool {
+    let currentOwned = await center.pendingRequests()
+      .filter { isRollingIdentifier($0.identifier) }
+      .map(\.identifier)
+      .sorted()
+    await center.remove(identifiers: currentOwned)
+
+    var addSucceeded = true
+    for request in snapshot {
+      do {
+        try await center.add(request)
+      } catch {
+        addSucceeded = false
+      }
+    }
+    let restored = await center.pendingRequests()
+      .filter { isRollingIdentifier($0.identifier) }
+      .sorted(by: requestOrder)
+    return addSucceeded && restored == snapshot.sorted(by: requestOrder)
+  }
+
+  private static func isRollingIdentifier(_ identifier: String) -> Bool {
+    identifier.hasPrefix(rollingNamespace) && !identifier.hasPrefix(immediateNamespace)
+  }
+
+  private static func requestOrder(
+    _ lhs: NotificationRequestSnapshot,
+    _ rhs: NotificationRequestSnapshot
+  ) -> Bool {
+    lhs.identifier < rhs.identifier
   }
 
   private static func failedHealth(category: String) -> NotificationHealth {
@@ -148,8 +256,38 @@ public struct UserNotificationScheduler: NotificationScheduling {
   }
 }
 
+public struct OneShotNotificationScheduler: OneShotNotificationScheduling {
+  private let center: any NotificationCenterClient
+
+  public init(center: any NotificationCenterClient) {
+    self.center = center
+  }
+
+  public func schedule(
+    birthdayID: UUID,
+    name: String,
+    now: Date
+  ) async -> OneShotNotificationResult {
+    guard await center.authorization().isAllowedToSchedule else { return .notAuthorized }
+    let timestamp = Int(now.timeIntervalSince1970 * 1_000)
+    let request = NotificationRequestSnapshot(
+      identifier: "birthday.immediate.\(birthdayID.uuidString).\(timestamp)",
+      triggerDate: now.addingTimeInterval(1),
+      title: "今天是\(name)的生日",
+      body: "别忘了送上生日祝福。"
+    )
+    do {
+      try await center.add(request)
+      return .scheduled
+    } catch {
+      return .failed
+    }
+  }
+}
+
 public enum SystemNotificationCenterClientError: Error, Equatable, Sendable {
   case invalidIdentifier
+  case invalidTrigger
 }
 
 public final class SystemNotificationCenterClient: @unchecked Sendable, NotificationCenterClient {
@@ -162,58 +300,66 @@ public final class SystemNotificationCenterClient: @unchecked Sendable, Notifica
   public func authorization() async -> NotificationAuthorization {
     let settings = await center.notificationSettings()
     switch settings.authorizationStatus {
-    case .notDetermined:
-      return .notDetermined
-    case .authorized:
-      return .authorized
-    case .denied:
-      return .denied
-    case .provisional:
-      return .provisional
-    case .ephemeral:
-      return .ephemeral
-    @unknown default:
-      return .unknown
+    case .notDetermined: return .notDetermined
+    case .authorized: return .authorized
+    case .denied: return .denied
+    case .provisional: return .provisional
+    case .ephemeral: return .ephemeral
+    @unknown default: return .unknown
     }
   }
 
-  public func pendingIdentifiers() async -> [String] {
-    await center.pendingNotificationRequests().map(\.identifier)
+  public func pendingRequests() async -> [NotificationRequestSnapshot] {
+    await center.pendingNotificationRequests().map(Self.snapshot(for:))
   }
 
   public func remove(identifiers: [String]) async {
     center.removePendingNotificationRequests(withIdentifiers: identifiers)
   }
 
-  public func add(_ candidate: ReminderCandidate) async throws {
-    guard candidate.identifier.hasPrefix("birthday.") else {
+  public func add(_ request: NotificationRequestSnapshot) async throws {
+    guard request.identifier.hasPrefix("birthday.") else {
       throw SystemNotificationCenterClientError.invalidIdentifier
     }
-    try await center.add(Self.request(for: candidate))
+    guard request.triggerDate != nil else {
+      throw SystemNotificationCenterClientError.invalidTrigger
+    }
+    try await center.add(Self.request(for: request))
   }
 
-  static func request(for candidate: ReminderCandidate) -> UNNotificationRequest {
+  static func request(for snapshot: NotificationRequestSnapshot) -> UNNotificationRequest {
     let content = UNMutableNotificationContent()
-    content.title = candidate.title
-    content.body = candidate.body
-    content.sound = .default
+    content.title = snapshot.title
+    content.body = snapshot.body
+    if snapshot.playsSound { content.sound = .default }
 
+    let triggerDate = snapshot.triggerDate ?? .distantFuture
     let components = Calendar.current.dateComponents(
-      [.year, .month, .day, .hour, .minute],
-      from: candidate.triggerDate
+      [.year, .month, .day, .hour, .minute, .second],
+      from: triggerDate
     )
     let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
-    return UNNotificationRequest(identifier: candidate.identifier, content: content, trigger: trigger)
+    return UNNotificationRequest(identifier: snapshot.identifier, content: content, trigger: trigger)
+  }
+
+  private static func snapshot(for request: UNNotificationRequest) -> NotificationRequestSnapshot {
+    let triggerDate = (request.trigger as? UNCalendarNotificationTrigger)
+      .flatMap { Calendar.current.date(from: $0.dateComponents) }
+    return NotificationRequestSnapshot(
+      identifier: request.identifier,
+      triggerDate: triggerDate,
+      title: request.content.title,
+      body: request.content.body,
+      playsSound: request.content.sound != nil
+    )
   }
 }
 
 private extension NotificationAuthorization {
   var isAllowedToSchedule: Bool {
     switch self {
-    case .authorized, .provisional, .ephemeral:
-      true
-    case .notDetermined, .denied, .unknown:
-      false
+    case .authorized, .provisional, .ephemeral: true
+    case .notDetermined, .denied, .unknown: false
     }
   }
 }

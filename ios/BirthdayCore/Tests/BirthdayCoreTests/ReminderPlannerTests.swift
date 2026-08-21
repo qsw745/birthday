@@ -153,7 +153,7 @@ private func plannerUUID(_ value: String) -> UUID {
     plan.birthdayNotifications.map(\.birthdayId) == [first.id, second.id, first.id, second.id])
 }
 
-@Test func addsMaintenanceOnlyWhenItCanStillTriggerAfterNow() throws {
+@Test func everyNonEmptyPlanHasFutureMaintenanceBeforeCoverageEnd() throws {
   let record = plannerRecord(
     id: plannerUUID("00000000-0000-0000-0000-000000000001"),
     month: 1,
@@ -176,8 +176,31 @@ private func plannerUUID(_ value: String) -> UUID {
     timeZone: reminderPlannerTimeZone
   )
 
-  #expect(boundaryPlan.maintenanceNotification == nil)
+  let boundaryMaintenance = try #require(boundaryPlan.maintenanceNotification)
+  #expect(boundaryMaintenance.kind == .maintenance)
+  #expect(boundaryMaintenance.triggerDate > plannerNow)
+  #expect(boundaryMaintenance.triggerDate < boundaryPlan.coverageEnd!)
   #expect(laterPlan.maintenanceNotification?.kind == .maintenance)
   #expect(laterPlan.maintenanceNotification?.triggerDate == plannerNow.addingTimeInterval(86_400))
   #expect(laterPlan.maintenanceNotification?.identifier == "birthday.maintenance.1790678400")
+}
+
+@Test func singleBirthdayInsideThirtyDaysGetsExecutableMaintenanceFallback() throws {
+  let record = plannerRecord(
+    id: plannerUUID("00000000-0000-0000-0000-000000000001"),
+    month: 1,
+    notifyDayBefore: false
+  )
+  let coverageEnd = plannerNow.addingTimeInterval(10 * 86_400)
+  let calculator = StubLunarBirthdayCalculator { _ in coverageEnd }
+
+  let plan = try ReminderPlanner(calculator: calculator).makePlan(
+    records: [record],
+    now: plannerNow,
+    timeZone: reminderPlannerTimeZone
+  )
+
+  let maintenance = try #require(plan.maintenanceNotification)
+  #expect(maintenance.triggerDate > plannerNow)
+  #expect(maintenance.triggerDate < coverageEnd)
 }

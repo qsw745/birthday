@@ -11,23 +11,24 @@ struct SettingsView: View {
         Toggle(isOn: lockEnabledBinding) {
           Label {
             VStack(alignment: .leading, spacing: 3) {
-              Text("Face ID 应用锁")
-              Text("支持设备密码回退")
+              Text(lockTitle)
+              Text(lockDetail)
                 .font(.caption)
                 .foregroundStyle(ModernAirTheme.secondaryInk)
             }
           } icon: {
-            Image(systemName: "faceid")
+            Image(systemName: lockIcon)
               .foregroundStyle(ModernAirTheme.tide)
           }
         }
         .tint(ModernAirTheme.tide)
         .frame(minHeight: 44)
+        .disabled(model.lockCapability == .unavailable)
         .accessibilityHint(lockAccessibilityHint)
       } header: {
         Text("本地隐私")
       } footer: {
-        Text("关闭后当前会话会保持打开；重新开启不会打断当前操作，下次进入后台或重新启动时生效。")
+        Text(lockFooter)
       }
 
       Section("本地通知") {
@@ -120,9 +121,39 @@ struct SettingsView: View {
   }
 
   private var lockAccessibilityHint: String {
-    model.lockEnabled
+    guard model.lockCapability != .unavailable else {
+      return "此设备当前无法启用应用锁"
+    }
+    return model.lockEnabled
       ? "关闭后无需验证即可查看本机生日资料"
       : "开启后会在下次进入后台或重新启动时锁定生日资料"
+  }
+
+  private var lockTitle: String {
+    switch model.lockCapability {
+    case .faceID: "Face ID 应用锁"
+    case .devicePasscode: "设备密码应用锁"
+    case .unavailable: "应用锁不可用"
+    }
+  }
+
+  private var lockDetail: String {
+    switch model.lockCapability {
+    case .faceID: "验证时支持设备密码回退"
+    case .devicePasscode: "Face ID 不可用，将使用设备密码"
+    case .unavailable: "Face ID 与设备密码当前均不可用"
+    }
+  }
+
+  private var lockIcon: String {
+    model.lockCapability == .faceID ? "faceid" : "lock.shield"
+  }
+
+  private var lockFooter: String {
+    guard model.lockCapability != .unavailable else {
+      return "应用锁保持关闭，避免无法进入本机生日资料。请先在系统中设置设备密码。"
+    }
+    return "关闭后当前会话会保持打开；重新开启不会打断当前操作，下次进入后台或重新启动时生效。"
   }
 
   private var notificationStatusRow: some View {

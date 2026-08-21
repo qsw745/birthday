@@ -334,7 +334,7 @@ struct CalendarHomeView: View {
         Button("添加生日") {
           model.isPresentingEditor = true
         }
-        .accessibilityIdentifier("addBirthdayButton")
+        .accessibilityIdentifier("calendarEmptyAddBirthdayButton")
         .buttonStyle(.bordered)
         .tint(ModernAirTheme.tide)
         .frame(minHeight: 44)

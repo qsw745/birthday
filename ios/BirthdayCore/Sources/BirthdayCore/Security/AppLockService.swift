@@ -2,7 +2,20 @@ import Foundation
 @preconcurrency import LocalAuthentication
 
 public protocol AppLockAuthenticating: Sendable {
+  func capability() -> AppLockCapability
   func unlock(reason: String) async throws -> Bool
+}
+
+public enum AppLockCapability: Equatable, Sendable {
+  case faceID
+  case devicePasscode
+  case unavailable
+}
+
+internal enum AppLockBiometry: Equatable, Sendable {
+  case faceID
+  case other
+  case none
 }
 
 public enum AppLockError: Error, Equatable, Sendable {
@@ -24,6 +37,7 @@ internal func localAuthenticationSystemError(from error: NSError) -> LocalAuthen
 
 internal protocol AppLockSystemContext: Sendable {
   func canEvaluateDeviceOwnerAuthentication() -> Result<Void, LocalAuthenticationSystemError>
+  func availableBiometry() -> AppLockBiometry
   func evaluateDeviceOwnerAuthentication(reason: String) async throws -> Bool
 }
 
@@ -56,6 +70,21 @@ internal final class SystemAppLockSystemContext: AppLockSystemContext, @unchecke
     return .success(())
   }
 
+  func availableBiometry() -> AppLockBiometry {
+    var error: NSError?
+    _ = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
+    switch context.biometryType {
+    case .faceID:
+      return .faceID
+    case .touchID, .opticID:
+      return .other
+    case .none:
+      return .none
+    @unknown default:
+      return .other
+    }
+  }
+
   func evaluateDeviceOwnerAuthentication(reason: String) async throws -> Bool {
     do {
       return try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
@@ -76,6 +105,14 @@ public struct LocalAuthenticationService: AppLockAuthenticating {
 
   internal init(contextFactory: any AppLockSystemContextFactory) {
     self.contextFactory = contextFactory
+  }
+
+  public func capability() -> AppLockCapability {
+    let context = contextFactory.makeContext()
+    guard case .success = context.canEvaluateDeviceOwnerAuthentication() else {
+      return .unavailable
+    }
+    return context.availableBiometry() == .faceID ? .faceID : .devicePasscode
   }
 
   public func unlock(reason: String) async throws -> Bool {

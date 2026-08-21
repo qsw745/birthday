@@ -147,6 +147,7 @@ final class AppModel {
   private(set) var loadState: LoadState
   private(set) var hasCompletedOnboarding: Bool
   private(set) var lockEnabled: Bool
+  private(set) var lockCapability: AppLockCapability
   private(set) var unlockState: UnlockState = .idle
   private(set) var isCompletingOnboarding = false
   private(set) var onboardingErrorMessage: String?
@@ -159,6 +160,7 @@ final class AppModel {
   )
 
   let store: BirthdayStore
+  let oneShotNotificationScheduler: any OneShotNotificationScheduling
 
   private var appLockSession: AppLockSessionState
   private var reminderGeneration: UInt64 = 0
@@ -215,19 +217,21 @@ final class AppModel {
     notificationScheduler: any NotificationScheduling = UserNotificationScheduler(
       center: SystemNotificationCenterClient()
     ),
+    oneShotNotificationScheduler: any OneShotNotificationScheduling = OneShotNotificationScheduler(
+      center: SystemNotificationCenterClient()
+    ),
     reminderPlanner: ReminderPlanner = ReminderPlanner(),
     requestNotificationAuthorization: @escaping @MainActor () async throws -> Bool = { false },
     now: @escaping @Sendable () -> Date = Date.init,
     timeZone: @escaping @Sendable () -> TimeZone = { .current }
   ) {
-    preferences.register(defaults: [PreferenceKey.lockEnabled: true])
-
     self.store = store
     records = initialRecords
     self.selectedMonth = selectedMonth
     loadState = initiallyLoaded ? .loaded : .idle
     self.preferences = preferences
     self.authenticator = authenticator
+    self.oneShotNotificationScheduler = oneShotNotificationScheduler
     self.requestNotificationAuthorization = requestNotificationAuthorization
     self.now = now
     self.timeZone = timeZone
@@ -236,10 +240,17 @@ final class AppModel {
       scheduler: notificationScheduler
     )
 
-    let storedLockEnabled = preferences.bool(forKey: PreferenceKey.lockEnabled)
+    let capability = authenticator.capability()
+    let storedPreference = preferences.object(forKey: PreferenceKey.lockEnabled) as? Bool
+    let lockDecision = AppLockPreferenceDecision.resolve(
+      storedPreference: storedPreference,
+      capability: capability
+    )
+    preferences.set(lockDecision.preferenceToPersist, forKey: PreferenceKey.lockEnabled)
     hasCompletedOnboarding = preferences.bool(forKey: PreferenceKey.hasCompletedOnboarding)
-    lockEnabled = storedLockEnabled
-    appLockSession = AppLockSessionState(lockEnabled: storedLockEnabled)
+    lockCapability = capability
+    lockEnabled = lockDecision.isEnabled
+    appLockSession = AppLockSessionState(lockEnabled: lockDecision.isEnabled)
   }
 
   func reload() async {
@@ -249,6 +260,7 @@ final class AppModel {
     loadState = .loading
 
     do {
+      _ = try await store.refreshNextSolarDates(now: now(), timeZone: timeZone())
       let snapshot = try await store.activeBirthdays()
       records = snapshot
       loadState = .loaded
@@ -368,7 +380,18 @@ final class AppModel {
     unlockState = .idle
   }
 
+  func refreshAuthenticationCapability() {
+    let capability = authenticator.capability()
+    lockCapability = capability
+    guard capability == .unavailable, lockEnabled else { return }
+    lockEnabled = false
+    preferences.set(false, forKey: PreferenceKey.lockEnabled)
+    appLockSession.setLockEnabled(false)
+    unlockState = .idle
+  }
+
   func setLockEnabled(_ isEnabled: Bool) {
+    guard !isEnabled || lockCapability != .unavailable else { return }
     guard lockEnabled != isEnabled else { return }
     lockEnabled = isEnabled
     preferences.set(isEnabled, forKey: PreferenceKey.lockEnabled)
@@ -389,6 +412,7 @@ final class AppModel {
     defer { endReminderOperation() }
 
     do {
+      _ = try await store.refreshNextSolarDates(now: now(), timeZone: timeZone())
       let snapshot = try await store.activeBirthdays()
       await rebuildReminderSnapshot(snapshot, generation: generation)
     } catch {

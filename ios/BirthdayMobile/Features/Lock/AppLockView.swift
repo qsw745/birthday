@@ -19,7 +19,7 @@ struct AppLockView: View {
             .multilineTextAlignment(.center)
             .foregroundStyle(ModernAirTheme.ink)
 
-          Text("使用 Face ID 或设备密码继续。验证只会在你轻点下方按钮后开始。")
+          Text(lockDescription)
             .font(.body)
             .multilineTextAlignment(.center)
             .foregroundStyle(ModernAirTheme.secondaryInk)
@@ -46,7 +46,7 @@ struct AppLockView: View {
                 .tint(.white)
                 .accessibilityHidden(true)
             } else {
-              Image(systemName: "faceid")
+              Image(systemName: model.lockCapability == .faceID ? "faceid" : "lock.open")
                 .accessibilityHidden(true)
             }
             Text(model.isUnlocking ? "正在验证" : "解锁")
@@ -58,7 +58,7 @@ struct AppLockView: View {
         .tint(ModernAirTheme.tide)
         .disabled(model.isUnlocking)
         .accessibilityIdentifier("unlockButton")
-        .accessibilityHint("开始 Face ID 或设备密码验证")
+        .accessibilityHint(unlockHint)
       }
       .frame(maxWidth: 520)
       .padding(.horizontal, 24)
@@ -66,5 +66,20 @@ struct AppLockView: View {
       .frame(maxWidth: .infinity)
     }
     .background(ModernAirTheme.mist.ignoresSafeArea())
+  }
+
+  private var lockDescription: String {
+    switch model.lockCapability {
+    case .faceID:
+      "使用 Face ID 或设备密码继续。验证只会在你轻点下方按钮后开始。"
+    case .devicePasscode:
+      "使用设备密码继续。验证只会在你轻点下方按钮后开始。"
+    case .unavailable:
+      "此设备当前无法验证身份，应用锁会自动保持关闭。"
+    }
+  }
+
+  private var unlockHint: String {
+    model.lockCapability == .faceID ? "开始 Face ID 或设备密码验证" : "开始设备密码验证"
   }
 }

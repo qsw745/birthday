@@ -55,3 +55,35 @@ import Testing
   #expect(accepted)
   #expect(session.isUnlocked)
 }
+
+@Test func firstLaunchWithoutOwnerAuthenticationKeepsLockDisabled() {
+  let decision = AppLockPreferenceDecision.resolve(
+    storedPreference: nil,
+    capability: .unavailable
+  )
+
+  #expect(!decision.isEnabled)
+  #expect(decision.preferenceToPersist == false)
+}
+
+@Test func returningUserIsNotLockedOutWhenAuthenticationCapabilityDisappears() {
+  let decision = AppLockPreferenceDecision.resolve(
+    storedPreference: true,
+    capability: .unavailable
+  )
+
+  #expect(!decision.isEnabled)
+  #expect(decision.preferenceToPersist == false)
+  #expect(AppLaunchState.resolve(hasCompletedOnboarding: true, lockEnabled: decision.isEnabled) == .ready)
+}
+
+@Test(arguments: [AppLockCapability.faceID, .devicePasscode])
+func availableOwnerAuthenticationKeepsDefaultLockEnabled(_ capability: AppLockCapability) {
+  let decision = AppLockPreferenceDecision.resolve(
+    storedPreference: nil,
+    capability: capability
+  )
+
+  #expect(decision.isEnabled)
+  #expect(decision.preferenceToPersist == true)
+}

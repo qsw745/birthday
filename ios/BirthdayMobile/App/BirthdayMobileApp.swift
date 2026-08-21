@@ -1,6 +1,7 @@
 import BirthdayCore
 import SwiftData
 import SwiftUI
+import UIKit
 @preconcurrency import UserNotifications
 
 @main
@@ -40,6 +41,7 @@ private struct BirthdayAppBootstrapView: View {
         .onChange(of: scenePhase) { _, newPhase in
           switch newPhase {
           case .active:
+            model.refreshAuthenticationCapability()
             Task { await model.reload() }
           case .background:
             model.lockForBackground()
@@ -48,6 +50,15 @@ private struct BirthdayAppBootstrapView: View {
           @unknown default:
             break
           }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
+          Task { await model.reload() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in
+          Task { await model.reload() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in
+          Task { await model.reload() }
         }
       } else if let initializationError {
         LocalDatabaseFailureView(message: initializationError) {
@@ -104,19 +115,22 @@ private struct BirthdayAppBootstrapView: View {
         preferences: preferences,
         authenticator: UITestAppLockAuthenticator(),
         notificationScheduler: UITestNotificationScheduler(),
+        oneShotNotificationScheduler: UITestOneShotNotificationScheduler(),
         reminderPlanner: ReminderPlanner(),
         requestNotificationAuthorization: { true }
       )
     }
 
     let notificationCenter = UNUserNotificationCenter.current()
+    let notificationClient = SystemNotificationCenterClient(center: notificationCenter)
     return AppModel(
       store: BirthdayStore(modelContainer: container),
       preferences: .standard,
       authenticator: LocalAuthenticationService(),
       notificationScheduler: UserNotificationScheduler(
-        center: SystemNotificationCenterClient(center: notificationCenter)
+        center: notificationClient
       ),
+      oneShotNotificationScheduler: OneShotNotificationScheduler(center: notificationClient),
       reminderPlanner: ReminderPlanner(),
       requestNotificationAuthorization: {
         try await notificationCenter.requestAuthorization(options: [.alert, .sound, .badge])
@@ -126,8 +140,18 @@ private struct BirthdayAppBootstrapView: View {
 }
 
 private struct UITestAppLockAuthenticator: AppLockAuthenticating {
+  func capability() -> AppLockCapability {
+    .faceID
+  }
+
   func unlock(reason: String) async throws -> Bool {
     true
+  }
+}
+
+private struct UITestOneShotNotificationScheduler: OneShotNotificationScheduling {
+  func schedule(birthdayID: UUID, name: String, now: Date) async -> OneShotNotificationResult {
+    .scheduled
   }
 }
 

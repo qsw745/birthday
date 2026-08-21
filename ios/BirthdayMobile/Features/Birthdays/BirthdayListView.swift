@@ -83,7 +83,7 @@ struct BirthdayListView: View {
       }
       Button("取消", role: .cancel) {}
     } message: { record in
-      Text("确定删除“\(record.name)”吗？记录会立即从本机隐藏，并在联网后同步删除。")
+      Text(LocalOnlyStatusPresentation.deletionConfirmation(name: record.name))
     }
     .alert("删除失败", isPresented: $isShowingDeleteError) {
       Button("重试") {
@@ -157,7 +157,7 @@ struct BirthdayListView: View {
       Button("添加生日") {
         model.isPresentingEditor = true
       }
-      .accessibilityIdentifier("addBirthdayButton")
+      .accessibilityIdentifier("birthdayListEmptyAddButton")
       .buttonStyle(.borderedProminent)
       .tint(ModernAirTheme.tide)
       .frame(minHeight: 44)
@@ -354,24 +354,15 @@ private struct BirthdayListRow: View {
   }
 
   private var syncText: String {
-    switch record.syncState {
-    case .synced: return "已同步"
-    case .pending: return "待同步"
-    case .conflict: return "需处理"
-    case .pendingDelete: return "待删除"
-    }
+    LocalOnlyStatusPresentation.make(for: record.syncState).title
   }
 
   private var syncSymbol: String {
-    switch record.syncState {
-    case .synced: return "checkmark.circle"
-    case .pending: return "arrow.triangle.2.circlepath"
-    case .conflict: return "exclamationmark.triangle"
-    case .pendingDelete: return "trash.slash"
-    }
+    "iphone"
   }
 
   private var accessibilityText: String {
-    "\(record.name)，\(nextDateText)，农历\(lunarText)，同步状态\(syncText)"
+    let status = LocalOnlyStatusPresentation.make(for: record.syncState)
+    return "\(record.name)，\(nextDateText)，农历\(lunarText)，\(status.title)，\(status.detail)"
   }
 }

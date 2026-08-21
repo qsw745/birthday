@@ -19,6 +19,9 @@ struct BirthdayEditorView: View {
   @State private var editorModel: BirthdayEditorModel
   @State private var isShowingDeleteConfirmation = false
   @State private var isShowingDeleteFailure = false
+  @State private var isShowingPassedReminderChoice = false
+  @State private var isShowingImmediateReminderResult = false
+  @State private var immediateReminderMessage = ""
   @State private var activeOperation: ActiveOperation?
 
   private let record: BirthdayRecord?
@@ -27,7 +30,11 @@ struct BirthdayEditorView: View {
     self.model = model
     self.record = record
     _editorModel = State(
-      initialValue: BirthdayEditorModel(store: model.store, record: record)
+      initialValue: BirthdayEditorModel(
+        store: model.store,
+        record: record,
+        oneShotNotificationScheduler: model.oneShotNotificationScheduler
+      )
     )
   }
 
@@ -119,7 +126,7 @@ struct BirthdayEditorView: View {
               .disabled(isInteractionLocked)
               .accessibilityIdentifier("deleteBirthdayButton")
             } footer: {
-              Text("删除后将从本机立即隐藏，并在联网后同步删除。")
+              Text("删除后只会从本机立即隐藏。服务器同步尚未启用。")
             }
           }
         }
@@ -189,6 +196,26 @@ struct BirthdayEditorView: View {
       } message: {
         Text(editor.errorMessage ?? "本地记录仍然保留，请重试")
       }
+      .confirmationDialog(
+        "今天的提醒时间已过",
+        isPresented: $isShowingPassedReminderChoice,
+        titleVisibility: .visible
+      ) {
+        Button("现在提醒一次") {
+          save(resolution: .remindNow)
+        }
+        Button("从明年开始") {
+          save(resolution: .nextYear)
+        }
+        Button("取消", role: .cancel) {}
+      } message: {
+        Text("请选择是否立即提交一次本地通知请求；常规生日提醒将从下一次生日开始。")
+      }
+      .alert("生日已保存", isPresented: $isShowingImmediateReminderResult) {
+        Button("知道了") { dismiss() }
+      } message: {
+        Text(immediateReminderMessage)
+      }
     }
     .tint(ModernAirTheme.tide)
     .interactiveDismissDisabled(isInteractionLocked)
@@ -205,17 +232,37 @@ struct BirthdayEditorView: View {
     }
   }
 
-  private func save() {
+  private func save(resolution: PassedSameDayReminderResolution? = nil) {
     guard !isInteractionLocked else { return }
     activeOperation = .save
 
     Task {
-      guard await editorModel.save(timeZone: timeZone) else {
+      let outcome = await editorModel.save(resolution: resolution, timeZone: timeZone)
+      switch outcome {
+      case .requiresPassedReminderChoice:
         activeOperation = nil
-        return
+        isShowingPassedReminderChoice = true
+      case .failed:
+        activeOperation = nil
+      case .saved(let immediateReminder):
+        await model.reload()
+        guard let immediateReminder else {
+          dismiss()
+          return
+        }
+        switch immediateReminder {
+        case .scheduled:
+          dismiss()
+        case .notAuthorized:
+          activeOperation = nil
+          immediateReminderMessage = "立即提醒未安排：当前没有通知权限。常规提醒仍从明年开始。"
+          isShowingImmediateReminderResult = true
+        case .failed:
+          activeOperation = nil
+          immediateReminderMessage = "立即提醒请求未能安排。生日已保存在本机，常规提醒仍从明年开始。"
+          isShowingImmediateReminderResult = true
+        }
       }
-      await model.reload()
-      dismiss()
     }
   }
 
@@ -236,9 +283,9 @@ struct BirthdayEditorView: View {
 
   private var deleteConfirmationMessage: String {
     if let record {
-      return "确定删除“\(record.name)”吗？记录会立即从本机隐藏，并在联网后同步删除。"
+      return LocalOnlyStatusPresentation.deletionConfirmation(name: record.name)
     }
-    return "记录会立即从本机隐藏，并在联网后同步删除。"
+    return "删除后只会从本机隐藏。服务器同步尚未启用。"
   }
 }
 

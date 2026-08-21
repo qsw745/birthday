@@ -7,6 +7,10 @@ import Testing
 private struct FakeAppLockAuthenticator: AppLockAuthenticating {
   let result: Bool
 
+  func capability() -> AppLockCapability {
+    .faceID
+  }
+
   func unlock(reason: String) async throws -> Bool {
     result
   }
@@ -21,9 +25,14 @@ private struct FakeAppLockAuthenticator: AppLockAuthenticating {
 private struct FakeAppLockSystemContext: AppLockSystemContext {
   let availability: Result<Void, LocalAuthenticationSystemError>
   let evaluation: Result<Bool, LocalAuthenticationSystemError>
+  let biometry: AppLockBiometry
 
   func canEvaluateDeviceOwnerAuthentication() -> Result<Void, LocalAuthenticationSystemError> {
     availability
+  }
+
+  func availableBiometry() -> AppLockBiometry {
+    biometry
   }
 
   func evaluateDeviceOwnerAuthentication(reason: String) async throws -> Bool {
@@ -41,13 +50,32 @@ private struct FakeAppLockSystemContextFactory: AppLockSystemContextFactory {
 
 private func makeLocalAuthenticationService(
   availability: Result<Void, LocalAuthenticationSystemError> = .success(()),
+  biometry: AppLockBiometry = .faceID,
   evaluation: Result<Bool, LocalAuthenticationSystemError>
 ) -> LocalAuthenticationService {
   LocalAuthenticationService(
     contextFactory: FakeAppLockSystemContextFactory(
-      context: FakeAppLockSystemContext(availability: availability, evaluation: evaluation)
+      context: FakeAppLockSystemContext(
+        availability: availability,
+        evaluation: evaluation,
+        biometry: biometry
+      )
     )
   )
+}
+
+@Test func authenticationCapabilityDistinguishesFaceIDPasscodeAndUnavailable() {
+  let faceID = makeLocalAuthenticationService(biometry: .faceID, evaluation: .success(true))
+  let passcode = makeLocalAuthenticationService(biometry: .none, evaluation: .success(true))
+  let unavailable = makeLocalAuthenticationService(
+    availability: .failure(.unavailable),
+    biometry: .none,
+    evaluation: .success(true)
+  )
+
+  #expect(faceID.capability() == .faceID)
+  #expect(passcode.capability() == .devicePasscode)
+  #expect(unavailable.capability() == .unavailable)
 }
 
 @Test func localAuthenticationReportsUnavailableCapability() async {

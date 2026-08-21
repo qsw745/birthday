@@ -11,6 +11,20 @@ public enum AppLaunchState: Equatable, Sendable {
   }
 }
 
+public struct AppLockPreferenceDecision: Equatable, Sendable {
+  public let isEnabled: Bool
+  public let preferenceToPersist: Bool
+
+  public static func resolve(
+    storedPreference: Bool?,
+    capability: AppLockCapability
+  ) -> Self {
+    let requested = storedPreference ?? true
+    let enabled = requested && capability != .unavailable
+    return Self(isEnabled: enabled, preferenceToPersist: enabled)
+  }
+}
+
 public struct AppLockSessionState: Equatable, Sendable {
   public struct AuthenticationAttempt: Equatable, Sendable {
     fileprivate let generation: UInt64

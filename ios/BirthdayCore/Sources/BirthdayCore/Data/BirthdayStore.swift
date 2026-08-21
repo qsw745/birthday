@@ -59,13 +59,12 @@ public actor BirthdayStore: ModelActor {
       }
 
       let record = try map(entity)
-      modelContext.insert(
-        try makeOperation(
-          entityID: targetID,
-          operationType: "upsert",
-          record: record,
-          createdAt: now
-        ))
+      try coalesceOperation(
+        entityID: targetID,
+        operationType: "upsert",
+        record: record,
+        createdAt: now
+      )
       try transactionCommitter(modelContext)
       return record
     } catch {
@@ -86,6 +85,42 @@ public actor BirthdayStore: ModelActor {
     return try modelContext.fetch(descriptor).map { try map($0) }
   }
 
+  @discardableResult
+  public func refreshNextSolarDates(now: Date, timeZone: TimeZone) throws -> Int {
+    let descriptor = FetchDescriptor<BirthdayEntity>(
+      predicate: #Predicate { $0.deletedAt == nil }
+    )
+
+    do {
+      let entities = try modelContext.fetch(descriptor)
+      var refreshedCount = 0
+      for entity in entities {
+        _ = try requireKnownSyncState(entity.syncStateRaw)
+        let nextSolarDate = try calculator.nextOccurrence(
+          of: LunarBirthday(
+            month: entity.lunarMonth,
+            day: entity.lunarDay,
+            isLeapMonth: entity.isLeapMonth
+          ),
+          reminderMinutes: entity.reminderTimeMinutes,
+          after: now,
+          in: timeZone
+        )
+        guard entity.nextSolarDate != nextSolarDate else { continue }
+        entity.nextSolarDate = nextSolarDate
+        refreshedCount += 1
+      }
+
+      if refreshedCount > 0 {
+        try transactionCommitter(modelContext)
+      }
+      return refreshedCount
+    } catch {
+      modelContext.rollback()
+      throw error
+    }
+  }
+
   public func softDelete(id: UUID, now: Date) throws {
     let descriptor = FetchDescriptor<BirthdayEntity>(predicate: #Predicate { $0.id == id })
 
@@ -96,13 +131,12 @@ public actor BirthdayStore: ModelActor {
       entity.updatedAt = now
       entity.syncStateRaw = SyncState.pendingDelete.rawValue
       let record = try map(entity)
-      modelContext.insert(
-        try makeOperation(
-          entityID: id,
-          operationType: "delete",
-          record: record,
-          createdAt: now
-        ))
+      try coalesceOperation(
+        entityID: id,
+        operationType: "delete",
+        record: record,
+        createdAt: now
+      )
       try transactionCommitter(modelContext)
     } catch {
       modelContext.rollback()
@@ -120,13 +154,12 @@ public actor BirthdayStore: ModelActor {
       entity.updatedAt = now
       entity.syncStateRaw = SyncState.pending.rawValue
       let record = try map(entity)
-      modelContext.insert(
-        try makeOperation(
-          entityID: id,
-          operationType: "upsert",
-          record: record,
-          createdAt: now
-        ))
+      try coalesceOperation(
+        entityID: id,
+        operationType: "upsert",
+        record: record,
+        createdAt: now
+      )
       try transactionCommitter(modelContext)
     } catch {
       modelContext.rollback()
@@ -163,24 +196,52 @@ public actor BirthdayStore: ModelActor {
     entity.syncStateRaw = SyncState.pending.rawValue
   }
 
-  private func makeOperation(
+  private func coalesceOperation(
     entityID: UUID,
     operationType: String,
     record: BirthdayRecord,
     createdAt: Date
-  ) throws -> SyncOperationEntity {
-    let payloadJSON = try JSONEncoder().encode(record)
-    return SyncOperationEntity(
-      operationId: UUID(),
-      entityId: entityID,
-      operationType: operationType,
-      baseVersion: record.version,
-      payloadJSON: payloadJSON,
-      createdAt: createdAt,
-      attemptCount: 0,
-      nextRetryAt: nil,
-      lastErrorCategory: nil
+  ) throws {
+    let descriptor = FetchDescriptor<SyncOperationEntity>(
+      predicate: #Predicate { $0.entityId == entityID },
+      sortBy: [
+        SortDescriptor(\.createdAt),
+        SortDescriptor(\.operationId),
+      ]
     )
+    let existing = try modelContext.fetch(descriptor)
+
+    if operationType == "delete", record.version == 0,
+      existing.contains(where: { $0.operationType == "upsert" && $0.baseVersion == 0 })
+    {
+      for operation in existing { modelContext.delete(operation) }
+      return
+    }
+
+    let payloadJSON = try JSONEncoder().encode(BirthdayOutboxPayload(record: record))
+    if let keeper = existing.first {
+      keeper.operationType = operationType
+      keeper.baseVersion = record.version
+      keeper.payloadJSON = payloadJSON
+      keeper.attemptCount = 0
+      keeper.nextRetryAt = nil
+      keeper.lastErrorCategory = nil
+      for duplicate in existing.dropFirst() { modelContext.delete(duplicate) }
+      return
+    }
+
+    modelContext.insert(
+      SyncOperationEntity(
+        operationId: UUID(),
+        entityId: entityID,
+        operationType: operationType,
+        baseVersion: record.version,
+        payloadJSON: payloadJSON,
+        createdAt: createdAt,
+        attemptCount: 0,
+        nextRetryAt: nil,
+        lastErrorCategory: nil
+      ))
   }
 
   private func map(_ entity: BirthdayEntity) throws -> BirthdayRecord {

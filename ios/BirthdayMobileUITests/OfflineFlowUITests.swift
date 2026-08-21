@@ -18,7 +18,9 @@ final class OfflineFlowUITests: XCTestCase {
       unlockButton.tap()
     }
 
-    let addButton = app.buttons["addBirthdayButton"].firstMatch
+    let addButtons = app.buttons.matching(identifier: "addBirthdayButton")
+    XCTAssertEqual(addButtons.count, 1, "当前页面必须只有一个规范的添加生日入口")
+    let addButton = addButtons.element
     XCTAssertTrue(addButton.waitForExistence(timeout: 3))
     addButton.tap()
 
@@ -35,17 +37,21 @@ final class OfflineFlowUITests: XCTestCase {
     XCTAssertTrue(searchField.waitForExistence(timeout: 3))
     searchField.tap()
     searchField.typeText("妈妈")
-    app.staticTexts["妈妈"].firstMatch.tap()
+    app.staticTexts["妈妈"].tap()
 
     XCTAssertTrue(nameField.waitForExistence(timeout: 3))
     nameField.clearAndEnterText("妈妈更新")
     app.buttons["saveBirthdayButton"].tap()
     XCTAssertTrue(app.staticTexts["妈妈更新"].waitForExistence(timeout: 3))
 
-    app.staticTexts["妈妈更新"].firstMatch.tap()
+    app.staticTexts["妈妈更新"].tap()
     let deleteButton = app.buttons["deleteBirthdayButton"]
     XCTAssertTrue(deleteButton.waitForExistence(timeout: 3))
     deleteButton.tap()
+    XCTAssertTrue(
+      app.staticTexts["确定删除“妈妈更新”吗？删除后只会从本机隐藏。服务器同步尚未启用。"]
+        .waitForExistence(timeout: 3)
+    )
     app.buttons["确认删除"].tap()
     XCTAssertTrue(app.staticTexts["妈妈更新"].waitForNonExistence(timeout: 3))
   }
