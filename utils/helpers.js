@@ -1,7 +1,7 @@
 // utils/helpers.js
 const crypto = require('crypto')
 const moment = require('moment-timezone')
-const { Lunar } = require('lunar-javascript')
+const { Lunar, LunarYear, Solar } = require('lunar-javascript')
 
 const TZ = 'Asia/Shanghai'
 const STORAGE_FMT = 'YYYY-MM-DD HH:mm:ss'
@@ -45,14 +45,10 @@ function toShanghaiCandidate(ymd, h, m, s) {
 }
 
 function lunarToSolar(lunarYear, month, day, isLeapMonth) {
-  if (isLeapMonth) {
-    try {
-      return Lunar.fromYmd(lunarYear, -month, day).getSolar()
-    } catch {
-      return Lunar.fromYmd(lunarYear, month, day).getSolar()
-    }
-  }
-  return Lunar.fromYmd(lunarYear, month, day).getSolar()
+  const targetMonth = isLeapMonth && LunarYear.fromYear(lunarYear).getLeapMonth() === month
+    ? -month
+    : month
+  return Lunar.fromYmd(lunarYear, targetMonth, day).getSolar()
 }
 
 /**
@@ -77,7 +73,7 @@ function calculateNextSolarDate(item, nowInput = new Date()) {
   }
 
   // 以当前阳历对应的农历年为基准
-  let lunarYear = Lunar.fromDate(now.toDate()).getYear()
+  let lunarYear = Solar.fromYmd(now.year(), now.month() + 1, now.date()).getLunar().getYear()
 
   // 当年农历 -> 阳历
   let solar = lunarToSolar(lunarYear, lunarMonth, lunarDay, isLeap)
