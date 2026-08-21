@@ -70,7 +70,9 @@ private func makeLocalAuthenticationService(
 
 @Test(arguments: [LAError.Code.userCancel, .appCancel, .systemCancel])
 func localAuthenticationMapsCancellationErrors(_ code: LAError.Code) async {
-  let service = makeLocalAuthenticationService(evaluation: .failure(.laError(code.rawValue)))
+  let service = makeLocalAuthenticationService(
+    evaluation: .failure(.laError(domain: LAError.errorDomain, code: code.rawValue))
+  )
 
   await #expect(throws: AppLockError.cancelled) {
     try await service.unlock(reason: "解锁生日资料")
@@ -79,7 +81,22 @@ func localAuthenticationMapsCancellationErrors(_ code: LAError.Code) async {
 
 @Test(arguments: [LAError.Code.authenticationFailed, .invalidContext])
 func localAuthenticationMapsNonCancellationErrors(_ code: LAError.Code) async {
-  let service = makeLocalAuthenticationService(evaluation: .failure(.laError(code.rawValue)))
+  let service = makeLocalAuthenticationService(
+    evaluation: .failure(.laError(domain: LAError.errorDomain, code: code.rawValue))
+  )
+
+  await #expect(throws: AppLockError.evaluationFailed) {
+    try await service.unlock(reason: "解锁生日资料")
+  }
+}
+
+@Test(arguments: [LAError.Code.userCancel, .appCancel, .systemCancel])
+func localAuthenticationRejectsCancellationCodesFromAnotherDomain(_ code: LAError.Code) async {
+  let service = makeLocalAuthenticationService(
+    evaluation: .failure(
+      .laError(domain: "top.qisw.birthday.tests", code: code.rawValue)
+    )
+  )
 
   await #expect(throws: AppLockError.evaluationFailed) {
     try await service.unlock(reason: "解锁生日资料")

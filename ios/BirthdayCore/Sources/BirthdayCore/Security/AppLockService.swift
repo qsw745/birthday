@@ -13,7 +13,7 @@ public enum AppLockError: Error, Equatable, Sendable {
 
 internal enum LocalAuthenticationSystemError: Error, Sendable {
   case unavailable
-  case laError(Int)
+  case laError(domain: String, code: Int)
   case other
 }
 
@@ -44,7 +44,7 @@ internal final class SystemAppLockSystemContext: AppLockSystemContext, @unchecke
     var error: NSError?
     guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
       if let error {
-        return .failure(.laError(error.code))
+        return .failure(.laError(domain: error.domain, code: error.code))
       }
       return .failure(.unavailable)
     }
@@ -55,7 +55,7 @@ internal final class SystemAppLockSystemContext: AppLockSystemContext, @unchecke
     do {
       return try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
     } catch let error as NSError {
-      throw LocalAuthenticationSystemError.laError(error.code)
+      throw LocalAuthenticationSystemError.laError(domain: error.domain, code: error.code)
     } catch {
       throw LocalAuthenticationSystemError.other
     }
@@ -89,7 +89,8 @@ public struct LocalAuthenticationService: AppLockAuthenticating {
   }
 
   private func mapEvaluationError(_ error: LocalAuthenticationSystemError) -> AppLockError {
-    guard case .laError(let rawCode) = error,
+    guard case .laError(let domain, let rawCode) = error,
+      domain == LAError.errorDomain,
       let code = LAError.Code(rawValue: rawCode)
     else {
       return .evaluationFailed
