@@ -20,6 +20,22 @@ public struct ReminderConfig: Codable, Equatable, Sendable {
     public var emailAddress: String
     public var emailMessage: String
 
+    public init(
+        timeMinutes: Int,
+        notifyDayBefore: Bool,
+        notifySameDay: Bool,
+        emailEnabled: Bool,
+        emailAddress: String,
+        emailMessage: String
+    ) {
+        self.timeMinutes = timeMinutes
+        self.notifyDayBefore = notifyDayBefore
+        self.notifySameDay = notifySameDay
+        self.emailEnabled = emailEnabled
+        self.emailAddress = emailAddress
+        self.emailMessage = emailMessage
+    }
+
     public static let defaults = ReminderConfig(
         timeMinutes: 540,
         notifyDayBefore: true,
@@ -34,6 +50,12 @@ public struct BirthdayDraft: Equatable, Sendable {
     public var name: String
     public var lunarBirthday: LunarBirthday
     public var reminder: ReminderConfig
+
+    public init(name: String, lunarBirthday: LunarBirthday, reminder: ReminderConfig) {
+        self.name = name
+        self.lunarBirthday = lunarBirthday
+        self.reminder = reminder
+    }
 }
 
 public enum SyncState: String, Codable, Sendable {
@@ -51,6 +73,30 @@ public struct BirthdayRecord: Identifiable, Codable, Equatable, Sendable {
     public var updatedAt: Date
     public var deletedAt: Date?
     public var syncState: SyncState
+
+    public init(
+        id: UUID,
+        name: String,
+        lunarBirthday: LunarBirthday,
+        reminder: ReminderConfig,
+        nextSolarDate: Date?,
+        version: Int64,
+        createdAt: Date,
+        updatedAt: Date,
+        deletedAt: Date?,
+        syncState: SyncState
+    ) {
+        self.id = id
+        self.name = name
+        self.lunarBirthday = lunarBirthday
+        self.reminder = reminder
+        self.nextSolarDate = nextSolarDate
+        self.version = version
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.deletedAt = deletedAt
+        self.syncState = syncState
+    }
 }
 
 public struct SyncOperation: Identifiable, Equatable, Sendable {
@@ -64,4 +110,26 @@ public struct SyncOperation: Identifiable, Equatable, Sendable {
     public let attemptCount: Int
     public let nextRetryAt: Date?
     public let lastErrorCategory: String?
+
+    public init(
+        operationId: UUID,
+        entityId: UUID,
+        operationType: String,
+        baseVersion: Int64,
+        payloadJSON: Data,
+        createdAt: Date,
+        attemptCount: Int,
+        nextRetryAt: Date?,
+        lastErrorCategory: String?
+    ) {
+        self.operationId = operationId
+        self.entityId = entityId
+        self.operationType = operationType
+        self.baseVersion = baseVersion
+        self.payloadJSON = payloadJSON
+        self.createdAt = createdAt
+        self.attemptCount = attemptCount
+        self.nextRetryAt = nextRetryAt
+        self.lastErrorCategory = lastErrorCategory
+    }
 }

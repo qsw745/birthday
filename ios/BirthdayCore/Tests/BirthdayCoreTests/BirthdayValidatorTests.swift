@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import BirthdayCore
+import BirthdayCore
 
 @Test func rejectsEmptyName() {
     let draft = BirthdayDraft(
@@ -37,4 +37,35 @@ import Testing
     #expect(throws: BirthdayValidationError.invalidEmail) {
         try BirthdayValidator.validate(draft)
     }
+}
+
+@Test func exposesPublicInitializersForPersistenceAndSyncModels() {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let reminder = ReminderConfig.defaults
+    let record = BirthdayRecord(
+        id: UUID(),
+        name: "妈妈",
+        lunarBirthday: .init(month: 8, day: 15, isLeapMonth: false),
+        reminder: reminder,
+        nextSolarDate: now,
+        version: 1,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: nil,
+        syncState: .pending
+    )
+    let operation = SyncOperation(
+        operationId: UUID(),
+        entityId: record.id,
+        operationType: "upsert",
+        baseVersion: record.version,
+        payloadJSON: Data(),
+        createdAt: now,
+        attemptCount: 0,
+        nextRetryAt: nil,
+        lastErrorCategory: nil
+    )
+
+    #expect(operation.id == operation.operationId)
+    #expect(operation.entityId == record.id)
 }
