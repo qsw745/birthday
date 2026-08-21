@@ -118,7 +118,9 @@ function createReminderRuntime({
         expectedGeneration,
       ],
     )
-    if (!claim.affectedRows) return
+    if (!claim.affectedRows) {
+      return { sent: false, settled: false, reason: 'not_claimed' }
+    }
 
     const mailOptions = {
       from: process.env.SMTP_FROM || process.env.SMTP_USER,
@@ -150,11 +152,12 @@ function createReminderRuntime({
         logError(logger, '[email] reset status failed:', reminder.id, sanitizedError(resetError))
       }
       logError(logger, '[email] send failed:', reminder.id, sanitizedError(error))
-      return
+      return { sent: false, settled: false, reason: 'smtp_failed' }
     }
 
+    let settlement
     try {
-      await queryFn(
+      settlement = await queryFn(
         `UPDATE email_reminders r
          ${ACTIVE_REMINDER_JOIN}
             SET r.delivered_remind_time = ?,
@@ -179,9 +182,14 @@ function createReminderRuntime({
       )
     } catch (settleError) {
       logError(logger, '[email] success settlement failed:', reminder.id, sanitizedError(settleError))
-      return
+      return { sent: true, settled: false }
     }
-    logSafely(logger, 'log', '[email] sent & marked delivered:', reminder.id)
+    if (settlement.affectedRows === 1) {
+      logSafely(logger, 'log', '[email] SMTP 已完成并结算送达:', reminder.id)
+      return { sent: true, settled: true }
+    }
+    logSafely(logger, 'warn', '[email] SMTP 已完成但 claim 已替换或未结算:', reminder.id)
+    return { sent: true, settled: false }
   }
 
   function registerOneTimeJob(id, runAt, expectedRemindTime, expectedGeneration) {
@@ -218,11 +226,14 @@ function createReminderRuntime({
             AND r.remind_time <= NOW()
             AND b.deleted_at IS NULL`,
       )
+      const results = []
       for (const reminder of reminders) {
-        await sendReminderEmail(reminder, reminder.remind_time, reminder.generation)
+        results.push(await sendReminderEmail(reminder, reminder.remind_time, reminder.generation))
       }
+      return results
     } catch (error) {
       logError(logger, '[cron] batch send failed:', sanitizedError(error))
+      return []
     }
   }
 

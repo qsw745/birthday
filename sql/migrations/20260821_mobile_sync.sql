@@ -25,14 +25,10 @@ JOIN birthdays b ON b.id = r.birthday_id
          ELSE 'exact'
        END,
        r.generation = UUID(),
-       r.delivered_remind_time = CASE
-         WHEN r.status = 1 AND r.remind_time <= NOW() THEN r.remind_time
-         ELSE NULL
-       END,
-       r.status = CASE
-         WHEN r.status = 1 AND r.remind_time <= NOW() THEN 1
-         ELSE 0
-       END,
+       -- Legacy status=1 cannot prove SMTP delivery. Keep uncertain rows pending;
+       -- operators may restore confirmed deliveries before starting the new sender.
+       r.delivered_remind_time = NULL,
+       r.status = 0,
        r.claim_token = NULL,
        r.claim_generation = NULL,
        r.claim_remind_time = NULL,

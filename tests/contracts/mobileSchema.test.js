@@ -117,10 +117,11 @@ test('reminders persist independent claim ownership and delivered occurrence sta
   }
 })
 
-test('migration marks only already-due legacy status 1 rows as delivered', () => {
+test('migration resets every unverifiable legacy delivery status to pending', () => {
   const normalized = readSchema(migrationPath).replace(/\s+/g, ' ')
 
-  assert.match(normalized, /r\.delivered_remind_time = CASE WHEN r\.status = 1 AND r\.remind_time <= NOW\(\) THEN r\.remind_time ELSE NULL END/i)
-  assert.match(normalized, /r\.status = CASE WHEN r\.status = 1 AND r\.remind_time <= NOW\(\) THEN 1 ELSE 0 END/i)
+  assert.match(normalized, /r\.delivered_remind_time = NULL, r\.status = 0/i)
   assert.match(normalized, /r\.claim_token = NULL, r\.claim_generation = NULL, r\.claim_remind_time = NULL, r\.claimed_at = NULL/i)
+  assert.doesNotMatch(normalized, /r\.status = 1 AND r\.remind_time <= NOW\(\)/i)
+  assert.doesNotMatch(normalized, /THEN r\.remind_time ELSE NULL/i)
 })

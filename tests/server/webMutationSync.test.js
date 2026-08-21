@@ -977,6 +977,7 @@ test('T1 settlement keeps reconfigured T2 pending on either SMTP outcome', async
 
 test('stale claim takeover uses a new token and makes the old sender settlement a no-op', async () => {
   const smtpA = deferred()
+  const logger = recordingLogger()
   let sends = 0
   const harness = createReminderSendHarness({
     claimTokens: ['claim-a', 'claim-b'],
@@ -986,18 +987,21 @@ test('stale claim takeover uses a new token and makes the old sender settlement 
         if (sends === 1) await smtpA.promise
       },
     },
+    logger,
   })
   const poll = await startReminderHarness(harness)
 
   const senderA = poll()
   await new Promise(resolve => setImmediate(resolve))
   harness.state.claimed_at = '2026-08-22 11:44:59'
-  await poll()
+  const senderBResult = await poll()
   assert.equal(harness.state.status, 1)
   smtpA.resolve()
-  await senderA
+  const senderAResult = await senderA
 
   assert.equal(sends, 2)
+  assert.deepEqual(senderBResult, [{ sent: true, settled: true }])
+  assert.deepEqual(senderAResult, [{ sent: true, settled: false }])
   assert.deepEqual(harness.claims, [
     { token: 'claim-a', matched: true },
     { token: 'claim-b', matched: true },
@@ -1007,6 +1011,36 @@ test('stale claim takeover uses a new token and makes the old sender settlement 
     { type: 'success', token: 'claim-a', matched: false },
   ])
   assert.equal(harness.state.status, 1)
+  assert.equal(logger.entries.filter(([level]) => level === 'log').length, 1)
+  assert.equal(logger.entries.filter(([level]) => level === 'warn').length, 1)
+  const successLog = logger.entries.find(([level]) => level === 'log')
+  assert.match(successLog[1], /SMTP 已完成并结算送达/)
+  const warning = logger.entries.find(([level]) => level === 'warn')
+  assert.match(warning[1], /SMTP 已完成但 claim 已替换或未结算/)
+  const serializedLogs = JSON.stringify(logger.entries)
+  assert.doesNotMatch(serializedLogs, /claim-a|claim-b|mom@example\.com|生日快乐/)
+})
+
+test('an active claim returns an explicit not-claimed result without SMTP', async () => {
+  let sends = 0
+  const harness = createReminderSendHarness({
+    reminder: reminderRow({
+      remind_time: '2026-08-22 11:00:00',
+      claim_token: 'existing-claim',
+      claim_generation: reminderRow().generation,
+      claim_remind_time: '2026-08-22 11:00:00',
+      claimed_at: '2026-08-22 11:50:00',
+    }),
+    claimTokens: ['claim-b'],
+    transporterRef: { sendMail: async () => { sends += 1 } },
+  })
+  const poll = await startReminderHarness(harness)
+
+  const result = await poll()
+
+  assert.deepEqual(result, [{ sent: false, settled: false, reason: 'not_claimed' }])
+  assert.equal(sends, 0)
+  assert.equal(harness.state.claim_token, 'existing-claim')
 })
 
 test('throwing send-path logger cannot turn SMTP success into failure settlement', async () => {
@@ -1022,8 +1056,9 @@ test('throwing send-path logger cannot turn SMTP success into failure settlement
   })
   const poll = await startReminderHarness(harness)
 
-  await poll()
+  const result = await poll()
 
+  assert.deepEqual(result, [{ sent: true, settled: true }])
   assert.equal(harness.state.status, 1)
   assert.deepEqual(harness.settlements, [{ type: 'success', token: 'claim-a', matched: true }])
 })
@@ -1041,8 +1076,9 @@ test('throwing send-path error logger cannot block SMTP failure settlement', asy
   })
   const poll = await startReminderHarness(harness)
 
-  await poll()
+  const result = await poll()
 
+  assert.deepEqual(result, [{ sent: false, settled: false, reason: 'smtp_failed' }])
   assert.equal(harness.state.status, 0)
   assert.equal(harness.state.claim_token, null)
   assert.deepEqual(harness.settlements, [{ type: 'failure', token: 'claim-a', matched: true }])
