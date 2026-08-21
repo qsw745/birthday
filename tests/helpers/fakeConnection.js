@@ -77,7 +77,9 @@ class FakeDatabase {
     this.connections = []
     this.failures = []
     this.operationInsertRace = null
+    this.birthdayInsertRace = null
     this.birthdayLocks = new Map()
+    this.birthdayInsertReservations = new Map()
   }
 
   failNext(matcher, error) {
@@ -117,6 +119,32 @@ class FakeDatabase {
     next.resolve()
   }
 
+  async reserveBirthdayInsert(id, connection) {
+    const key = String(id)
+    while (true) {
+      if (this.state.birthdays.has(key)) {
+        const error = new Error('duplicate birthday id')
+        error.code = 'ER_DUP_ENTRY'
+        throw error
+      }
+      const current = this.birthdayInsertReservations.get(key)
+      if (!current) {
+        this.birthdayInsertReservations.set(key, { owner: connection, waiters: [] })
+        return
+      }
+      if (current.owner === connection) return
+      await new Promise(resolve => current.waiters.push(resolve))
+    }
+  }
+
+  releaseBirthdayInsertReservation(id, connection) {
+    const key = String(id)
+    const current = this.birthdayInsertReservations.get(key)
+    assert.equal(current?.owner, connection, `birthday insert reservation not owned: ${key}`)
+    this.birthdayInsertReservations.delete(key)
+    for (const resolve of current.waiters) resolve()
+  }
+
   birthday(id) {
     const row = this.state.birthdays.get(String(id))
     return row ? clone(row) : null
@@ -154,6 +182,7 @@ class FakeConnection {
     this.released = false
     this.destroyed = false
     this.lockedBirthdayIds = new Set()
+    this.insertedBirthdayIds = new Set()
   }
 
   static withBirthday(row) {
@@ -203,12 +232,14 @@ class FakeConnection {
     this.database.state = this.transactionState
     this.transactionState = null
     this.releaseBirthdayLocks()
+    this.releaseBirthdayInsertReservations()
   }
 
   async rollback() {
     this.lifecycle.push('rollback')
     this.transactionState = null
     this.releaseBirthdayLocks()
+    this.releaseBirthdayInsertReservations()
   }
 
   release() {
@@ -225,6 +256,7 @@ class FakeConnection {
     this.destroyed = true
     this.transactionState = null
     this.releaseBirthdayLocks()
+    this.releaseBirthdayInsertReservations()
   }
 
   releaseBirthdayLocks() {
@@ -234,10 +266,19 @@ class FakeConnection {
     this.lockedBirthdayIds.clear()
   }
 
+  releaseBirthdayInsertReservations() {
+    for (const id of this.insertedBirthdayIds) {
+      this.database.releaseBirthdayInsertReservation(id, this)
+    }
+    this.insertedBirthdayIds.clear()
+  }
+
   async lockBirthday(id) {
     this.requireTransaction('SELECT birthday FOR UPDATE')
     const key = String(id)
     if (this.lockedBirthdayIds.has(key)) return
+    this.transactionState = clone(this.database.state)
+    if (!this.database.state.birthdays.has(key)) return
     await this.database.acquireBirthdayLock(key, this)
     this.lockedBirthdayIds.add(key)
     // A locking read observes the latest state after any prior owner commits.
@@ -288,7 +329,7 @@ class FakeConnection {
         await this.lockBirthday(id)
       } else {
         assert.ok(
-          this.lockedBirthdayIds.has(id),
+          this.lockedBirthdayIds.has(id) || this.insertedBirthdayIds.has(id),
           'first birthday read must use FOR UPDATE',
         )
       }
@@ -300,11 +341,13 @@ class FakeConnection {
       this.requireTransaction(sql)
       assert.equal(params.length, 10)
       const [id, name, lunarMonth, lunarDay, isLeapMonth, remindTime, nextSolarDate, version, notifyDayBefore, notifySameDay] = params
-      if (this.state().birthdays.has(String(id))) {
-        const error = new Error('duplicate birthday id')
-        error.code = 'ER_DUP_ENTRY'
-        throw error
+      if (this.database.birthdayInsertRace) {
+        const race = this.database.birthdayInsertRace
+        this.database.birthdayInsertRace = null
+        race(this.database, { id, name })
       }
+      await this.database.reserveBirthdayInsert(id, this)
+      this.insertedBirthdayIds.add(String(id))
       this.state().birthdays.set(String(id), birthdayRow({
         id,
         name,

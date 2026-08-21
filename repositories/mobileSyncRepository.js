@@ -29,6 +29,11 @@ const BIRTHDAY_SELECT = `SELECT
   r.message AS message
 FROM birthdays b
 LEFT JOIN email_reminders r ON r.birthday_id = b.id`
+const MAX_OPERATION_RETRY_ROUNDS = 3
+const RETRYABLE_TRANSACTION_CODES = new Set([
+  'ER_LOCK_DEADLOCK',
+  'ER_LOCK_WAIT_TIMEOUT',
+])
 
 class MobileSyncDataConsistencyError extends Error {
   constructor() {
@@ -82,6 +87,13 @@ async function rollbackAfterFailure(connection, primaryError) {
     }
     return true
   }
+}
+
+function isRetryableOperationFailure(error) {
+  return Boolean(
+    error?.mobileBirthdayInsertRace
+    || RETRYABLE_TRANSACTION_CODES.has(error?.code),
+  )
 }
 
 function createMobileSyncRepository({
@@ -184,26 +196,37 @@ function createMobileSyncRepository({
     const operation = isNormalizedPushOperation(operationInput)
       ? operationInput
       : normalizePushRequest({ operations: [operationInput] }).operations[0]
-    const connection = await pool.getConnection()
-    let duplicateError = null
-    let destroyed = false
-    try {
-      await connection.beginTransaction()
-      const result = await applyMobileOperationFn(connection, { deviceId, operation })
-      await connection.commit()
-      return result
-    } catch (error) {
-      destroyed = await rollbackAfterFailure(connection, error)
-      if (error && error.mobileOperationResponseDuplicate) {
-        duplicateError = error
-      } else {
-        throw error
+    for (let retryRound = 0; ; retryRound += 1) {
+      const connection = await pool.getConnection()
+      let duplicateError = null
+      let shouldRetry = false
+      let destroyed = false
+      try {
+        await connection.beginTransaction()
+        const result = await applyMobileOperationFn(connection, { deviceId, operation })
+        await connection.commit()
+        return result
+      } catch (error) {
+        destroyed = await rollbackAfterFailure(connection, error)
+        if (error && error.mobileOperationResponseDuplicate) {
+          duplicateError = error
+        } else if (
+          isRetryableOperationFailure(error)
+          && retryRound < MAX_OPERATION_RETRY_ROUNDS
+        ) {
+          shouldRetry = true
+        } else {
+          throw error
+        }
+      } finally {
+        if (!destroyed) connection.release()
       }
-    } finally {
-      if (!destroyed) connection.release()
-    }
 
-    return recoverDuplicateOperation(deviceId, operation, duplicateError)
+      if (duplicateError) {
+        return recoverDuplicateOperation(deviceId, operation, duplicateError)
+      }
+      if (shouldRetry) continue
+    }
   }
 
   return { snapshot, pull, applyOperation }

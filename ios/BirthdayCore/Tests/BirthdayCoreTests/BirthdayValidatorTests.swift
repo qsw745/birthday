@@ -59,12 +59,20 @@ private func validationDraft(
     )
 }
 
-@Test func sharedEmailContractAcceptsMinimalDomainAndTrimsCommonWhitespaceForValidation() throws {
+@Test func sharedContractTrimsUnicodeWhiteSpaceButPreservesByteOrderMark() throws {
     try BirthdayValidator.validate(validationDraft(emailAddress: "a@b"))
     try BirthdayValidator.validate(validationDraft(
-        name: "\t\n妈妈\r ",
-        emailAddress: " \t a@b \n"
+        name: "\u{0085}妈妈\u{0085}",
+        emailAddress: "\u{0085}a@b\u{0085}"
     ))
+    try BirthdayValidator.validate(validationDraft(name: "\u{FEFF}"))
+    try BirthdayValidator.validate(validationDraft(emailAddress: "\u{FEFF}@\u{FEFF}"))
+    #expect(throws: BirthdayValidationError.emptyName) {
+        try BirthdayValidator.validate(validationDraft(name: "\u{0085}"))
+    }
+    #expect(throws: BirthdayValidationError.invalidEmail) {
+        try BirthdayValidator.validate(validationDraft(emailAddress: "\u{0085}@\u{0085}"))
+    }
 }
 
 @Test func sharedEmailContractRequiresExactlyOneNonEdgeAtSign() {
@@ -75,42 +83,73 @@ private func validationDraft(
     }
 }
 
-@Test func sharedNameLimitCountsExtendedGraphemeClusters() throws {
+@Test func sharedNameLimitProtectsBothGraphemeAndUTF8MB4ScalarCapacity() throws {
     let combining = "e\u{301}"
     let family = "👨‍👩‍👧‍👦"
-    for name in [String(repeating: combining, count: 64), String(repeating: family, count: 64)] {
-        #expect(name.count == 64)
+    for name in [
+        String(repeating: "人", count: 64),
+        String(repeating: combining, count: 32),
+        String(repeating: family, count: 9),
+    ] {
+        #expect(name.count <= 64)
+        #expect(name.unicodeScalars.count <= 64)
         try BirthdayValidator.validate(validationDraft(name: name))
     }
-    for name in [String(repeating: combining, count: 65), String(repeating: family, count: 65)] {
-        #expect(name.count == 65)
+    for name in [
+        String(repeating: "人", count: 65),
+        String(repeating: combining, count: 33),
+        String(repeating: family, count: 10),
+    ] {
+        #expect(name.count > 64 || name.unicodeScalars.count > 64)
         #expect(throws: BirthdayValidationError.nameTooLong) {
             try BirthdayValidator.validate(validationDraft(name: name))
         }
     }
 }
 
-@Test func sharedEmailLimitCountsExtendedGraphemeClusters() throws {
+@Test func sharedEmailLimitProtectsBothGraphemeAndUTF8MB4ScalarCapacity() throws {
     let combining = "e\u{301}"
-    let email128 = String(repeating: combining, count: 126) + "@b"
-    let email129 = String(repeating: combining, count: 127) + "@b"
-    #expect(email128.count == 128)
-    #expect(email129.count == 129)
-    try BirthdayValidator.validate(validationDraft(emailAddress: email128))
-    #expect(throws: BirthdayValidationError.invalidEmail) {
-        try BirthdayValidator.validate(validationDraft(emailAddress: email129))
+    let family = "👨‍👩‍👧‍👦"
+    for email in [
+        String(repeating: "a", count: 126) + "@b",
+        String(repeating: combining, count: 63) + "@b",
+        String(repeating: family, count: 18) + "@b",
+    ] {
+        #expect(email.count <= 128)
+        #expect(email.unicodeScalars.count <= 128)
+        try BirthdayValidator.validate(validationDraft(emailAddress: email))
+    }
+    for email in [
+        String(repeating: "a", count: 127) + "@b",
+        String(repeating: combining, count: 64) + "@b",
+        String(repeating: family, count: 19) + "@b",
+    ] {
+        #expect(email.count > 128 || email.unicodeScalars.count > 128)
+        #expect(throws: BirthdayValidationError.invalidEmail) {
+            try BirthdayValidator.validate(validationDraft(emailAddress: email))
+        }
     }
 }
 
-@Test func sharedEmailMessageLimitUsesFinalUTF8StorageBytesOnlyWhenEnabled() throws {
+@Test func sharedEmailMessageLimitCapsFinalStorageAt32768UTF8BytesOnlyWhenEnabled() throws {
     try BirthdayValidator.validate(validationDraft(
         name: "M",
-        emailMessage: String(repeating: "a", count: 65_534)
+        emailMessage: String(repeating: "a", count: 32_767)
     ))
     #expect(throws: BirthdayValidationError.emailMessageTooLong) {
         try BirthdayValidator.validate(validationDraft(
             name: "M",
-            emailMessage: String(repeating: "a", count: 65_535)
+            emailMessage: String(repeating: "a", count: 32_768)
+        ))
+    }
+    try BirthdayValidator.validate(validationDraft(
+        name: "M",
+        emailMessage: String(repeating: "🎂", count: 8_191)
+    ))
+    #expect(throws: BirthdayValidationError.emailMessageTooLong) {
+        try BirthdayValidator.validate(validationDraft(
+            name: "M",
+            emailMessage: String(repeating: "🎂", count: 8_192)
         ))
     }
     try BirthdayValidator.validate(validationDraft(

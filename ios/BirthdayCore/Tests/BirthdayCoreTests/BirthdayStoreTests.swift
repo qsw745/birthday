@@ -286,6 +286,33 @@ private func insertSyncedBirthday(
   #expect(object["nextSolarDate"] == nil)
 }
 
+@Test func disabledEmailOutboxClearsUnusedAddressAndMessageWithoutRewritingLocalRecord() async throws {
+  let store = makeStore(try makeContainer())
+  let reminder = ReminderConfig(
+    timeMinutes: 540,
+    notifyDayBefore: true,
+    notifySameDay: true,
+    emailEnabled: false,
+    emailAddress: "keep-locally@example.com",
+    emailMessage: String(repeating: "🎂", count: 9_000)
+  )
+
+  let saved = try await store.save(
+    draft(name: "妈妈", reminder: reminder),
+    id: nil,
+    now: storeNow,
+    timeZone: storeTimeZone
+  )
+  let operation = try #require(try await store.pendingOperations().only)
+  let payload = try JSONDecoder().decode(BirthdayOutboxPayload.self, from: operation.payloadJSON)
+
+  #expect(saved.reminder.emailAddress == "keep-locally@example.com")
+  #expect(saved.reminder.emailMessage == reminder.emailMessage)
+  #expect(payload.emailEnabled == false)
+  #expect(payload.emailAddress == "")
+  #expect(payload.emailMessage == "")
+}
+
 @Test func derivedDateRefreshRollsYearWithoutOutboxOrServerVersionMutation() async throws {
   let store = makeStore(try makeContainer())
   let saved = try await store.save(

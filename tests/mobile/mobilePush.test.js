@@ -12,6 +12,7 @@ const {
   validPayload,
 } = require('../helpers/fakeConnection')
 const {
+  MAX_PUSH_REQUEST_BYTES,
   graphemeLength,
   normalizeBirthdayPayload,
   normalizePushRequest,
@@ -34,6 +35,17 @@ function operation(overrides = {}) {
     payload: validPayload(),
     ...overrides,
   }
+}
+
+function pushBodyWithCompactSize(targetBytes) {
+  const body = { operations: [operation({
+    payload: validPayload({ emailEnabled: false, emailAddress: '', emailMessage: '' }),
+  })] }
+  const baseBytes = Buffer.byteLength(JSON.stringify(body), 'utf8')
+  assert.ok(targetBytes >= baseBytes)
+  body.operations[0].payload.emailMessage = 'x'.repeat(targetBytes - baseBytes)
+  assert.equal(Buffer.byteLength(JSON.stringify(body), 'utf8'), targetBytes)
+  return body
 }
 
 function createRepository(database, options = {}) {
@@ -117,10 +129,11 @@ test('semantic normalization finds the next real lunar day 30 instead of failing
   assert.equal(normalized.operations[0].payload.nextSolarDate, '2028-03-25 09:00:00')
 })
 
-test('server validation matches iOS for trimmed minimal email addresses and common whitespace', () => {
+test('server and iOS share Unicode White_Space trimming while preserving U+FEFF', () => {
   for (const { name, emailAddress } of [
     { name: '妈妈', emailAddress: 'a@b' },
     { name: '\t\n妈妈\r ', emailAddress: ' \t a@b \n' },
+    { name: '\u0085妈妈\u0085', emailAddress: '\u0085a@b\u0085' },
   ]) {
     const normalized = normalizeBirthdayPayload(validPayload({
       name,
@@ -131,6 +144,22 @@ test('server validation matches iOS for trimmed minimal email addresses and comm
     assert.equal(normalized.emailAddress, 'a@b')
   }
 
+  const bom = '\uFEFF'
+  assert.equal(normalizeBirthdayPayload(validPayload({ name: bom })).name, bom)
+  assert.equal(normalizeBirthdayPayload(validPayload({
+    emailEnabled: true,
+    emailAddress: `${bom}@${bom}`,
+  })).emailAddress, `${bom}@${bom}`)
+
+  assert.throws(
+    () => normalizeBirthdayPayload(validPayload({ name: '\u0085' })),
+    error => error.code === 'invalid_birthday_payload',
+  )
+  assert.throws(
+    () => normalizeBirthdayPayload(validPayload({ emailEnabled: true, emailAddress: '\u0085@\u0085' })),
+    error => error.code === 'invalid_birthday_payload',
+  )
+
   for (const emailAddress of ['@b', 'a@', 'a@@b']) {
     assert.throws(
       () => normalizeBirthdayPayload(validPayload({ emailEnabled: true, emailAddress })),
@@ -139,36 +168,45 @@ test('server validation matches iOS for trimmed minimal email addresses and comm
   }
 })
 
-test('server name and email limits count extended grapheme clusters like Swift String.count', () => {
+test('server name and email limits protect both grapheme and utf8mb4 scalar column capacities', () => {
   const combining = 'e\u0301'
   const family = '👨‍👩‍👧‍👦'
-  for (const name of [combining.repeat(64), family.repeat(64)]) {
-    assert.equal(graphemeLength(name), 64)
+  for (const name of ['人'.repeat(64), combining.repeat(32), family.repeat(9)]) {
+    assert.ok(graphemeLength(name) <= 64)
+    assert.ok(Array.from(name).length <= 64)
     assert.doesNotThrow(() => normalizeBirthdayPayload(validPayload({ name })))
   }
-  for (const name of [combining.repeat(65), family.repeat(65)]) {
-    assert.equal(graphemeLength(name), 65)
+  for (const name of ['人'.repeat(65), combining.repeat(33), family.repeat(10)]) {
+    assert.ok(graphemeLength(name) > 64 || Array.from(name).length > 64)
     assert.throws(
       () => normalizeBirthdayPayload(validPayload({ name })),
       error => error.code === 'invalid_birthday_payload',
     )
   }
 
-  const email128 = `${combining.repeat(126)}@b`
-  const email129 = `${combining.repeat(127)}@b`
-  assert.equal(graphemeLength(email128), 128)
-  assert.equal(graphemeLength(email129), 129)
-  assert.doesNotThrow(() => normalizeBirthdayPayload(validPayload({
-    emailEnabled: true,
-    emailAddress: email128,
-  })))
-  assert.throws(
-    () => normalizeBirthdayPayload(validPayload({
+  for (const emailAddress of [
+    `${'a'.repeat(126)}@b`,
+    `${combining.repeat(63)}@b`,
+    `${family.repeat(18)}@b`,
+  ]) {
+    assert.ok(graphemeLength(emailAddress) <= 128)
+    assert.ok(Array.from(emailAddress).length <= 128)
+    assert.doesNotThrow(() => normalizeBirthdayPayload(validPayload({
       emailEnabled: true,
-      emailAddress: email129,
-    })),
-    error => error.code === 'invalid_birthday_payload',
-  )
+      emailAddress,
+    })))
+  }
+  for (const emailAddress of [
+    `${'a'.repeat(127)}@b`,
+    `${combining.repeat(64)}@b`,
+    `${family.repeat(19)}@b`,
+  ]) {
+    assert.ok(graphemeLength(emailAddress) > 128 || Array.from(emailAddress).length > 128)
+    assert.throws(
+      () => normalizeBirthdayPayload(validPayload({ emailEnabled: true, emailAddress })),
+      error => error.code === 'invalid_birthday_payload',
+    )
+  }
 })
 
 test('server fails explicitly if Intl.Segmenter is unavailable', () => {
@@ -178,19 +216,34 @@ test('server fails explicitly if Intl.Segmenter is unavailable', () => {
   )
 })
 
-test('email message TEXT limit matches the iOS UTF-8 contract only while email is enabled', () => {
+test('enabled email final storage is capped at 32768 UTF-8 bytes while disabled content is ignored', () => {
   assert.doesNotThrow(() => normalizeBirthdayPayload(validPayload({
     name: 'M',
     emailEnabled: true,
     emailAddress: 'a@b',
-    emailMessage: 'a'.repeat(65534),
+    emailMessage: 'a'.repeat(32767),
   })))
   assert.throws(
     () => normalizeBirthdayPayload(validPayload({
       name: 'M',
       emailEnabled: true,
       emailAddress: 'a@b',
-      emailMessage: 'a'.repeat(65535),
+      emailMessage: 'a'.repeat(32768),
+    })),
+    error => error.code === 'invalid_birthday_payload',
+  )
+  assert.doesNotThrow(() => normalizeBirthdayPayload(validPayload({
+    name: 'M',
+    emailEnabled: true,
+    emailAddress: 'a@b',
+    emailMessage: '🎂'.repeat(8191),
+  })))
+  assert.throws(
+    () => normalizeBirthdayPayload(validPayload({
+      name: 'M',
+      emailEnabled: true,
+      emailAddress: 'a@b',
+      emailMessage: '🎂'.repeat(8192),
     })),
     error => error.code === 'invalid_birthday_payload',
   )
@@ -319,6 +372,70 @@ test('request envelope requires 1...50 operations, canonical UUIDs, UInt64 strin
   )
 })
 
+test('push accepts a compact body through 60 KiB and rejects the next byte before opening a connection', async () => {
+  const contractBytes = 60 * 1024
+
+  const acceptedDatabase = new FakeDatabase()
+  const acceptedPool = new FakePool(acceptedDatabase)
+  const acceptedApp = createPushApp({
+    repository: createMobileSyncRepository({ pool: acceptedPool }),
+  })
+  const accepted = await request(acceptedApp)
+    .post('/api/mobile/sync/push')
+    .send(pushBodyWithCompactSize(contractBytes))
+  assert.equal(accepted.status, 200)
+  assert.equal(acceptedPool.getConnectionCalls, 1)
+
+  const rejectedDatabase = new FakeDatabase()
+  const rejectedPool = new FakePool(rejectedDatabase)
+  const rejectedApp = createPushApp({
+    repository: createMobileSyncRepository({ pool: rejectedPool }),
+  })
+  const rejected = await request(rejectedApp)
+    .post('/api/mobile/sync/push')
+    .send(pushBodyWithCompactSize(contractBytes + 1))
+  assert.equal(rejected.status, 400)
+  assert.deepEqual(rejected.body, { error: 'invalid_birthday_payload' })
+  assert.equal(rejectedPool.getConnectionCalls, 0)
+  assert.equal(MAX_PUSH_REQUEST_BYTES, contractBytes)
+})
+
+test('the production-equivalent 64 KiB parser returns 413 before push validation', async () => {
+  const database = new FakeDatabase()
+  const pool = new FakePool(database)
+  const app = createPushApp({ repository: createMobileSyncRepository({ pool }) })
+  app.use((error, req, res, next) => {
+    if (error?.status === 413) return res.sendStatus(413)
+    return next(error)
+  })
+  const response = await request(app)
+    .post('/api/mobile/sync/push')
+    .send(pushBodyWithCompactSize((64 * 1024) + 1))
+
+  assert.equal(response.status, 413)
+  assert.equal(pool.getConnectionCalls, 0)
+})
+
+test('one operation at the 32768-byte enabled-email storage limit fits the push envelope', async () => {
+  const database = new FakeDatabase()
+  const pool = new FakePool(database)
+  const app = createPushApp({ repository: createMobileSyncRepository({ pool }) })
+  const body = { operations: [operation({
+    payload: validPayload({
+      name: 'M',
+      emailEnabled: true,
+      emailAddress: 'a@b',
+      emailMessage: 'a'.repeat(32767),
+    }),
+  })] }
+  assert.ok(Buffer.byteLength(JSON.stringify(body), 'utf8') < 60 * 1024)
+
+  const response = await request(app).post('/api/mobile/sync/push').send(body)
+  assert.equal(response.status, 200)
+  assert.equal(response.body.results[0].status, 'applied')
+  assert.equal(pool.getConnectionCalls, 1)
+})
+
 test('new upsert atomically inserts birthday, one email reminder, one change, and its stored response', async () => {
   const database = new FakeDatabase()
   const repository = createRepository(database)
@@ -385,6 +502,35 @@ test('FakeConnection rejects a first birthday read that omits FOR UPDATE', async
   await connection.rollback()
 })
 
+test('locking reads for one missing birthday do not invent an exclusive row lock', async () => {
+  const database = new FakeDatabase()
+  const first = database.createConnection()
+  const second = database.createConnection()
+  const sql = `SELECT b.id
+    FROM birthdays b
+    LEFT JOIN email_reminders r ON r.birthday_id = b.id
+    WHERE b.id = ?
+    FOR UPDATE`
+  await first.beginTransaction()
+  await second.beginTransaction()
+
+  const [firstRows] = await first.query(sql, [BIRTHDAY_ID])
+  const secondRead = second.query(sql, [BIRTHDAY_ID])
+  let secondOutcome
+  try {
+    secondOutcome = await Promise.race([
+      secondRead.then(([rows]) => ({ kind: 'read', rows })),
+      new Promise(resolve => setImmediate(() => resolve({ kind: 'blocked' }))),
+    ])
+    assert.deepEqual(firstRows, [])
+    assert.deepEqual(secondOutcome, { kind: 'read', rows: [] })
+  } finally {
+    await first.rollback()
+    await secondRead
+    await second.rollback()
+  }
+})
+
 test('concurrent updates to one existing birthday serialize so only one baseVersion applies', async () => {
   const database = new FakeDatabase({ birthdays: [birthdayRow({ version: '1' })] })
   const repository = createRepository(database)
@@ -411,9 +557,10 @@ test('concurrent updates to one existing birthday serialize so only one baseVers
   assert.equal(database.state.operations.size, 2)
 })
 
-test('concurrent creates for one missing birthday serialize the gap so only one applies', async () => {
+test('concurrent creates for one missing birthday resolve the primary-key race as one applied and one persisted conflict', async () => {
   const database = new FakeDatabase()
-  const repository = createRepository(database)
+  const pool = new FakePool(database)
+  const repository = createMobileSyncRepository({ pool })
   const results = await Promise.all([
     repository.applyOperation(DEVICE_ID, operation({ payload: validPayload({ name: '第一项' }) })),
     repository.applyOperation(DEVICE_ID, operation({
@@ -426,21 +573,134 @@ test('concurrent creates for one missing birthday serialize the gap so only one 
   assert.equal(database.birthday(BIRTHDAY_ID).version, '1')
   assert.equal(database.state.changes.length, 1)
   assert.equal(database.state.operations.size, 2)
+  assert.equal(pool.getConnectionCalls, 3)
+  assert.deepEqual(database.connections.map(connection => connection.lifecycle), [
+    ['begin', 'commit', 'release'],
+    ['begin', 'rollback', 'release'],
+    ['begin', 'commit', 'release'],
+  ])
 })
 
-test('a duplicate-key error from a business INSERT is never recovered as operation idempotency', async () => {
+test('a birthday primary-key race retries with a new transaction and persists conflict against the winner', async () => {
   const database = new FakeDatabase()
-  const duplicate = Object.assign(new Error('birthday uniqueness failed'), { code: 'ER_DUP_ENTRY' })
-  database.failNext(/^INSERT INTO birthdays /, duplicate)
+  database.birthdayInsertRace = db => {
+    db.state.birthdays.set(BIRTHDAY_ID, birthdayRow({ name: '并发赢家', version: '1' }))
+    db.state.changes.push({
+      seq: '1',
+      entity_type: 'birthday',
+      entity_id: BIRTHDAY_ID,
+      operation: 'upsert',
+      version: '1',
+    })
+  }
   const pool = new FakePool(database)
   const repository = createMobileSyncRepository({ pool })
 
+  const result = await repository.applyOperation(DEVICE_ID, operation())
+
+  assert.equal(result.status, 'conflict')
+  assert.equal(result.remote.name, '并发赢家')
+  assert.equal(database.operation(OPERATION_ID).response_json.status, 'conflict')
+  assert.equal(database.state.changes.length, 1)
+  assert.equal(pool.getConnectionCalls, 2)
+  assert.deepEqual(database.connections.map(connection => connection.lifecycle), [
+    ['begin', 'rollback', 'release'],
+    ['begin', 'commit', 'release'],
+  ])
+})
+
+test('deadlock and lock-wait timeout each retry the complete operation on a new connection', async () => {
+  for (const code of ['ER_LOCK_DEADLOCK', 'ER_LOCK_WAIT_TIMEOUT']) {
+    const database = new FakeDatabase()
+    const transient = Object.assign(new Error(`${code} transient`), { code })
+    database.failNext(/^SELECT .* FROM birthdays .* FOR UPDATE$/i, transient)
+    const pool = new FakePool(database)
+
+    const result = await createMobileSyncRepository({ pool }).applyOperation(DEVICE_ID, operation())
+
+    assert.equal(result.status, 'applied')
+    assert.equal(pool.getConnectionCalls, 2)
+    assert.deepEqual(database.connections.map(connection => connection.lifecycle), [
+      ['begin', 'rollback', 'release'],
+      ['begin', 'commit', 'release'],
+    ])
+  }
+})
+
+test('three retry rounds exhausted rethrow the final retryable database error unchanged', async () => {
+  const database = new FakeDatabase()
+  const failures = Array.from({ length: 4 }, (_, index) => Object.assign(
+    new Error(`timeout ${index + 1}`),
+    { code: 'ER_LOCK_WAIT_TIMEOUT' },
+  ))
+  for (const failure of failures) {
+    database.failNext(/^SELECT .* FROM birthdays .* FOR UPDATE$/i, failure)
+  }
+  const pool = new FakePool(database)
+
   await assert.rejects(
-    repository.applyOperation(DEVICE_ID, operation()),
-    error => error === duplicate && error.mobileOperationResponseDuplicate !== true,
+    createMobileSyncRepository({ pool }).applyOperation(DEVICE_ID, operation()),
+    error => error === failures[3],
+  )
+  assert.equal(pool.getConnectionCalls, 4)
+  assert.deepEqual(database.connections.map(connection => connection.lifecycle), [
+    ['begin', 'rollback', 'release'],
+    ['begin', 'rollback', 'release'],
+    ['begin', 'rollback', 'release'],
+    ['begin', 'rollback', 'release'],
+  ])
+})
+
+test('retry destroys a connection whose rollback fails before using a fresh transaction', async () => {
+  const database = new FakeDatabase()
+  const deadlock = Object.assign(new Error('deadlock'), { code: 'ER_LOCK_DEADLOCK' })
+  const rollbackFailure = Object.assign(new Error('rollback failed'), { code: 'ER_ROLLBACK' })
+  database.failNext(/^SELECT .* FROM birthdays .* FOR UPDATE$/i, deadlock)
+  let issued = 0
+  const pool = {
+    getConnectionCalls: 0,
+    async getConnection() {
+      this.getConnectionCalls += 1
+      const connection = database.createConnection()
+      if (issued === 0) {
+        connection.rollback = async function rollbackError() {
+          this.lifecycle.push('rollback')
+          throw rollbackFailure
+        }
+      }
+      issued += 1
+      return connection
+    },
+  }
+
+  const result = await createMobileSyncRepository({ pool }).applyOperation(DEVICE_ID, operation())
+
+  assert.equal(result.status, 'applied')
+  assert.equal(pool.getConnectionCalls, 2)
+  assert.deepEqual(database.connections.map(connection => connection.lifecycle), [
+    ['begin', 'rollback', 'destroy'],
+    ['begin', 'commit', 'release'],
+  ])
+})
+
+test('a duplicate-key error from a non-birthday INSERT is never retried or recovered as idempotency', async () => {
+  const originalBirthday = birthdayRow({ version: '1' })
+  const database = new FakeDatabase({ birthdays: [originalBirthday] })
+  const duplicate = Object.assign(new Error('reminder uniqueness failed'), { code: 'ER_DUP_ENTRY' })
+  database.failNext(/^INSERT INTO email_reminders /, duplicate)
+  const pool = new FakePool(database)
+
+  await assert.rejects(
+    createMobileSyncRepository({ pool }).applyOperation(DEVICE_ID, operation({
+      baseVersion: '1',
+      payload: validPayload({ emailEnabled: true, emailAddress: 'a@b' }),
+    })),
+    error => error === duplicate
+      && error.mobileBirthdayInsertRace !== true
+      && error.mobileOperationResponseDuplicate !== true,
   )
   assert.equal(pool.getConnectionCalls, 1)
-  assert.equal(database.birthday(BIRTHDAY_ID), null)
+  assert.deepEqual(database.birthday(BIRTHDAY_ID), originalBirthday)
   assert.equal(database.operation(OPERATION_ID), null)
 })
 

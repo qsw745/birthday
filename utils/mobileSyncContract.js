@@ -6,9 +6,11 @@ const LIMIT_PATTERN = /^[1-9]\d*$/
 const TIME_PATTERN = /^(\d{2}):(\d{2})(?::(\d{2}))?$/
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const UINT64_PATTERN = /^(?:0|[1-9]\d*)$/
+const EDGE_WHITE_SPACE_PATTERN = /^(?:\p{White_Space})+|(?:\p{White_Space})+$/gu
 const STORAGE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
 const UINT64_MAX = 18446744073709551615n
-const MAX_TEXT_BYTES = 65535
+const MAX_ENABLED_EMAIL_STORAGE_BYTES = 32768
+const MAX_PUSH_REQUEST_BYTES = 60 * 1024
 const MAX_LUNAR_YEAR_PROBES = 20
 const NORMALIZED_PUSH_OPERATION = Symbol('normalizedPushOperation')
 const DEFAULT_GRAPHEME_SEGMENTER = (
@@ -65,6 +67,14 @@ function graphemeLength(value, segmenter = DEFAULT_GRAPHEME_SEGMENTER) {
   return count
 }
 
+function trimUnicodeWhiteSpace(value) {
+  return value.replace(EDGE_WHITE_SPACE_PATTERN, '')
+}
+
+function fitsUTF8MB4Column(value, maximum) {
+  return graphemeLength(value) <= maximum && Array.from(value).length <= maximum
+}
+
 function isValidEmailAddress(emailAddress) {
   const atIndex = emailAddress.indexOf('@')
   return (
@@ -117,8 +127,8 @@ function normalizeBirthdayPayload(payload, dateOptions) {
   const normalizedId = normalizeUUID(id)
   if (typeof rawName !== 'string') throw invalidBirthdayPayload()
 
-  const name = rawName.trim()
-  if (!name || graphemeLength(name) > 64) throw invalidBirthdayPayload()
+  const name = trimUnicodeWhiteSpace(rawName)
+  if (!name || !fitsUTF8MB4Column(name, 64)) throw invalidBirthdayPayload()
   if (!Number.isInteger(lunarMonth) || lunarMonth < 1 || lunarMonth > 12) {
     throw invalidBirthdayPayload()
   }
@@ -142,14 +152,14 @@ function normalizeBirthdayPayload(payload, dateOptions) {
     throw invalidBirthdayPayload()
   }
 
-  let emailAddress = rawEmailAddress.trim()
+  let emailAddress = trimUnicodeWhiteSpace(rawEmailAddress)
   let emailMessage = rawEmailMessage
   if (emailEnabled) {
     if (
       !emailAddress
-      || graphemeLength(emailAddress) > 128
+      || !fitsUTF8MB4Column(emailAddress, 128)
       || !isValidEmailAddress(emailAddress)
-      || Buffer.byteLength(`${name}${emailMessage}`, 'utf8') > MAX_TEXT_BYTES
+      || Buffer.byteLength(`${name}${emailMessage}`, 'utf8') > MAX_ENABLED_EMAIL_STORAGE_BYTES
     ) {
       throw invalidBirthdayPayload()
     }
@@ -188,7 +198,20 @@ function isNormalizedPushOperation(operation) {
 }
 
 function normalizePushRequest(body, dateOptions) {
-  if (!isPlainObject(body) || !Array.isArray(body.operations)) {
+  if (!isPlainObject(body)) throw invalidBirthdayPayload()
+  let compactJSON
+  try {
+    compactJSON = JSON.stringify(body)
+  } catch {
+    throw invalidBirthdayPayload()
+  }
+  if (
+    typeof compactJSON !== 'string'
+    || Buffer.byteLength(compactJSON, 'utf8') > MAX_PUSH_REQUEST_BYTES
+  ) {
+    throw invalidBirthdayPayload()
+  }
+  if (!Array.isArray(body.operations)) {
     throw invalidBirthdayPayload()
   }
   if (body.operations.length > 50) {
@@ -334,6 +357,7 @@ function serializeBirthdayRow(row) {
 }
 
 module.exports = {
+  MAX_PUSH_REQUEST_BYTES,
   MobileSyncValidationError,
   decimalString,
   graphemeLength,

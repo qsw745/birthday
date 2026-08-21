@@ -161,7 +161,7 @@ public struct BirthdayOutboxPayload: Codable, Equatable, Sendable {
         notifyDayBefore = record.reminder.notifyDayBefore
         notifySameDay = record.reminder.notifySameDay
         emailEnabled = record.reminder.emailEnabled
-        emailAddress = record.reminder.emailAddress
-        emailMessage = record.reminder.emailMessage
+        emailAddress = record.reminder.emailEnabled ? record.reminder.emailAddress : ""
+        emailMessage = record.reminder.emailEnabled ? record.reminder.emailMessage : ""
     }
 }

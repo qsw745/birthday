@@ -143,13 +143,20 @@ async function upsertBirthday(connection, operation, currentRow, version) {
       [...birthdayParams, operation.entityId],
     )
   } else {
-    await connection.query(
-      `INSERT INTO birthdays
-        (id, name, lunarMonth, lunarDay, isLeapMonth, remindTime, nextSolarDate,
-         version, deleted_at, notify_day_before, notify_same_day)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
-      [operation.entityId, ...birthdayParams],
-    )
+    try {
+      await connection.query(
+        `INSERT INTO birthdays
+          (id, name, lunarMonth, lunarDay, isLeapMonth, remindTime, nextSolarDate,
+           version, deleted_at, notify_day_before, notify_same_day)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+        [operation.entityId, ...birthdayParams],
+      )
+    } catch (error) {
+      if (error && error.code === 'ER_DUP_ENTRY') {
+        Object.defineProperty(error, 'mobileBirthdayInsertRace', { value: true })
+      }
+      throw error
+    }
   }
 
   if (payload.emailEnabled) {
