@@ -51,6 +51,12 @@ test('update job filters tombstones from birthdays, self-heal, and derived remin
   const heal = queries.find(sql => /remind_time > NOW/.test(sql))
   assert.match(heal, /JOIN birthdays b ON b\.id = r\.birthday_id/)
   assert.match(heal, /b\.deleted_at IS NULL/)
+  assert.match(heal, /r\.delivered_remind_time = NULL/)
+  assert.match(heal, /r\.generation = UUID\(\)/)
+  assert.match(heal, /r\.claim_token = NULL/)
+  assert.match(heal, /r\.claim_generation = NULL/)
+  assert.match(heal, /r\.claim_remind_time = NULL/)
+  assert.match(heal, /r\.claimed_at = NULL/)
   const birthdayUpdate = queries.find(sql => /^UPDATE birthdays SET nextSolarDate/.test(sql))
   assert.match(birthdayUpdate, /deleted_at IS NULL/)
   assert.match(birthdayUpdate, /version = \?/)
@@ -63,6 +69,9 @@ test('update job filters tombstones from birthdays, self-heal, and derived remin
   assert.match(reminderUpdate, /r\.schedule_mode = 'derived'/)
   assert.match(reminderUpdate, /r\.generation = UUID\(\)/)
   assert.doesNotMatch(reminderUpdate, /r\.remind_time <=>/)
+  const blockingRead = queries.find(sql => /^SELECT r\.id FROM email_reminders/.test(sql))
+  assert.match(blockingRead, /r\.status = 0 OR NOT \(r\.delivered_remind_time <=> r\.remind_time\)/)
+  assert.match(reminderUpdate, /r\.claim_token = NULL/)
   assert.equal(queries.some(sql => /mobile_sync_changes|mobile_sync_operations/.test(sql)), false)
 })
 
@@ -199,6 +208,108 @@ test('stale birthday candidates cannot overwrite a concurrent versioned web or m
     '2026-08-20 09:00:00',
   ])
   assert.equal(reminderWrites, 0)
+})
+
+test('job blocks claimed and failed occurrences, then advances only an explicitly delivered occurrence', async () => {
+  const BIRTHDAY_ID = '11111111-1111-4111-8111-111111111111'
+  const OLD_NEXT = '2026-08-20 09:00:00'
+  const NEW_NEXT = '2027-09-15 09:00:00'
+  for (const scenario of [
+    {
+      name: 'claimed',
+      reminder: {
+        status: 0,
+        delivered_remind_time: null,
+        claim_token: 'claim-a',
+      },
+      expectedBirthdayWrites: 0,
+    },
+    {
+      name: 'failed',
+      reminder: {
+        status: 0,
+        delivered_remind_time: null,
+        claim_token: null,
+      },
+      expectedBirthdayWrites: 0,
+    },
+    {
+      name: 'delivered',
+      reminder: {
+        status: 1,
+        delivered_remind_time: OLD_NEXT,
+        claim_token: null,
+      },
+      expectedBirthdayWrites: 1,
+    },
+  ]) {
+    const birthday = {
+      id: BIRTHDAY_ID,
+      version: '4',
+      lunarMonth: 8,
+      lunarDay: 15,
+      isLeapMonth: 0,
+      remindTime: '09:00:00',
+      nextSolarDate: OLD_NEXT,
+    }
+    const reminder = {
+      remind_time: OLD_NEXT,
+      schedule_mode: 'derived',
+      generation: 'generation-a',
+      claim_generation: scenario.reminder.claim_token ? 'generation-a' : null,
+      claim_remind_time: scenario.reminder.claim_token ? OLD_NEXT : null,
+      claimed_at: scenario.reminder.claim_token ? '2026-08-20 09:00:00' : null,
+      ...scenario.reminder,
+    }
+    let birthdayWrites = 0
+    let reminderWrites = 0
+    const connection = {
+      async beginTransaction() {},
+      async commit() {},
+      async rollback() {},
+      release() {},
+      async query(sqlInput) {
+        const sql = sqlInput.replace(/\s+/g, ' ').trim()
+        if (/^UPDATE email_reminders r JOIN birthdays b/.test(sql) && /remind_time > NOW/.test(sql)) {
+          return [{ affectedRows: 0 }]
+        }
+        if (/^SELECT \* FROM birthdays/.test(sql)) return [[birthday]]
+        if (/^SELECT r\.id FROM email_reminders/.test(sql)) {
+          const blocks = reminder.status === 0
+            || reminder.delivered_remind_time !== reminder.remind_time
+          return [blocks ? [{ id: 'reminder-1' }] : []]
+        }
+        if (/^UPDATE birthdays SET nextSolarDate/.test(sql)) {
+          birthdayWrites += 1
+          return [{ affectedRows: 1 }]
+        }
+        if (/^UPDATE email_reminders r JOIN birthdays b/.test(sql)) {
+          reminderWrites += 1
+          reminder.remind_time = NEW_NEXT
+          reminder.status = 0
+          reminder.generation = 'generation-job-new'
+          reminder.claim_token = null
+          return [{ affectedRows: 1 }]
+        }
+        throw new Error(`unexpected SQL for ${scenario.name}: ${sql}`)
+      },
+    }
+
+    await loadBirthdayJob().runUpdateBirthdaysJob({
+      poolRef: { getConnection: async () => connection },
+      calculateNextSolarDateFn: () => NEW_NEXT,
+      toMomentFn: () => ({ isSameOrBefore: () => true }),
+      logger: { log() {}, warn() {}, error() {} },
+    })
+
+    assert.equal(birthdayWrites, scenario.expectedBirthdayWrites, scenario.name)
+    assert.equal(reminderWrites, scenario.expectedBirthdayWrites, scenario.name)
+    if (scenario.name === 'delivered') {
+      assert.equal(reminder.status, 0)
+      assert.equal(reminder.remind_time, NEW_NEXT)
+      assert.equal(reminder.claim_token, null)
+    }
+  }
 })
 
 test('update job destroys on rollback failure and logs only safe error metadata', async () => {

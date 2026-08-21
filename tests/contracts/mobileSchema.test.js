@@ -106,3 +106,21 @@ test('one-shot migration explicitly classifies existing reminders and assigns ge
   const enforce = normalized.search(/MODIFY COLUMN schedule_mode ENUM\('derived','exact'\) NOT NULL/i)
   assert.ok(backfill >= 0 && enforce > backfill, 'backfill must precede NOT NULL enforcement')
 })
+
+test('reminders persist independent claim ownership and delivered occurrence state', () => {
+  for (const sql of [readSchema(migrationPath), readSchema(tablesPath)]) {
+    assert.match(sql, /claim_token\s+CHAR\(36\)\s+NULL/i)
+    assert.match(sql, /claim_generation\s+CHAR\(36\)\s+NULL/i)
+    assert.match(sql, /claim_remind_time\s+DATETIME\s+NULL/i)
+    assert.match(sql, /claimed_at\s+DATETIME\s+NULL/i)
+    assert.match(sql, /delivered_remind_time\s+DATETIME\s+NULL/i)
+  }
+})
+
+test('migration marks only already-due legacy status 1 rows as delivered', () => {
+  const normalized = readSchema(migrationPath).replace(/\s+/g, ' ')
+
+  assert.match(normalized, /r\.delivered_remind_time = CASE WHEN r\.status = 1 AND r\.remind_time <= NOW\(\) THEN r\.remind_time ELSE NULL END/i)
+  assert.match(normalized, /r\.status = CASE WHEN r\.status = 1 AND r\.remind_time <= NOW\(\) THEN 1 ELSE 0 END/i)
+  assert.match(normalized, /r\.claim_token = NULL, r\.claim_generation = NULL, r\.claim_remind_time = NULL, r\.claimed_at = NULL/i)
+})

@@ -47,9 +47,14 @@ CREATE TABLE IF NOT EXISTS email_reminders (
   email       VARCHAR(128)  NOT NULL,
   remind_time DATETIME      NOT NULL,
   message     TEXT          NOT NULL,
-  status      TINYINT       NOT NULL DEFAULT 0, -- 0=待发
+  status      TINYINT       NOT NULL DEFAULT 0, -- 0=当前 occurrence 待发，1=已送达
   schedule_mode ENUM('derived','exact') NOT NULL,
   generation  CHAR(36)      NOT NULL,
+  claim_token CHAR(36)      NULL,
+  claim_generation CHAR(36) NULL,
+  claim_remind_time DATETIME NULL,
+  claimed_at DATETIME       NULL,
+  delivered_remind_time DATETIME NULL,
 
   created_at  TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at  TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

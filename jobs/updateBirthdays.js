@@ -56,7 +56,13 @@ async function runUpdateBirthdaysJob({
     const [healed] = await connection.query(
       `UPDATE email_reminders r
        JOIN birthdays b ON b.id = r.birthday_id
-          SET r.status = 0
+          SET r.status = 0,
+              r.delivered_remind_time = NULL,
+              r.generation = UUID(),
+              r.claim_token = NULL,
+              r.claim_generation = NULL,
+              r.claim_remind_time = NULL,
+              r.claimed_at = NULL
         WHERE r.status = 1
           AND r.remind_time > NOW()
           AND b.deleted_at IS NULL`,
@@ -84,8 +90,11 @@ async function runUpdateBirthdaysJob({
              JOIN birthdays b ON b.id = r.birthday_id
             WHERE r.birthday_id = ?
               AND r.schedule_mode = 'derived'
-              AND r.status = 0
               AND r.remind_time <= NOW()
+              AND (
+                r.status = 0
+                OR NOT (r.delivered_remind_time <=> r.remind_time)
+              )
               AND b.deleted_at IS NULL`,
           [item.id],
         )
@@ -132,7 +141,13 @@ async function runUpdateBirthdaysJob({
         const [reminderUpdate] = await connection.query(
           `UPDATE email_reminders r
            JOIN birthdays b ON b.id = r.birthday_id
-              SET r.remind_time = ?, r.status = 0, r.generation = UUID()
+              SET r.remind_time = ?,
+                  r.status = 0,
+                  r.generation = UUID(),
+                  r.claim_token = NULL,
+                  r.claim_generation = NULL,
+                  r.claim_remind_time = NULL,
+                  r.claimed_at = NULL
             WHERE r.birthday_id = ?
               AND r.schedule_mode = 'derived'
               AND b.deleted_at IS NULL`,

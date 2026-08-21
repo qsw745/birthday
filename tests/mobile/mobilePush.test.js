@@ -485,6 +485,11 @@ test('new upsert atomically inserts birthday, one email reminder, one change, an
     status: 0,
     schedule_mode: 'derived',
     generation: database.reminder(BIRTHDAY_ID).generation,
+    claim_token: null,
+    claim_generation: null,
+    claim_remind_time: null,
+    claimed_at: null,
+    delivered_remind_time: null,
   })
   assert.deepEqual(database.state.changes.map(change => ({
     entity_id: change.entity_id,
@@ -755,8 +760,12 @@ test('upsert updates an active birthday and disabling email removes its unique r
   assert.equal(database.state.changes.length, 1)
 })
 
-test('enabled email update preserves one reminder, replaces its content, and resets delivery status', async () => {
-  const originalReminder = reminderRow({ email: 'old@example.com', status: 1 })
+test('enabled email update preserves one reminder and delivered status for the same occurrence', async () => {
+  const originalReminder = reminderRow({
+    email: 'old@example.com',
+    status: 1,
+    delivered_remind_time: '2026-09-25 09:00:00',
+  })
   const database = new FakeDatabase({
     birthdays: [birthdayRow({ version: '3' })],
     reminders: [originalReminder],
@@ -775,7 +784,7 @@ test('enabled email update preserves one reminder, replaces its content, and res
   assert.equal(reminder.id, originalReminder.id)
   assert.equal(reminder.email, 'new@example.com')
   assert.equal(reminder.message, '妈妈新的祝福')
-  assert.equal(reminder.status, 0)
+  assert.equal(reminder.status, 1)
   assert.equal(reminder.schedule_mode, 'derived')
   assert.notEqual(reminder.generation, originalReminder.generation)
   assert.equal(result.record.emailAddress, 'new@example.com')

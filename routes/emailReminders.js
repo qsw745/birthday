@@ -17,12 +17,16 @@ function sanitizedError(error) {
   return details
 }
 
-function logError(logger, ...args) {
+function logSafely(logger, method, ...args) {
   try {
-    logger.error(...args)
+    logger[method](...args)
   } catch {
     // 日志故障不能改变业务结果或连接处置。
   }
+}
+
+function logError(logger, ...args) {
+  logSafely(logger, 'error', ...args)
 }
 
 async function rollbackAndDispose(connection, primaryError, logger) {
@@ -77,6 +81,7 @@ function createReminderRuntime({
   scheduleRef,
   transporterRef,
   buildBirthdayEmailHtmlFn,
+  generateClaimTokenFn,
   now,
   logger,
 }) {
@@ -85,17 +90,33 @@ function createReminderRuntime({
     expectedRemindTime = reminder.remind_time,
     expectedGeneration = reminder.generation,
   ) {
+    const claimToken = generateClaimTokenFn()
     const claim = await queryFn(
       `UPDATE email_reminders r
        ${ACTIVE_REMINDER_JOIN}
-          SET r.status = 1
+          SET r.claim_token = ?,
+              r.claim_generation = ?,
+              r.claim_remind_time = ?,
+              r.claimed_at = NOW()
         WHERE r.id = ?
           AND r.remind_time = ?
           AND r.generation = ?
           AND r.remind_time <= NOW()
           AND r.status = 0
+          AND (
+            r.claim_token IS NULL
+            OR r.claimed_at IS NULL
+            OR r.claimed_at < DATE_SUB(NOW(), INTERVAL 15 MINUTE)
+          )
           AND b.deleted_at IS NULL`,
-      [reminder.id, expectedRemindTime, expectedGeneration],
+      [
+        claimToken,
+        expectedGeneration,
+        expectedRemindTime,
+        reminder.id,
+        expectedRemindTime,
+        expectedGeneration,
+      ],
     )
     if (!claim.affectedRows) return
 
@@ -109,25 +130,58 @@ function createReminderRuntime({
 
     try {
       await transporterRef.sendMail(mailOptions)
-      logger.log('[email] sent & marked delivered:', reminder.id)
     } catch (error) {
-      logError(logger, '[email] send failed:', reminder.id, sanitizedError(error))
       try {
         await queryFn(
           `UPDATE email_reminders r
            ${ACTIVE_REMINDER_JOIN}
-              SET r.status = 0
+              SET r.claim_token = NULL,
+                  r.claim_generation = NULL,
+                  r.claim_remind_time = NULL,
+                  r.claimed_at = NULL
             WHERE r.id = ?
-              AND r.remind_time = ?
-              AND r.generation = ?
-              AND r.status = 1
+              AND r.claim_token = ?
+              AND r.claim_generation = ?
+              AND r.claim_remind_time = ?
               AND b.deleted_at IS NULL`,
-          [reminder.id, expectedRemindTime, expectedGeneration],
+          [reminder.id, claimToken, expectedGeneration, expectedRemindTime],
         )
       } catch (resetError) {
         logError(logger, '[email] reset status failed:', reminder.id, sanitizedError(resetError))
       }
+      logError(logger, '[email] send failed:', reminder.id, sanitizedError(error))
+      return
     }
+
+    try {
+      await queryFn(
+        `UPDATE email_reminders r
+         ${ACTIVE_REMINDER_JOIN}
+            SET r.delivered_remind_time = ?,
+                r.status = IF(r.remind_time = ?, 1, 0),
+                r.claim_token = NULL,
+                r.claim_generation = NULL,
+                r.claim_remind_time = NULL,
+                r.claimed_at = NULL
+          WHERE r.id = ?
+            AND r.claim_token = ?
+            AND r.claim_generation = ?
+            AND r.claim_remind_time = ?
+            AND b.deleted_at IS NULL`,
+        [
+          expectedRemindTime,
+          expectedRemindTime,
+          reminder.id,
+          claimToken,
+          expectedGeneration,
+          expectedRemindTime,
+        ],
+      )
+    } catch (settleError) {
+      logError(logger, '[email] success settlement failed:', reminder.id, sanitizedError(settleError))
+      return
+    }
+    logSafely(logger, 'log', '[email] sent & marked delivered:', reminder.id)
   }
 
   function registerOneTimeJob(id, runAt, expectedRemindTime, expectedGeneration) {
@@ -188,11 +242,11 @@ function createReminderRuntime({
       for (const reminder of reminders) {
         const runAt = new Date(reminder.remind_time)
         if (Number.isNaN(runAt.getTime())) {
-          logger.warn('[reschedule] invalid remind_time, skip:', reminder.id, reminder.remind_time)
+          logSafely(logger, 'warn', '[reschedule] invalid remind_time, skip:', reminder.id, reminder.remind_time)
           continue
         }
         registerOneTimeJob(reminder.id, runAt, reminder.remind_time, reminder.generation)
-        logger.log('[reschedule] job restored for', reminder.id, runAt.toISOString())
+        logSafely(logger, 'log', '[reschedule] job restored for', reminder.id, runAt.toISOString())
       }
     } catch (error) {
       logError(logger, '[reschedule] failed:', sanitizedError(error))
@@ -212,6 +266,7 @@ function runtimeOptions({
   scheduleRef = schedule,
   transporterRef,
   buildBirthdayEmailHtmlFn = buildBirthdayEmailHtml,
+  generateClaimTokenFn = generateUUID,
   now = () => new Date(),
   logger = console,
 } = {}) {
@@ -221,6 +276,7 @@ function runtimeOptions({
     scheduleRef,
     transporterRef: transporterRef || require('../utils/emailConfig'),
     buildBirthdayEmailHtmlFn,
+    generateClaimTokenFn,
     now,
     logger,
   }
@@ -235,6 +291,7 @@ function createEmailRemindersRouter({
   scheduleRef = schedule,
   transporterRef,
   buildBirthdayEmailHtmlFn = buildBirthdayEmailHtml,
+  generateClaimTokenFn = generateUUID,
   applyWebDeleteFn = applyWebDelete,
   applyWebReminderUpsertFn = applyWebReminderUpsert,
   now = () => new Date(),
@@ -247,6 +304,7 @@ function createEmailRemindersRouter({
     scheduleRef,
     transporterRef,
     buildBirthdayEmailHtmlFn,
+    generateClaimTokenFn,
     now,
     logger,
   }))
@@ -281,9 +339,9 @@ function createEmailRemindersRouter({
           scheduleTimeStr,
           record.emailReminderGeneration,
         )
-        logger.log('[schedule] job registered for', reminderId, remindAt.toISOString())
+        logSafely(logger, 'log', '[schedule] job registered for', reminderId, remindAt.toISOString())
       } else {
-        logger.log('[schedule] remindTime is in the past; will be handled by cron worker.')
+        logSafely(logger, 'log', '[schedule] remindTime is in the past; will be handled by cron worker.')
       }
       return res.json({
         success: true,

@@ -138,7 +138,8 @@ async function upsertEmailReminder(connection, {
      VALUES (?, ?, ?, ?, ?, ?, 0, ?, UUID())
      ON DUPLICATE KEY UPDATE
        name = VALUES(name), email = VALUES(email),
-       remind_time = VALUES(remind_time), message = VALUES(message), status = 0,
+       remind_time = VALUES(remind_time), message = VALUES(message),
+       status = IF(delivered_remind_time = VALUES(remind_time), 1, 0),
        schedule_mode = VALUES(schedule_mode), generation = UUID()`,
     [id, birthdayId, name, email, remindTime, message, scheduleMode],
   )

@@ -57,6 +57,135 @@ function recordingLogger() {
   }
 }
 
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((resolveFn, rejectFn) => {
+    resolve = resolveFn
+    reject = rejectFn
+  })
+  return { promise, resolve, reject }
+}
+
+function createReminderSendHarness({
+  reminder = reminderRow({ remind_time: '2026-08-22 11:00:00' }),
+  claimTokens = [],
+  transporterRef,
+  logger = { log() {}, warn() {}, error() {} },
+} = {}) {
+  const state = { ...reminder }
+  const recurringJobs = []
+  const claims = []
+  const settlements = []
+  const sqlLog = []
+  const nowMillis = Date.parse('2026-08-22T12:00:00Z')
+  const isStale = () => {
+    if (!state.claimed_at) return false
+    return nowMillis - Date.parse(`${state.claimed_at.replace(' ', 'T')}Z`) >= 15 * 60 * 1000
+  }
+  const clearClaim = () => {
+    state.claim_token = null
+    state.claim_generation = null
+    state.claim_remind_time = null
+    state.claimed_at = null
+  }
+  const queryFn = async (sqlInput, params = []) => {
+    const sql = sqlInput.replace(/\s+/g, ' ').trim()
+    sqlLog.push({ sql, params: [...params] })
+    if (/r\.status = 0 AND r\.remind_time > \?/.test(sql)) return []
+    if (/^SELECT r\.\*/.test(sql) && /WHERE r\.id = \?/.test(sql)) {
+      const [, expectedTime, expectedGeneration] = params
+      return state.status === 0
+        && state.remind_time === expectedTime
+        && state.generation === expectedGeneration
+        ? [{ ...state }]
+        : []
+    }
+    if (/^SELECT r\.\*/.test(sql) && /r\.remind_time <= NOW/.test(sql)) {
+      return state.status === 0 ? [{ ...state }] : []
+    }
+    if (/SET r\.claim_token = \?/.test(sql)) {
+      const [token, claimGeneration, claimTime, id, expectedTime, expectedGeneration] = params
+      assert.equal(id, state.id)
+      const matched = state.status === 0
+        && state.remind_time === expectedTime
+        && state.generation === expectedGeneration
+        && (!state.claim_token || isStale())
+      claims.push({ token, matched })
+      if (matched) {
+        state.claim_token = token
+        state.claim_generation = claimGeneration
+        state.claim_remind_time = claimTime
+        state.claimed_at = '2026-08-22 12:00:00'
+      }
+      return { affectedRows: matched ? 1 : 0 }
+    }
+    if (/SET r\.delivered_remind_time = \?/.test(sql)) {
+      const [deliveredTime, currentTime, id, token, claimGeneration, claimTime] = params
+      const matched = id === state.id
+        && token === state.claim_token
+        && claimGeneration === state.claim_generation
+        && claimTime === state.claim_remind_time
+      settlements.push({ type: 'success', token, matched })
+      if (matched) {
+        state.delivered_remind_time = deliveredTime
+        state.status = state.remind_time === currentTime ? 1 : 0
+        clearClaim()
+      }
+      return { affectedRows: matched ? 1 : 0 }
+    }
+    if (/SET r\.claim_token = NULL/.test(sql)) {
+      const [id, token, claimGeneration, claimTime] = params
+      const matched = id === state.id
+        && token === state.claim_token
+        && claimGeneration === state.claim_generation
+        && claimTime === state.claim_remind_time
+      settlements.push({ type: 'failure', token, matched })
+      if (matched) clearClaim()
+      return { affectedRows: matched ? 1 : 0 }
+    }
+    return []
+  }
+  const scheduleRef = {
+    scheduleJob(spec, callback) {
+      if (typeof spec === 'string') recurringJobs.push(callback)
+      return {}
+    },
+  }
+  const reconfigure = ({ remindTime, generation }) => {
+    state.remind_time = remindTime
+    state.generation = generation
+    state.status = state.delivered_remind_time === remindTime ? 1 : 0
+  }
+  return {
+    claims,
+    logger,
+    queryFn,
+    recurringJobs,
+    reconfigure,
+    scheduleRef,
+    settlements,
+    sqlLog,
+    state,
+    transporterRef,
+    generateClaimTokenFn: () => claimTokens.shift(),
+  }
+}
+
+async function startReminderHarness(harness) {
+  const { registerEmailReminderSchedulers } = loadEmailReminderModule()
+  const schedulers = registerEmailReminderSchedulers({
+    queryFn: harness.queryFn,
+    scheduleRef: harness.scheduleRef,
+    transporterRef: harness.transporterRef,
+    generateClaimTokenFn: harness.generateClaimTokenFn,
+    formatDateFn: () => '2026-08-22 12:00:00',
+    logger: harness.logger,
+  })
+  await schedulers.ready
+  return harness.recurringJobs[0]
+}
+
 function loadEmailReminderModule() {
   return require('../../routes/emailReminders')
 }
@@ -66,7 +195,16 @@ function loadEmailReminderFactory() {
 }
 
 test('applyWebUpsert updates under the caller transaction, increments version, and appends exactly one change', async () => {
-  const connection = FakeConnection.withBirthday({ version: '2', deleted_at: null })
+  const database = new FakeDatabase({
+    birthdays: [birthdayRow({ version: '2', deleted_at: null })],
+    reminders: [reminderRow({
+      claim_token: 'claim-a',
+      claim_generation: reminderRow().generation,
+      claim_remind_time: reminderRow().remind_time,
+      claimed_at: '2026-08-22 11:00:00',
+    })],
+  })
+  const connection = database.createConnection()
   await connection.beginTransaction()
 
   const record = await applyWebUpsert(connection, {
@@ -84,6 +222,10 @@ test('applyWebUpsert updates under the caller transaction, increments version, a
     reminder.generation,
     reminderRow().generation,
   )
+  assert.equal(reminder.claim_token, 'claim-a')
+  assert.equal(reminder.claim_generation, reminderRow().generation)
+  assert.equal(reminder.claim_remind_time, reminderRow().remind_time)
+  assert.equal(reminder.claimed_at, '2026-08-22 11:00:00')
   assert.equal(connection.countSQL(/^SELECT .* FROM birthdays b .* FOR UPDATE$/), 1)
   assert.equal(connection.countSQL(/^INSERT INTO mobile_sync_changes/), 1)
   assert.deepEqual(connection.lifecycle, ['begin'])
@@ -280,6 +422,11 @@ test('legacy reminder POST keeps exact schedule and response shape while version
   const scheduled = []
   const callbackQueries = []
   const scheduleRef = { scheduleJob(spec, callback) { scheduled.push({ spec, callback }); return {} } }
+  const logger = {
+    log() { throw new Error('logger unavailable') },
+    warn() { throw new Error('logger unavailable') },
+    error() { throw new Error('logger unavailable') },
+  }
   const router = createEmailRemindersRouter({
     poolRef: pool,
     queryFn: async (sql, params) => {
@@ -293,6 +440,7 @@ test('legacy reminder POST keeps exact schedule and response shape while version
     formatDateFn: () => '2027-01-02 03:04:05',
     now: () => new Date('2026-08-22T00:00:00Z'),
     startSchedulers: false,
+    logger,
   })
 
   const response = await request(appAt('/api/email-reminders', router))
@@ -472,11 +620,11 @@ test('all send-capable reminder reads and the atomic claim require an active bir
     if (/r\.status = 0 AND r\.remind_time <= NOW\(\)/.test(sql)) return [dueReminder]
     if (/r\.status = 0 AND r\.remind_time > \?/.test(sql)) return [dueReminder]
     if (/WHERE r\.id = \?/.test(sql) && /^SELECT r\.\*/.test(sql)) return [dueReminder]
-    if (/^UPDATE email_reminders r JOIN birthdays b/.test(sql) && /SET r\.status = 1/.test(sql)) {
+    if (/^UPDATE email_reminders r JOIN birthdays b/.test(sql) && /SET r\.claim_token = \?/.test(sql)) {
       claimCount += 1
       return { affectedRows: 1 }
     }
-    if (/SET r\.status = 0/.test(sql)) return { affectedRows: 1 }
+    if (/SET r\.delivered_remind_time = \?/.test(sql)) return { affectedRows: 1 }
     return []
   }
   const scheduleRef = {
@@ -520,7 +668,7 @@ test('a tombstone committed before the atomic claim makes claim=0 and sends no e
     queryLog.push(sql)
     if (/r\.status = 0 AND r\.remind_time <= NOW\(\)/.test(sql)) return [stale]
     if (/r\.status = 0 AND r\.remind_time > \?/.test(sql)) return []
-    if (/SET r\.status = 1/.test(sql)) return { affectedRows: 0 }
+    if (/SET r\.claim_token = \?/.test(sql)) return { affectedRows: 0 }
     return []
   }
   const sent = []
@@ -556,9 +704,9 @@ test('an old T1 callback neither reads nor claims a reminder rescheduled to T2',
       if (params.length >= 2 && params[1] !== current.remind_time) return []
       return [{ ...current }]
     }
-    if (/SET r\.status = 1/.test(sql)) {
+    if (/SET r\.claim_token = \?/.test(sql)) {
       claims.push(params)
-      return { affectedRows: params.length < 2 || params[1] === current.remind_time ? 1 : 0 }
+      return { affectedRows: params[4] === current.remind_time ? 1 : 0 }
     }
     return []
   }
@@ -597,9 +745,9 @@ test('a callback-to-claim reschedule race makes the expected-time claim fail wit
       current = { ...current, remind_time: T2 }
       return [selected]
     }
-    if (/SET r\.status = 1/.test(sql)) {
+    if (/SET r\.claim_token = \?/.test(sql)) {
       claims.push(params)
-      return { affectedRows: params[1] === current.remind_time ? 1 : 0 }
+      return { affectedRows: params[4] === current.remind_time ? 1 : 0 }
     }
     return []
   }
@@ -614,11 +762,19 @@ test('a callback-to-claim reschedule race makes the expected-time claim fail wit
     },
     transporterRef: { sendMail: async options => sent.push(options) },
     formatDateFn: () => '2026-08-22 10:00:00',
+    generateClaimTokenFn: () => 'claim-a',
   })
   await schedulers.ready
   await datedJobs[0]()
 
-  assert.deepEqual(claims, [[REMINDER_ID, T1, reminderRow().generation]])
+  assert.deepEqual(claims, [[
+    'claim-a',
+    reminderRow().generation,
+    T1,
+    REMINDER_ID,
+    T1,
+    reminderRow().generation,
+  ]])
   assert.deepEqual(sent, [])
 })
 
@@ -633,11 +789,31 @@ test('SMTP failure reset cannot reset a newly rescheduled expected time', async 
     const sql = sqlInput.replace(/\s+/g, ' ').trim()
     if (/r\.status = 0 AND r\.remind_time > \?/.test(sql)) return []
     if (/r\.status = 0 AND r\.remind_time <= NOW\(\)/.test(sql)) return [{ ...current }]
-    if (/SET r\.status = 1/.test(sql)) return { affectedRows: 1 }
-    if (/SET r\.status = 0/.test(sql)) {
+    if (/SET r\.claim_token = \?/.test(sql)) {
+      current = {
+        ...current,
+        claim_token: params[0],
+        claim_generation: params[1],
+        claim_remind_time: params[2],
+        claimed_at: '2026-08-22 12:00:00',
+      }
+      return { affectedRows: 1 }
+    }
+    if (/SET r\.claim_token = NULL/.test(sql)) {
       resets.push(params)
-      if (params[1] === current.remind_time) current = { ...current, status: 0 }
-      return { affectedRows: params[1] === current.remind_time ? 1 : 0 }
+      const matched = params[1] === current.claim_token
+        && params[2] === current.claim_generation
+        && params[3] === current.claim_remind_time
+      if (matched) {
+        current = {
+          ...current,
+          claim_token: null,
+          claim_generation: null,
+          claim_remind_time: null,
+          claimed_at: null,
+        }
+      }
+      return { affectedRows: matched ? 1 : 0 }
     }
     return []
   }
@@ -656,11 +832,12 @@ test('SMTP failure reset cannot reset a newly rescheduled expected time', async 
       },
     },
     formatDateFn: () => '2026-08-22 12:00:00',
+    generateClaimTokenFn: () => 'claim-a',
   })
   await schedulers.ready
   await recurringJobs[0]()
 
-  assert.deepEqual(resets, [[REMINDER_ID, T1, reminderRow().generation]])
+  assert.deepEqual(resets, [[REMINDER_ID, 'claim-a', reminderRow().generation, T1]])
   assert.equal(current.remind_time, T2)
   assert.equal(current.status, 0)
 })
@@ -682,7 +859,7 @@ test('same-time reconfiguration invalidates an old generation callback', async (
         ? [{ ...current }]
         : []
     }
-    if (/SET r\.status = 1/.test(sql)) {
+    if (/SET r\.claim_token = \?/.test(sql)) {
       claims.push(params)
       return { affectedRows: 1 }
     }
@@ -707,69 +884,166 @@ test('same-time reconfiguration invalidates an old generation callback', async (
   assert.deepEqual(sent, [])
 })
 
-test('failed generation A cannot reset same-time generation B after B claims', async () => {
-  const { registerEmailReminderSchedulers } = loadEmailReminderModule()
+test('same-time generation B waits for A success and then remains delivered', async () => {
   const T = '2026-08-22 11:00:00'
-  const GENERATION_A = 'aaaaaaaa-0000-4000-8000-000000000001'
   const GENERATION_B = 'bbbbbbbb-0000-4000-8000-000000000002'
-  let current = reminderRow({ remind_time: T, generation: GENERATION_A, status: 0 })
-  const recurringJobs = []
-  const claims = []
-  const resets = []
-  const queryFn = async (sqlInput, params = []) => {
-    const sql = sqlInput.replace(/\s+/g, ' ').trim()
-    if (/r\.status = 0 AND r\.remind_time > \?/.test(sql)) return []
-    if (/^SELECT r\.\*/.test(sql) && /remind_time <= NOW/.test(sql)) {
-      return current.status === 0 ? [{ ...current }] : []
-    }
-    if (/SET r\.status = 1/.test(sql)) {
-      claims.push(params)
-      const matched = params[1] === current.remind_time
-        && params[2] === current.generation
-        && current.status === 0
-      if (matched) current = { ...current, status: 1 }
-      return { affectedRows: matched ? 1 : 0 }
-    }
-    if (/SET r\.status = 0/.test(sql)) {
-      resets.push(params)
-      const matched = params[1] === current.remind_time
-        && params[2] === current.generation
-        && current.status === 1
-      if (matched) current = { ...current, status: 0 }
-      return { affectedRows: matched ? 1 : 0 }
-    }
-    return []
-  }
-  let sendCount = 0
-  const schedulers = registerEmailReminderSchedulers({
-    queryFn,
-    scheduleRef: {
-      scheduleJob(spec, callback) {
-        if (typeof spec === 'string') recurringJobs.push(callback)
-        return {}
-      },
-    },
+  const smtp = deferred()
+  let sends = 0
+  const harness = createReminderSendHarness({
+    claimTokens: ['claim-a', 'claim-b'],
     transporterRef: {
       async sendMail() {
-        sendCount += 1
-        if (sendCount === 1) {
-          current = { ...current, generation: GENERATION_B, status: 0 }
-          await recurringJobs[0]()
-          throw new Error('generation A SMTP failure')
-        }
+        sends += 1
+        await smtp.promise
       },
     },
-    formatDateFn: () => '2026-08-22 12:00:00',
   })
-  await schedulers.ready
-  await recurringJobs[0]()
+  const poll = await startReminderHarness(harness)
 
-  assert.deepEqual(claims, [
-    [REMINDER_ID, T, GENERATION_A],
-    [REMINDER_ID, T, GENERATION_B],
+  const senderA = poll()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(harness.state.claim_token, 'claim-a')
+  harness.reconfigure({ remindTime: T, generation: GENERATION_B })
+  await poll()
+  assert.equal(sends, 1)
+  smtp.resolve()
+  await senderA
+  await poll()
+
+  assert.equal(sends, 1)
+  assert.equal(harness.state.status, 1)
+  assert.equal(harness.state.delivered_remind_time, T)
+  assert.equal(harness.state.generation, GENERATION_B)
+  assert.equal(harness.state.claim_token, null)
+})
+
+test('same-time generation B can claim only after A failure clears its claim', async () => {
+  const T = '2026-08-22 11:00:00'
+  const GENERATION_B = 'bbbbbbbb-0000-4000-8000-000000000002'
+  const smtp = deferred()
+  let sends = 0
+  const harness = createReminderSendHarness({
+    claimTokens: ['claim-a', 'claim-b', 'claim-c'],
+    transporterRef: {
+      async sendMail() {
+        sends += 1
+        if (sends === 1) await smtp.promise
+      },
+    },
+  })
+  const poll = await startReminderHarness(harness)
+
+  const senderA = poll()
+  await new Promise(resolve => setImmediate(resolve))
+  harness.reconfigure({ remindTime: T, generation: GENERATION_B })
+  await poll()
+  assert.equal(sends, 1)
+  smtp.reject(new Error('SMTP A failed'))
+  await senderA
+  assert.equal(harness.state.status, 0)
+  assert.equal(harness.state.claim_token, null)
+  await poll()
+
+  assert.equal(sends, 2)
+  assert.equal(harness.state.status, 1)
+  assert.deepEqual(harness.claims.map(item => item.matched), [true, false, true])
+})
+
+test('T1 settlement keeps reconfigured T2 pending on either SMTP outcome', async () => {
+  for (const outcome of ['success', 'failure']) {
+    const T1 = '2026-08-22 11:00:00'
+    const T2 = '2026-08-23 11:00:00'
+    const GENERATION_B = 'bbbbbbbb-0000-4000-8000-000000000002'
+    const smtp = deferred()
+    const harness = createReminderSendHarness({
+      claimTokens: [`claim-${outcome}`],
+      transporterRef: { sendMail: async () => smtp.promise },
+    })
+    const poll = await startReminderHarness(harness)
+
+    const senderA = poll()
+    await new Promise(resolve => setImmediate(resolve))
+    harness.reconfigure({ remindTime: T2, generation: GENERATION_B })
+    if (outcome === 'success') smtp.resolve()
+    else smtp.reject(new Error('SMTP failed'))
+    await senderA
+
+    assert.equal(harness.state.remind_time, T2)
+    assert.equal(harness.state.status, 0)
+    assert.equal(harness.state.claim_token, null)
+    assert.equal(harness.state.delivered_remind_time, outcome === 'success' ? T1 : null)
+  }
+})
+
+test('stale claim takeover uses a new token and makes the old sender settlement a no-op', async () => {
+  const smtpA = deferred()
+  let sends = 0
+  const harness = createReminderSendHarness({
+    claimTokens: ['claim-a', 'claim-b'],
+    transporterRef: {
+      async sendMail() {
+        sends += 1
+        if (sends === 1) await smtpA.promise
+      },
+    },
+  })
+  const poll = await startReminderHarness(harness)
+
+  const senderA = poll()
+  await new Promise(resolve => setImmediate(resolve))
+  harness.state.claimed_at = '2026-08-22 11:44:59'
+  await poll()
+  assert.equal(harness.state.status, 1)
+  smtpA.resolve()
+  await senderA
+
+  assert.equal(sends, 2)
+  assert.deepEqual(harness.claims, [
+    { token: 'claim-a', matched: true },
+    { token: 'claim-b', matched: true },
   ])
-  assert.deepEqual(resets, [[REMINDER_ID, T, GENERATION_A]])
-  assert.equal(sendCount, 2)
-  assert.equal(current.generation, GENERATION_B)
-  assert.equal(current.status, 1)
+  assert.deepEqual(harness.settlements, [
+    { type: 'success', token: 'claim-b', matched: true },
+    { type: 'success', token: 'claim-a', matched: false },
+  ])
+  assert.equal(harness.state.status, 1)
+})
+
+test('throwing send-path logger cannot turn SMTP success into failure settlement', async () => {
+  const logger = {
+    log() { throw new Error('log failed') },
+    warn() { throw new Error('warn failed') },
+    error() { throw new Error('error failed') },
+  }
+  const harness = createReminderSendHarness({
+    claimTokens: ['claim-a'],
+    transporterRef: { sendMail: async () => {} },
+    logger,
+  })
+  const poll = await startReminderHarness(harness)
+
+  await poll()
+
+  assert.equal(harness.state.status, 1)
+  assert.deepEqual(harness.settlements, [{ type: 'success', token: 'claim-a', matched: true }])
+})
+
+test('throwing send-path error logger cannot block SMTP failure settlement', async () => {
+  const logger = {
+    log() { throw new Error('log failed') },
+    warn() { throw new Error('warn failed') },
+    error() { throw new Error('error failed') },
+  }
+  const harness = createReminderSendHarness({
+    claimTokens: ['claim-a'],
+    transporterRef: { sendMail: async () => { throw new Error('SMTP failed') } },
+    logger,
+  })
+  const poll = await startReminderHarness(harness)
+
+  await poll()
+
+  assert.equal(harness.state.status, 0)
+  assert.equal(harness.state.claim_token, null)
+  assert.deepEqual(harness.settlements, [{ type: 'failure', token: 'claim-a', matched: true }])
 })

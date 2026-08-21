@@ -48,6 +48,11 @@ function reminderRow(overrides = {}) {
     status: 0,
     schedule_mode: 'derived',
     generation: DEFAULT_REMINDER_GENERATION,
+    claim_token: null,
+    claim_generation: null,
+    claim_remind_time: null,
+    claimed_at: null,
+    delivered_remind_time: null,
     ...overrides,
   }
 }
@@ -430,7 +435,7 @@ class FakeConnection {
       return [{ affectedRows: 1 }]
     }
 
-    if (/^INSERT INTO email_reminders \(id, birthday_id, name, email, remind_time, message, status, schedule_mode, generation\) VALUES \(\?, \?, \?, \?, \?, \?, 0, \?, UUID\(\)\) ON DUPLICATE KEY UPDATE name = VALUES\(name\), email = VALUES\(email\), remind_time = VALUES\(remind_time\), message = VALUES\(message\), status = 0, schedule_mode = VALUES\(schedule_mode\), generation = UUID\(\)$/i.test(sql)) {
+    if (/^INSERT INTO email_reminders \(id, birthday_id, name, email, remind_time, message, status, schedule_mode, generation\) VALUES \(\?, \?, \?, \?, \?, \?, 0, \?, UUID\(\)\) ON DUPLICATE KEY UPDATE name = VALUES\(name\), email = VALUES\(email\), remind_time = VALUES\(remind_time\), message = VALUES\(message\), status = IF\(delivered_remind_time = VALUES\(remind_time\), 1, 0\), schedule_mode = VALUES\(schedule_mode\), generation = UUID\(\)$/i.test(sql)) {
       this.requireTransaction(sql)
       assert.equal(params.length, 7)
       const [id, birthdayId, name, email, remindTime, message, scheduleMode] = params
@@ -444,9 +449,14 @@ class FakeConnection {
         email,
         remind_time: remindTime,
         message,
-        status: 0,
+        status: current && current.delivered_remind_time === remindTime ? 1 : 0,
         schedule_mode: scheduleMode,
         generation,
+        claim_token: current ? current.claim_token : null,
+        claim_generation: current ? current.claim_generation : null,
+        claim_remind_time: current ? current.claim_remind_time : null,
+        claimed_at: current ? current.claimed_at : null,
+        delivered_remind_time: current ? current.delivered_remind_time : null,
       }))
       return [{ affectedRows: current ? 2 : 1 }]
     }

@@ -11,7 +11,12 @@ ALTER TABLE birthdays
 -- reminders matching the birthday-derived time (or lacking one) as derived.
 ALTER TABLE email_reminders
   ADD COLUMN schedule_mode ENUM('derived','exact') NULL,
-  ADD COLUMN generation CHAR(36) NULL;
+  ADD COLUMN generation CHAR(36) NULL,
+  ADD COLUMN claim_token CHAR(36) NULL,
+  ADD COLUMN claim_generation CHAR(36) NULL,
+  ADD COLUMN claim_remind_time DATETIME NULL,
+  ADD COLUMN claimed_at DATETIME NULL,
+  ADD COLUMN delivered_remind_time DATETIME NULL;
 
 UPDATE email_reminders r
 JOIN birthdays b ON b.id = r.birthday_id
@@ -19,7 +24,19 @@ JOIN birthdays b ON b.id = r.birthday_id
          WHEN b.nextSolarDate IS NULL OR r.remind_time = b.nextSolarDate THEN 'derived'
          ELSE 'exact'
        END,
-       r.generation = UUID();
+       r.generation = UUID(),
+       r.delivered_remind_time = CASE
+         WHEN r.status = 1 AND r.remind_time <= NOW() THEN r.remind_time
+         ELSE NULL
+       END,
+       r.status = CASE
+         WHEN r.status = 1 AND r.remind_time <= NOW() THEN 1
+         ELSE 0
+       END,
+       r.claim_token = NULL,
+       r.claim_generation = NULL,
+       r.claim_remind_time = NULL,
+       r.claimed_at = NULL;
 
 ALTER TABLE email_reminders
   MODIFY COLUMN schedule_mode ENUM('derived','exact') NOT NULL,
