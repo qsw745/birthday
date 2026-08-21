@@ -10,10 +10,10 @@ private enum FakeNotificationError: Error {
 
 private actor FakeNotificationCenterClient: NotificationCenterClient {
   let configuredAuthorization: NotificationAuthorization
-  let configuredPendingIdentifiers: [String]
   let failOnAddIndex: Int?
   private var removedIdentifiers: [String] = []
   private var addedCandidates: [ReminderCandidate] = []
+  private var pending: Set<String>
 
   init(
     authorization: NotificationAuthorization,
@@ -21,8 +21,8 @@ private actor FakeNotificationCenterClient: NotificationCenterClient {
     failOnAddIndex: Int? = nil
   ) {
     configuredAuthorization = authorization
-    configuredPendingIdentifiers = pendingIdentifiers
     self.failOnAddIndex = failOnAddIndex
+    pending = Set(pendingIdentifiers)
   }
 
   func authorization() async -> NotificationAuthorization {
@@ -30,11 +30,12 @@ private actor FakeNotificationCenterClient: NotificationCenterClient {
   }
 
   func pendingIdentifiers() async -> [String] {
-    configuredPendingIdentifiers
+    pending.sorted()
   }
 
   func remove(identifiers: [String]) async {
-    removedIdentifiers = identifiers
+    removedIdentifiers.append(contentsOf: identifiers)
+    pending.subtract(identifiers)
   }
 
   func add(_ candidate: ReminderCandidate) async throws {
@@ -42,6 +43,7 @@ private actor FakeNotificationCenterClient: NotificationCenterClient {
       throw FakeNotificationError.addFailed
     }
     addedCandidates.append(candidate)
+    pending.insert(candidate.identifier)
   }
 
   func capturedRemoved() -> [String] {
@@ -50,6 +52,57 @@ private actor FakeNotificationCenterClient: NotificationCenterClient {
 
   func capturedAdded() -> [ReminderCandidate] {
     addedCandidates
+  }
+
+  func capturedPendingIdentifiers() -> [String] {
+    pending.sorted()
+  }
+}
+
+private actor InterleavingNotificationCenterClient: NotificationCenterClient {
+  private var pending: Set<String> = []
+  private var addCount = 0
+  private var firstAddWaiter: CheckedContinuation<Void, Never>?
+  private var resumeFirstAdd: CheckedContinuation<Void, Never>?
+
+  func authorization() async -> NotificationAuthorization {
+    .authorized
+  }
+
+  func pendingIdentifiers() async -> [String] {
+    pending.sorted()
+  }
+
+  func remove(identifiers: [String]) async {
+    pending.subtract(identifiers)
+  }
+
+  func add(_ candidate: ReminderCandidate) async throws {
+    addCount += 1
+    if addCount == 1 {
+      firstAddWaiter?.resume()
+      firstAddWaiter = nil
+      await withCheckedContinuation { continuation in
+        resumeFirstAdd = continuation
+      }
+    }
+    pending.insert(candidate.identifier)
+  }
+
+  func waitForFirstAdd() async {
+    guard addCount == 0 else { return }
+    await withCheckedContinuation { continuation in
+      firstAddWaiter = continuation
+    }
+  }
+
+  func allowFirstAdd() {
+    resumeFirstAdd?.resume()
+    resumeFirstAdd = nil
+  }
+
+  func hasSeenSecondAdd() -> Bool {
+    addCount >= 2
   }
 }
 
@@ -156,7 +209,8 @@ func unavailableAuthorizationDoesNotSchedule(_ authorization: NotificationAuthor
   #expect(health.coverageEnd == nil)
   #expect(health.errorCategory == "schedule_failed")
   #expect(await center.capturedAdded().count == 1)
-  #expect(await center.capturedRemoved().isEmpty)
+  #expect(await center.capturedRemoved() == ["birthday.0"])
+  #expect(await center.capturedPendingIdentifiers() == ["birthday.old", "other.app"])
 }
 
 @Test func rejectsCandidatesOutsideBirthdayNamespace() async throws {
@@ -188,4 +242,35 @@ func unavailableAuthorizationDoesNotSchedule(_ authorization: NotificationAuthor
   #expect(trigger.dateComponents.hour == expected.hour)
   #expect(trigger.dateComponents.minute == expected.minute)
   #expect(trigger.repeats == false)
+}
+
+@Test func concurrentPlansLeaveOnlyTheLastSerializedPlan() async throws {
+  let center = InterleavingNotificationCenterClient()
+  let scheduler = UserNotificationScheduler(center: center)
+  let firstPlan = ReminderPlan(
+    birthdayNotifications: [notificationCandidate(identifier: "birthday.first", minuteOffset: 0)],
+    maintenanceNotification: nil,
+    coverageEnd: notificationPlanStart
+  )
+  let secondPlan = ReminderPlan(
+    birthdayNotifications: [notificationCandidate(identifier: "birthday.second", minuteOffset: 1)],
+    maintenanceNotification: nil,
+    coverageEnd: notificationPlanStart.addingTimeInterval(60)
+  )
+
+  let firstApply = Task { try await scheduler.apply(firstPlan) }
+  await center.waitForFirstAdd()
+  let secondApply = Task { try await scheduler.apply(secondPlan) }
+  for _ in 0..<100 where !(await center.hasSeenSecondAdd()) {
+    await Task.yield()
+  }
+  await center.allowFirstAdd()
+
+  _ = try await firstApply.value
+  let secondHealth = try await secondApply.value
+
+  #expect(secondHealth.state == .scheduled)
+  #expect(secondHealth.scheduledCount == 1)
+  #expect(secondHealth.coverageEnd == notificationPlanStart.addingTimeInterval(60))
+  #expect(await center.pendingIdentifiers() == ["birthday.second"])
 }

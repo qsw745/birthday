@@ -47,15 +47,55 @@ public protocol NotificationScheduling: Sendable {
   func apply(_ plan: ReminderPlan) async throws -> NotificationHealth
 }
 
+private actor NotificationSchedulingGate {
+  private var isLocked = false
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  func withLock<T: Sendable>(_ operation: @Sendable () async throws -> T) async rethrows -> T {
+    await lock()
+    defer { unlock() }
+    return try await operation()
+  }
+
+  private func lock() async {
+    guard !isLocked else {
+      await withCheckedContinuation { continuation in
+        waiters.append(continuation)
+      }
+      return
+    }
+    isLocked = true
+  }
+
+  private func unlock() {
+    guard let next = waiters.first else {
+      isLocked = false
+      return
+    }
+    waiters.removeFirst()
+    next.resume()
+  }
+}
+
 public struct UserNotificationScheduler: NotificationScheduling {
   private static let namespace = "birthday."
   private let center: any NotificationCenterClient
+  private let gate = NotificationSchedulingGate()
 
   public init(center: any NotificationCenterClient) {
     self.center = center
   }
 
   public func apply(_ plan: ReminderPlan) async throws -> NotificationHealth {
+    try await gate.withLock { [center] in
+      try await Self.apply(plan, using: center)
+    }
+  }
+
+  private static func apply(
+    _ plan: ReminderPlan,
+    using center: any NotificationCenterClient
+  ) async throws -> NotificationHealth {
     let authorization = await center.authorization()
     guard authorization.isAllowedToSchedule else {
       return NotificationHealth(
@@ -74,11 +114,18 @@ public struct UserNotificationScheduler: NotificationScheduling {
       return failedHealth(category: "duplicate_identifier")
     }
 
+    let existingOwnedIdentifiers = Set(
+      await center.pendingIdentifiers().filter { $0.hasPrefix(Self.namespace) }
+    )
+    var addedIdentifiers: Set<String> = []
     do {
       for candidate in candidates {
         try await center.add(candidate)
+        addedIdentifiers.insert(candidate.identifier)
       }
     } catch {
+      let newlyAddedIdentifiers = addedIdentifiers.subtracting(existingOwnedIdentifiers).sorted()
+      await center.remove(identifiers: newlyAddedIdentifiers)
       return failedHealth(category: "schedule_failed")
     }
 
@@ -96,7 +143,7 @@ public struct UserNotificationScheduler: NotificationScheduling {
     )
   }
 
-  private func failedHealth(category: String) -> NotificationHealth {
+  private static func failedHealth(category: String) -> NotificationHealth {
     NotificationHealth(state: .failed, scheduledCount: 0, coverageEnd: nil, errorCategory: category)
   }
 }
