@@ -27,7 +27,8 @@ const BIRTHDAY_BY_ID_SELECT = `SELECT
   r.message AS message,
   r.id AS emailReminderId,
   r.remind_time AS emailReminderTime,
-  r.status AS emailReminderStatus
+  r.status AS emailReminderStatus,
+  r.generation AS emailReminderGeneration
 FROM birthdays b
 LEFT JOIN email_reminders r ON r.birthday_id = b.id
 WHERE b.id = ?`
@@ -129,15 +130,17 @@ async function upsertEmailReminder(connection, {
   email,
   remindTime,
   message,
+  scheduleMode,
 }) {
   await connection.query(
     `INSERT INTO email_reminders
-      (id, birthday_id, name, email, remind_time, message, status)
-     VALUES (?, ?, ?, ?, ?, ?, 0)
+      (id, birthday_id, name, email, remind_time, message, status, schedule_mode, generation)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, UUID())
      ON DUPLICATE KEY UPDATE
        name = VALUES(name), email = VALUES(email),
-       remind_time = VALUES(remind_time), message = VALUES(message), status = 0`,
-    [id, birthdayId, name, email, remindTime, message],
+       remind_time = VALUES(remind_time), message = VALUES(message), status = 0,
+       schedule_mode = VALUES(schedule_mode), generation = UUID()`,
+    [id, birthdayId, name, email, remindTime, message, scheduleMode],
   )
 }
 
@@ -192,6 +195,7 @@ async function upsertBirthday(connection, operation, currentRow, version, {
       email: payload.emailAddress,
       remindTime: nextSolarDate,
       message: `${payload.name}${payload.emailMessage}`,
+      scheduleMode: 'derived',
     })
   } else {
     await connection.query(
@@ -244,6 +248,7 @@ function serializeWebBirthdayRow(row) {
     emailReminderId: row.emailReminderId || null,
     emailReminderTime: row.emailReminderTime || null,
     emailReminderStatus: row.emailReminderStatus == null ? null : Number(row.emailReminderStatus),
+    emailReminderGeneration: row.emailReminderGeneration || null,
   }
 }
 
@@ -311,6 +316,7 @@ async function applyWebReminderUpsert(connection, {
     email: reminder.email,
     remindTime: reminder.remindTime,
     message: reminder.message,
+    scheduleMode: 'exact',
   })
   await appendChange(connection, { entityId, type: 'upsert' }, version)
   return serializeWebBirthdayRow(await requireStoredBirthday(connection, entityId))

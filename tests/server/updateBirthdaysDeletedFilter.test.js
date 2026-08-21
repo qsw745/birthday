@@ -59,10 +59,14 @@ test('update job filters tombstones from birthdays, self-heal, and derived remin
   const reminderQueries = queries.filter(sql => /email_reminders r JOIN birthdays b/.test(sql))
   assert.ok(reminderQueries.length >= 3)
   for (const sql of reminderQueries) assert.match(sql, /b\.deleted_at IS NULL/)
+  const reminderUpdate = reminderQueries.find(sql => /SET r\.remind_time = \?/.test(sql))
+  assert.match(reminderUpdate, /r\.schedule_mode = 'derived'/)
+  assert.match(reminderUpdate, /r\.generation = UUID\(\)/)
+  assert.doesNotMatch(reminderUpdate, /r\.remind_time <=>/)
   assert.equal(queries.some(sql => /mobile_sync_changes|mobile_sync_operations/.test(sql)), false)
 })
 
-test('derived refresh advances only reminders still equal to the old birthday nextSolarDate', async () => {
+test('derived refresh advances only derived reminders and preserves future exact reminders', async () => {
   const { runUpdateBirthdaysJob } = loadBirthdayJob()
   const STANDARD_ID = '11111111-1111-4111-8111-111111111111'
   const LEGACY_ID = '22222222-2222-4222-8222-222222222222'
@@ -71,8 +75,8 @@ test('derived refresh advances only reminders still equal to the old birthday ne
   const LEGACY_EXACT = '2026-12-31 18:30:00'
   const NEW_NEXT = '2027-09-15 09:00:00'
   const reminders = new Map([
-    [STANDARD_ID, { remind_time: OLD_STANDARD, status: 1 }],
-    [LEGACY_ID, { remind_time: LEGACY_EXACT, status: 0 }],
+    [STANDARD_ID, { remind_time: OLD_STANDARD, status: 1, schedule_mode: 'derived' }],
+    [LEGACY_ID, { remind_time: LEGACY_EXACT, status: 0, schedule_mode: 'exact' }],
   ])
   const birthdayRows = [
     {
@@ -108,10 +112,14 @@ test('derived refresh advances only reminders still equal to the old birthday ne
       if (/^SELECT r\.id FROM email_reminders/.test(sql)) return [[]]
       if (/^UPDATE birthdays SET nextSolarDate/.test(sql)) return [{ affectedRows: 1 }]
       if (/^UPDATE email_reminders r JOIN birthdays b/.test(sql)) {
-        const [newNext, birthdayId, expectedOldNext] = params
+        const [newNext, birthdayId] = params
         const reminder = reminders.get(birthdayId)
-        const matched = reminder && reminder.remind_time === expectedOldNext
-        if (matched) reminders.set(birthdayId, { remind_time: newNext, status: 0 })
+        const matched = reminder && reminder.schedule_mode === 'derived'
+        if (matched) reminders.set(birthdayId, {
+          remind_time: newNext,
+          status: 0,
+          schedule_mode: 'derived',
+        })
         return [{ affectedRows: matched ? 1 : 0 }]
       }
       throw new Error(`unexpected SQL: ${sql}`)
@@ -124,8 +132,16 @@ test('derived refresh advances only reminders still equal to the old birthday ne
     toMomentFn: () => ({ isSameOrBefore: () => true }),
   })
 
-  assert.deepEqual(reminders.get(STANDARD_ID), { remind_time: NEW_NEXT, status: 0 })
-  assert.deepEqual(reminders.get(LEGACY_ID), { remind_time: LEGACY_EXACT, status: 0 })
+  assert.deepEqual(reminders.get(STANDARD_ID), {
+    remind_time: NEW_NEXT,
+    status: 0,
+    schedule_mode: 'derived',
+  })
+  assert.deepEqual(reminders.get(LEGACY_ID), {
+    remind_time: LEGACY_EXACT,
+    status: 0,
+    schedule_mode: 'exact',
+  })
 })
 
 test('stale birthday candidates cannot overwrite a concurrent versioned web or mobile update', async () => {
@@ -206,7 +222,10 @@ test('update job destroys on rollback failure and logs only safe error metadata'
   const logger = {
     log(...args) { entries.push(['log', ...args]) },
     warn(...args) { entries.push(['warn', ...args]) },
-    error(...args) { entries.push(['error', ...args]) },
+    error(...args) {
+      entries.push(['error', ...args])
+      throw new Error('logger unavailable')
+    },
   }
 
   await runUpdateBirthdaysJob({

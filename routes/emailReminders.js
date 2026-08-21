@@ -17,16 +17,24 @@ function sanitizedError(error) {
   return details
 }
 
+function logError(logger, ...args) {
+  try {
+    logger.error(...args)
+  } catch {
+    // 日志故障不能改变业务结果或连接处置。
+  }
+}
+
 async function rollbackAndDispose(connection, primaryError, logger) {
   try {
     await connection.rollback()
     return false
   } catch (rollbackError) {
-    logger.error('回滚失败:', sanitizedError(rollbackError))
+    const rollbackDetails = sanitizedError(rollbackError)
     try {
       Object.defineProperty(primaryError, 'rollbackFailure', {
         enumerable: false,
-        value: sanitizedError(rollbackError),
+        value: rollbackDetails,
       })
     } catch {
       // 保留原始业务错误。
@@ -36,6 +44,7 @@ async function rollbackAndDispose(connection, primaryError, logger) {
     } catch {
       // 已污染连接不得再放回连接池。
     }
+    logError(logger, '回滚失败:', rollbackDetails)
     return true
   }
 }
@@ -71,17 +80,22 @@ function createReminderRuntime({
   now,
   logger,
 }) {
-  async function sendReminderEmail(reminder, expectedRemindTime = reminder.remind_time) {
+  async function sendReminderEmail(
+    reminder,
+    expectedRemindTime = reminder.remind_time,
+    expectedGeneration = reminder.generation,
+  ) {
     const claim = await queryFn(
       `UPDATE email_reminders r
        ${ACTIVE_REMINDER_JOIN}
           SET r.status = 1
         WHERE r.id = ?
           AND r.remind_time = ?
+          AND r.generation = ?
           AND r.remind_time <= NOW()
           AND r.status = 0
           AND b.deleted_at IS NULL`,
-      [reminder.id, expectedRemindTime],
+      [reminder.id, expectedRemindTime, expectedGeneration],
     )
     if (!claim.affectedRows) return
 
@@ -97,7 +111,7 @@ function createReminderRuntime({
       await transporterRef.sendMail(mailOptions)
       logger.log('[email] sent & marked delivered:', reminder.id)
     } catch (error) {
-      logger.error('[email] send failed:', reminder.id, sanitizedError(error))
+      logError(logger, '[email] send failed:', reminder.id, sanitizedError(error))
       try {
         await queryFn(
           `UPDATE email_reminders r
@@ -105,17 +119,18 @@ function createReminderRuntime({
               SET r.status = 0
             WHERE r.id = ?
               AND r.remind_time = ?
+              AND r.generation = ?
               AND r.status = 1
               AND b.deleted_at IS NULL`,
-          [reminder.id, expectedRemindTime],
+          [reminder.id, expectedRemindTime, expectedGeneration],
         )
       } catch (resetError) {
-        logger.error('[email] reset status failed:', reminder.id, sanitizedError(resetError))
+        logError(logger, '[email] reset status failed:', reminder.id, sanitizedError(resetError))
       }
     }
   }
 
-  function registerOneTimeJob(id, runAt, expectedRemindTime) {
+  function registerOneTimeJob(id, runAt, expectedRemindTime, expectedGeneration) {
     return scheduleRef.scheduleJob(runAt, async () => {
       try {
         const rows = await queryFn(
@@ -124,16 +139,17 @@ function createReminderRuntime({
              ${ACTIVE_REMINDER_JOIN}
             WHERE r.id = ?
               AND r.remind_time = ?
+              AND r.generation = ?
               AND r.remind_time <= NOW()
               AND r.status = 0
               AND b.deleted_at IS NULL`,
-          [id, expectedRemindTime],
+          [id, expectedRemindTime, expectedGeneration],
         )
         const row = rows[0]
         if (!row) return
-        await sendReminderEmail(row, expectedRemindTime)
+        await sendReminderEmail(row, expectedRemindTime, expectedGeneration)
       } catch (error) {
-        logger.error('[schedule] reminder callback failed:', id, sanitizedError(error))
+        logError(logger, '[schedule] reminder callback failed:', id, sanitizedError(error))
       }
     })
   }
@@ -149,10 +165,10 @@ function createReminderRuntime({
             AND b.deleted_at IS NULL`,
       )
       for (const reminder of reminders) {
-        await sendReminderEmail(reminder, reminder.remind_time)
+        await sendReminderEmail(reminder, reminder.remind_time, reminder.generation)
       }
     } catch (error) {
-      logger.error('[cron] batch send failed:', sanitizedError(error))
+      logError(logger, '[cron] batch send failed:', sanitizedError(error))
     }
   }
 
@@ -175,11 +191,11 @@ function createReminderRuntime({
           logger.warn('[reschedule] invalid remind_time, skip:', reminder.id, reminder.remind_time)
           continue
         }
-        registerOneTimeJob(reminder.id, runAt, reminder.remind_time)
+        registerOneTimeJob(reminder.id, runAt, reminder.remind_time, reminder.generation)
         logger.log('[reschedule] job restored for', reminder.id, runAt.toISOString())
       }
     } catch (error) {
-      logger.error('[reschedule] failed:', sanitizedError(error))
+      logError(logger, '[reschedule] failed:', sanitizedError(error))
     }
   }
 
@@ -259,7 +275,12 @@ function createEmailRemindersRouter({
 
       if (remindAt.getTime() > now().getTime()) {
         const reminderId = record.emailReminderId || id
-        runtime.registerOneTimeJob(reminderId, remindAt, scheduleTimeStr)
+        runtime.registerOneTimeJob(
+          reminderId,
+          remindAt,
+          scheduleTimeStr,
+          record.emailReminderGeneration,
+        )
         logger.log('[schedule] job registered for', reminderId, remindAt.toISOString())
       } else {
         logger.log('[schedule] remindTime is in the past; will be handled by cron worker.')
@@ -270,7 +291,7 @@ function createEmailRemindersRouter({
         scheduledTime: scheduleTimeStr,
       })
     } catch (error) {
-      logger.error('[create reminder] failed', sanitizedError(error))
+      logError(logger, '[create reminder] failed', sanitizedError(error))
       return res.status(500).json({ error: '数据库错误', details: safeDetails(error) })
     }
   })
@@ -292,7 +313,7 @@ function createEmailRemindersRouter({
       }, logger)
       return res.json({ success: true, message: '删除成功' })
     } catch (error) {
-      logger.error('删除操作失败:', sanitizedError(error))
+      logError(logger, '删除操作失败:', sanitizedError(error))
       return res.status(500).json({ error: '删除失败', details: safeDetails(error) })
     }
   })

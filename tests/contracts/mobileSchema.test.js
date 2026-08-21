@@ -88,3 +88,21 @@ test('clean-install schema mirrors mobile final state', () => {
   assert.match(sql, /CREATE TABLE IF NOT EXISTS mobile_sync_operations/i)
   assert.match(sql, /CREATE TABLE IF NOT EXISTS mobile_device_sessions/i)
 })
+
+test('reminders have durable internal schedule provenance and generation identity', () => {
+  for (const sql of [readSchema(migrationPath), readSchema(tablesPath)]) {
+    assert.match(sql, /schedule_mode\s+ENUM\('derived','exact'\)\s+NOT NULL/i)
+    assert.match(sql, /generation\s+CHAR\(36\)\s+NOT NULL/i)
+  }
+})
+
+test('one-shot migration explicitly classifies existing reminders and assigns generations before NOT NULL', () => {
+  const sql = readSchema(migrationPath)
+  const normalized = sql.replace(/\s+/g, ' ')
+
+  assert.match(normalized, /ALTER TABLE email_reminders ADD COLUMN schedule_mode ENUM\('derived','exact'\) NULL, ADD COLUMN generation CHAR\(36\) NULL/i)
+  assert.match(normalized, /UPDATE email_reminders r JOIN birthdays b ON b\.id = r\.birthday_id SET r\.schedule_mode = CASE WHEN b\.nextSolarDate IS NULL OR r\.remind_time = b\.nextSolarDate THEN 'derived' ELSE 'exact' END, r\.generation = UUID\(\)/i)
+  const backfill = normalized.search(/UPDATE email_reminders r JOIN birthdays b/i)
+  const enforce = normalized.search(/MODIFY COLUMN schedule_mode ENUM\('derived','exact'\) NOT NULL/i)
+  assert.ok(backfill >= 0 && enforce > backfill, 'backfill must precede NOT NULL enforcement')
+})

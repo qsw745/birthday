@@ -483,6 +483,8 @@ test('new upsert atomically inserts birthday, one email reminder, one change, an
     remind_time: '2026-09-25 09:00:00',
     message: '妈妈生日快乐',
     status: 0,
+    schedule_mode: 'derived',
+    generation: database.reminder(BIRTHDAY_ID).generation,
   })
   assert.deepEqual(database.state.changes.map(change => ({
     entity_id: change.entity_id,
@@ -774,6 +776,8 @@ test('enabled email update preserves one reminder, replaces its content, and res
   assert.equal(reminder.email, 'new@example.com')
   assert.equal(reminder.message, '妈妈新的祝福')
   assert.equal(reminder.status, 0)
+  assert.equal(reminder.schedule_mode, 'derived')
+  assert.notEqual(reminder.generation, originalReminder.generation)
   assert.equal(result.record.emailAddress, 'new@example.com')
   assert.equal(result.record.emailMessage, '新的祝福')
 })

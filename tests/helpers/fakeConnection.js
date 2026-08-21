@@ -4,6 +4,7 @@ const DEFAULT_BIRTHDAY_ID = '11111111-1111-4111-8111-111111111111'
 const DEFAULT_DEVICE_ID = '22222222-2222-4222-8222-222222222222'
 const FIXED_CREATED_AT = '2026-01-01 00:00:00'
 const FIXED_UPDATED_AT = '2026-08-22 12:00:00'
+const DEFAULT_REMINDER_GENERATION = 'aaaaaaaa-0000-4000-8000-000000000001'
 
 function clone(value) {
   return structuredClone(value)
@@ -45,6 +46,8 @@ function reminderRow(overrides = {}) {
     remind_time: '2026-09-25 09:00:00',
     message: '妈妈生日快乐',
     status: 0,
+    schedule_mode: 'derived',
+    generation: DEFAULT_REMINDER_GENERATION,
     ...overrides,
   }
 }
@@ -80,6 +83,7 @@ class FakeDatabase {
     this.birthdayInsertRace = null
     this.birthdayLocks = new Map()
     this.birthdayInsertReservations = new Map()
+    this.reminderGenerationCounter = 100
   }
 
   failNext(matcher, error) {
@@ -296,6 +300,7 @@ class FakeConnection {
       emailReminderId: reminder ? reminder.id : null,
       emailReminderTime: reminder ? reminder.remind_time : null,
       emailReminderStatus: reminder ? reminder.status : null,
+      emailReminderGeneration: reminder ? reminder.generation : null,
     }
   }
 
@@ -425,11 +430,13 @@ class FakeConnection {
       return [{ affectedRows: 1 }]
     }
 
-    if (/^INSERT INTO email_reminders \(id, birthday_id, name, email, remind_time, message, status\) VALUES \(\?, \?, \?, \?, \?, \?, 0\) ON DUPLICATE KEY UPDATE name = VALUES\(name\), email = VALUES\(email\), remind_time = VALUES\(remind_time\), message = VALUES\(message\), status = 0$/i.test(sql)) {
+    if (/^INSERT INTO email_reminders \(id, birthday_id, name, email, remind_time, message, status, schedule_mode, generation\) VALUES \(\?, \?, \?, \?, \?, \?, 0, \?, UUID\(\)\) ON DUPLICATE KEY UPDATE name = VALUES\(name\), email = VALUES\(email\), remind_time = VALUES\(remind_time\), message = VALUES\(message\), status = 0, schedule_mode = VALUES\(schedule_mode\), generation = UUID\(\)$/i.test(sql)) {
       this.requireTransaction(sql)
-      assert.equal(params.length, 6)
-      const [id, birthdayId, name, email, remindTime, message] = params
+      assert.equal(params.length, 7)
+      const [id, birthdayId, name, email, remindTime, message, scheduleMode] = params
       const current = this.state().reminders.get(String(birthdayId))
+      this.database.reminderGenerationCounter += 1
+      const generation = `00000000-0000-4000-8000-${String(this.database.reminderGenerationCounter).padStart(12, '0')}`
       this.state().reminders.set(String(birthdayId), reminderRow({
         id: current ? current.id : id,
         birthday_id: birthdayId,
@@ -438,6 +445,8 @@ class FakeConnection {
         remind_time: remindTime,
         message,
         status: 0,
+        schedule_mode: scheduleMode,
+        generation,
       }))
       return [{ affectedRows: current ? 2 : 1 }]
     }

@@ -78,6 +78,12 @@ test('applyWebUpsert updates under the caller transaction, increments version, a
 
   assert.equal(record.version, '3')
   assert.equal(record.userEmail, 'new@example.com')
+  const reminder = connection.state().reminders.get(DEFAULT_BIRTHDAY_ID)
+  assert.equal(reminder.schedule_mode, 'derived')
+  assert.notEqual(
+    reminder.generation,
+    reminderRow().generation,
+  )
   assert.equal(connection.countSQL(/^SELECT .* FROM birthdays b .* FOR UPDATE$/), 1)
   assert.equal(connection.countSQL(/^INSERT INTO mobile_sync_changes/), 1)
   assert.deepEqual(connection.lifecycle, ['begin'])
@@ -215,6 +221,10 @@ test('birthday route destroys a tainted connection on rollback failure and does 
   }
   const pool = { getConnection: async () => connection }
   const logger = recordingLogger()
+  logger.error = (...args) => {
+    logger.entries.push(['error', ...args])
+    throw new Error('logger unavailable')
+  }
   const router = createBirthdaysRouter({
     poolRef: pool,
     queryFn: async () => [],
@@ -268,10 +278,14 @@ test('legacy reminder POST keeps exact schedule and response shape while version
   const database = new FakeDatabase({ birthdays: [birthdayRow({ version: '9' })] })
   const pool = new FakePool(database)
   const scheduled = []
+  const callbackQueries = []
   const scheduleRef = { scheduleJob(spec, callback) { scheduled.push({ spec, callback }); return {} } }
   const router = createEmailRemindersRouter({
     poolRef: pool,
-    queryFn: async () => [],
+    queryFn: async (sql, params) => {
+      callbackQueries.push({ sql: sql.replace(/\s+/g, ' ').trim(), params })
+      return []
+    },
     scheduleRef,
     transporterRef: { sendMail: async () => assert.fail('must not send during route test') },
     requireAuthMiddleware: auth,
@@ -300,8 +314,16 @@ test('legacy reminder POST keeps exact schedule and response shape while version
   })
   assert.equal(database.birthday(DEFAULT_BIRTHDAY_ID).version, '10')
   assert.equal(database.reminder(DEFAULT_BIRTHDAY_ID).remind_time, '2027-01-02 03:04:05')
+  assert.equal(database.reminder(DEFAULT_BIRTHDAY_ID).schedule_mode, 'exact')
+  assert.match(database.reminder(DEFAULT_BIRTHDAY_ID).generation, /^[0-9a-f-]{36}$/i)
   assert.equal(database.state.changes.length, 1)
   assert.equal(scheduled.length, 1)
+  await scheduled[0].callback()
+  assert.deepEqual(callbackQueries[0].params, [
+    REMINDER_ID,
+    '2027-01-02 03:04:05',
+    database.reminder(DEFAULT_BIRTHDAY_ID).generation,
+  ])
   assert.deepEqual(pool.database.connections[0].lifecycle, ['begin', 'commit', 'release'])
 })
 
@@ -349,6 +371,10 @@ test('legacy reminder rollback failure destroys the connection and logs only saf
     throw error
   }
   const logger = recordingLogger()
+  logger.error = (...args) => {
+    logger.entries.push(['error', ...args])
+    throw new Error('logger unavailable')
+  }
   const router = createEmailRemindersRouter({
     poolRef: { getConnection: async () => connection },
     queryFn: async () => [],
@@ -592,7 +618,7 @@ test('a callback-to-claim reschedule race makes the expected-time claim fail wit
   await schedulers.ready
   await datedJobs[0]()
 
-  assert.deepEqual(claims, [[REMINDER_ID, T1]])
+  assert.deepEqual(claims, [[REMINDER_ID, T1, reminderRow().generation]])
   assert.deepEqual(sent, [])
 })
 
@@ -634,7 +660,116 @@ test('SMTP failure reset cannot reset a newly rescheduled expected time', async 
   await schedulers.ready
   await recurringJobs[0]()
 
-  assert.deepEqual(resets, [[REMINDER_ID, T1]])
+  assert.deepEqual(resets, [[REMINDER_ID, T1, reminderRow().generation]])
   assert.equal(current.remind_time, T2)
   assert.equal(current.status, 0)
+})
+
+test('same-time reconfiguration invalidates an old generation callback', async () => {
+  const { registerEmailReminderSchedulers } = loadEmailReminderModule()
+  const T = '2026-08-22 11:00:00'
+  const GENERATION_A = 'aaaaaaaa-0000-4000-8000-000000000001'
+  const GENERATION_B = 'bbbbbbbb-0000-4000-8000-000000000002'
+  let current = reminderRow({ remind_time: T, generation: GENERATION_A })
+  const datedJobs = []
+  const claims = []
+  const sent = []
+  const queryFn = async (sqlInput, params = []) => {
+    const sql = sqlInput.replace(/\s+/g, ' ').trim()
+    if (/r\.status = 0 AND r\.remind_time > \?/.test(sql)) return [{ ...current }]
+    if (/^SELECT r\.\*/.test(sql) && /WHERE r\.id = \?/.test(sql)) {
+      return params[1] === current.remind_time && params[2] === current.generation
+        ? [{ ...current }]
+        : []
+    }
+    if (/SET r\.status = 1/.test(sql)) {
+      claims.push(params)
+      return { affectedRows: 1 }
+    }
+    return []
+  }
+  const schedulers = registerEmailReminderSchedulers({
+    queryFn,
+    scheduleRef: {
+      scheduleJob(spec, callback) {
+        if (typeof spec !== 'string') datedJobs.push(callback)
+        return {}
+      },
+    },
+    transporterRef: { sendMail: async options => sent.push(options) },
+    formatDateFn: () => '2026-08-22 10:00:00',
+  })
+  await schedulers.ready
+  current = { ...current, generation: GENERATION_B }
+  await datedJobs[0]()
+
+  assert.deepEqual(claims, [])
+  assert.deepEqual(sent, [])
+})
+
+test('failed generation A cannot reset same-time generation B after B claims', async () => {
+  const { registerEmailReminderSchedulers } = loadEmailReminderModule()
+  const T = '2026-08-22 11:00:00'
+  const GENERATION_A = 'aaaaaaaa-0000-4000-8000-000000000001'
+  const GENERATION_B = 'bbbbbbbb-0000-4000-8000-000000000002'
+  let current = reminderRow({ remind_time: T, generation: GENERATION_A, status: 0 })
+  const recurringJobs = []
+  const claims = []
+  const resets = []
+  const queryFn = async (sqlInput, params = []) => {
+    const sql = sqlInput.replace(/\s+/g, ' ').trim()
+    if (/r\.status = 0 AND r\.remind_time > \?/.test(sql)) return []
+    if (/^SELECT r\.\*/.test(sql) && /remind_time <= NOW/.test(sql)) {
+      return current.status === 0 ? [{ ...current }] : []
+    }
+    if (/SET r\.status = 1/.test(sql)) {
+      claims.push(params)
+      const matched = params[1] === current.remind_time
+        && params[2] === current.generation
+        && current.status === 0
+      if (matched) current = { ...current, status: 1 }
+      return { affectedRows: matched ? 1 : 0 }
+    }
+    if (/SET r\.status = 0/.test(sql)) {
+      resets.push(params)
+      const matched = params[1] === current.remind_time
+        && params[2] === current.generation
+        && current.status === 1
+      if (matched) current = { ...current, status: 0 }
+      return { affectedRows: matched ? 1 : 0 }
+    }
+    return []
+  }
+  let sendCount = 0
+  const schedulers = registerEmailReminderSchedulers({
+    queryFn,
+    scheduleRef: {
+      scheduleJob(spec, callback) {
+        if (typeof spec === 'string') recurringJobs.push(callback)
+        return {}
+      },
+    },
+    transporterRef: {
+      async sendMail() {
+        sendCount += 1
+        if (sendCount === 1) {
+          current = { ...current, generation: GENERATION_B, status: 0 }
+          await recurringJobs[0]()
+          throw new Error('generation A SMTP failure')
+        }
+      },
+    },
+    formatDateFn: () => '2026-08-22 12:00:00',
+  })
+  await schedulers.ready
+  await recurringJobs[0]()
+
+  assert.deepEqual(claims, [
+    [REMINDER_ID, T, GENERATION_A],
+    [REMINDER_ID, T, GENERATION_B],
+  ])
+  assert.deepEqual(resets, [[REMINDER_ID, T, GENERATION_A]])
+  assert.equal(sendCount, 2)
+  assert.equal(current.generation, GENERATION_B)
+  assert.equal(current.status, 1)
 })

@@ -8,16 +8,24 @@ function sanitizedError(error) {
   return details
 }
 
+function logError(logger, ...args) {
+  try {
+    logger.error(...args)
+  } catch {
+    // 日志故障不能改变业务结果或连接处置。
+  }
+}
+
 async function rollbackAndDispose(connection, primaryError, logger) {
   try {
     await connection.rollback()
     return false
   } catch (rollbackError) {
-    logger.error('回滚失败:', sanitizedError(rollbackError))
+    const rollbackDetails = sanitizedError(rollbackError)
     try {
       Object.defineProperty(primaryError, 'rollbackFailure', {
         enumerable: false,
-        value: sanitizedError(rollbackError),
+        value: rollbackDetails,
       })
     } catch {
       // 保留原始业务错误。
@@ -27,6 +35,7 @@ async function rollbackAndDispose(connection, primaryError, logger) {
     } catch {
       // 已污染连接不得再放回连接池。
     }
+    logError(logger, '回滚失败:', rollbackDetails)
     return true
   }
 }
@@ -74,6 +83,7 @@ async function runUpdateBirthdaysJob({
              FROM email_reminders r
              JOIN birthdays b ON b.id = r.birthday_id
             WHERE r.birthday_id = ?
+              AND r.schedule_mode = 'derived'
               AND r.status = 0
               AND r.remind_time <= NOW()
               AND b.deleted_at IS NULL`,
@@ -122,17 +132,17 @@ async function runUpdateBirthdaysJob({
         const [reminderUpdate] = await connection.query(
           `UPDATE email_reminders r
            JOIN birthdays b ON b.id = r.birthday_id
-              SET r.remind_time = ?, r.status = 0
+              SET r.remind_time = ?, r.status = 0, r.generation = UUID()
             WHERE r.birthday_id = ?
-              AND (r.remind_time <=> ?)
+              AND r.schedule_mode = 'derived'
               AND b.deleted_at IS NULL`,
-          [newNext, item.id, item.nextSolarDate],
+          [newNext, item.id],
         )
         if (reminderUpdate.affectedRows) {
           logger.log(`email_reminder for birthday ${item.id} 重置提醒 → ${newNext}`)
         }
       } catch (error) {
-        logger.error('计算下一次提醒日期失败:', sanitizedError(error))
+        logError(logger, '计算下一次提醒日期失败:', sanitizedError(error))
       }
     }
 
@@ -140,7 +150,7 @@ async function runUpdateBirthdaysJob({
     logger.log('✅ 更新完成')
   } catch (error) {
     if (connection) destroyed = await rollbackAndDispose(connection, error, logger)
-    logger.error('更新失败:', sanitizedError(error))
+    logError(logger, '更新失败:', sanitizedError(error))
   } finally {
     if (connection && !destroyed) connection.release()
   }

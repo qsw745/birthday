@@ -7,6 +7,24 @@ ALTER TABLE birthdays
   ADD COLUMN notify_same_day TINYINT(1) NOT NULL DEFAULT 1,
   ADD KEY idx_birthdays_deleted_at (deleted_at);
 
+-- Historical reminder provenance was not stored. This one-shot heuristic marks
+-- reminders matching the birthday-derived time (or lacking one) as derived.
+ALTER TABLE email_reminders
+  ADD COLUMN schedule_mode ENUM('derived','exact') NULL,
+  ADD COLUMN generation CHAR(36) NULL;
+
+UPDATE email_reminders r
+JOIN birthdays b ON b.id = r.birthday_id
+   SET r.schedule_mode = CASE
+         WHEN b.nextSolarDate IS NULL OR r.remind_time = b.nextSolarDate THEN 'derived'
+         ELSE 'exact'
+       END,
+       r.generation = UUID();
+
+ALTER TABLE email_reminders
+  MODIFY COLUMN schedule_mode ENUM('derived','exact') NOT NULL,
+  MODIFY COLUMN generation CHAR(36) NOT NULL;
+
 CREATE TABLE IF NOT EXISTS mobile_sync_changes (
   seq BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   entity_type VARCHAR(32) NOT NULL,
