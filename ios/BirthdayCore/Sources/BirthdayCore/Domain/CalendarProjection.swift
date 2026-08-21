@@ -82,16 +82,42 @@ public struct SevenColumnGridMetrics: Equatable, Sendable {
     let roomy = (pagePadding: CGFloat(16), cardPadding: CGFloat(12), spacing: CGFloat(4))
     let regular = (pagePadding: CGFloat(12), cardPadding: CGFloat(8), spacing: CGFloat(2))
     let compact = (pagePadding: CGFloat(6), cardPadding: CGFloat(0), spacing: CGFloat(0))
+    let compactWidth = minimumContainerWidth(for: compact)
+    let regularWidth = minimumContainerWidth(for: regular)
+    let roomyWidth = minimumContainerWidth(for: roomy)
 
-    if containerWidth >= minimumContainerWidth(for: roomy) {
+    if containerWidth >= roomyWidth {
       return make(containerWidth: containerWidth, using: roomy)
     }
 
-    if containerWidth >= minimumContainerWidth(for: regular) {
-      return make(containerWidth: containerWidth, using: regular)
+    if containerWidth >= regularWidth {
+      let progress = (containerWidth - regularWidth) / (roomyWidth - regularWidth)
+      return make(
+        containerWidth: containerWidth,
+        using: interpolate(from: regular, to: roomy, progress: progress)
+      )
     }
 
-    return make(containerWidth: containerWidth, using: compact)
+    let progress = max(
+      0,
+      (containerWidth - compactWidth) / (regularWidth - compactWidth)
+    )
+    return make(
+      containerWidth: containerWidth,
+      using: interpolate(from: compact, to: regular, progress: progress)
+    )
+  }
+
+  private static func interpolate(
+    from start: (pagePadding: CGFloat, cardPadding: CGFloat, spacing: CGFloat),
+    to end: (pagePadding: CGFloat, cardPadding: CGFloat, spacing: CGFloat),
+    progress: CGFloat
+  ) -> (pagePadding: CGFloat, cardPadding: CGFloat, spacing: CGFloat) {
+    (
+      pagePadding: start.pagePadding + (end.pagePadding - start.pagePadding) * progress,
+      cardPadding: start.cardPadding + (end.cardPadding - start.cardPadding) * progress,
+      spacing: start.spacing + (end.spacing - start.spacing) * progress
+    )
   }
 
   private static func make(

@@ -119,3 +119,36 @@ import Testing
 
   #expect(SevenColumnGridMetrics.make(containerWidth: 360).availableCellWidth == 44)
 }
+
+@Test func calendarGridMetricsStayContinuousAcrossLayoutBoundaries() {
+  let epsilon = CGFloat(0.001)
+
+  for boundary in [CGFloat(360), CGFloat(388)] {
+    let widths = [boundary - 0.001, boundary, boundary + 0.001]
+    let samples = widths.map(SevenColumnGridMetrics.make(containerWidth:))
+
+    for (width, metrics) in zip(widths, samples) {
+      let minimumOccupiedWidth =
+        CGFloat(7 * 44)
+        + CGFloat(6) * metrics.columnSpacing
+        + CGFloat(2) * (metrics.pageHorizontalPadding + metrics.cardHorizontalPadding)
+
+      #expect(metrics.availableCellWidth >= 44)
+      #expect(minimumOccupiedWidth <= width)
+    }
+
+    for (previous, next) in zip(samples, samples.dropFirst()) {
+      #expect(next.pageHorizontalPadding >= previous.pageHorizontalPadding)
+      #expect(next.cardHorizontalPadding >= previous.cardHorizontalPadding)
+      #expect(next.columnSpacing >= previous.columnSpacing)
+      #expect(next.availableCellWidth + epsilon >= previous.availableCellWidth)
+    }
+
+    let first = samples[0]
+    let last = samples[2]
+    #expect(abs(last.pageHorizontalPadding - first.pageHorizontalPadding) < epsilon)
+    #expect(abs(last.cardHorizontalPadding - first.cardHorizontalPadding) < epsilon)
+    #expect(abs(last.columnSpacing - first.columnSpacing) < epsilon)
+    #expect(abs(last.availableCellWidth - first.availableCellWidth) < epsilon)
+  }
+}
