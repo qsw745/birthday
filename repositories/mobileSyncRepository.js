@@ -29,7 +29,7 @@ const BIRTHDAY_SELECT = `SELECT
   r.message AS message
 FROM birthdays b
 LEFT JOIN email_reminders r ON r.birthday_id = b.id`
-const MAX_OPERATION_RETRY_ROUNDS = 3
+const MAX_OPERATION_ATTEMPTS = 3
 const RETRYABLE_TRANSACTION_CODES = new Set([
   'ER_LOCK_DEADLOCK',
   'ER_LOCK_WAIT_TIMEOUT',
@@ -196,7 +196,7 @@ function createMobileSyncRepository({
     const operation = isNormalizedPushOperation(operationInput)
       ? operationInput
       : normalizePushRequest({ operations: [operationInput] }).operations[0]
-    for (let retryRound = 0; ; retryRound += 1) {
+    for (let attempt = 1; ; attempt += 1) {
       const connection = await pool.getConnection()
       let duplicateError = null
       let shouldRetry = false
@@ -212,7 +212,7 @@ function createMobileSyncRepository({
           duplicateError = error
         } else if (
           isRetryableOperationFailure(error)
-          && retryRound < MAX_OPERATION_RETRY_ROUNDS
+          && attempt < MAX_OPERATION_ATTEMPTS
         ) {
           shouldRetry = true
         } else {

@@ -59,6 +59,18 @@ private func validationDraft(
     )
 }
 
+private struct Plan3PushOperationEnvelope: Encodable {
+    let operationId: UUID
+    let entityId: UUID
+    let type: String
+    let baseVersion: String
+    let payload: BirthdayOutboxPayload
+}
+
+private struct Plan3PushEnvelope: Encodable {
+    let operations: [Plan3PushOperationEnvelope]
+}
+
 @Test func sharedContractTrimsUnicodeWhiteSpaceButPreservesByteOrderMark() throws {
     try BirthdayValidator.validate(validationDraft(emailAddress: "a@b"))
     try BirthdayValidator.validate(validationDraft(
@@ -131,25 +143,25 @@ private func validationDraft(
     }
 }
 
-@Test func sharedEmailMessageLimitCapsFinalStorageAt32768UTF8BytesOnlyWhenEnabled() throws {
+@Test func sharedEmailMessageLimitCapsFinalStorageAt8192UTF8BytesOnlyWhenEnabled() throws {
     try BirthdayValidator.validate(validationDraft(
         name: "M",
-        emailMessage: String(repeating: "a", count: 32_767)
+        emailMessage: String(repeating: "a", count: 8_191)
     ))
     #expect(throws: BirthdayValidationError.emailMessageTooLong) {
         try BirthdayValidator.validate(validationDraft(
             name: "M",
-            emailMessage: String(repeating: "a", count: 32_768)
+            emailMessage: String(repeating: "a", count: 8_192)
         ))
     }
     try BirthdayValidator.validate(validationDraft(
         name: "M",
-        emailMessage: String(repeating: "🎂", count: 8_191)
+        emailMessage: String(repeating: "🎂", count: 2_047)
     ))
     #expect(throws: BirthdayValidationError.emailMessageTooLong) {
         try BirthdayValidator.validate(validationDraft(
             name: "M",
-            emailMessage: String(repeating: "🎂", count: 8_192)
+            emailMessage: String(repeating: "🎂", count: 2_048)
         ))
     }
     try BirthdayValidator.validate(validationDraft(
@@ -157,6 +169,40 @@ private func validationDraft(
         emailEnabled: false,
         emailMessage: String(repeating: "🎂", count: 20_000)
     ))
+}
+
+@Test func escapedControlEmailAtStorageLimitFitsCompleteCompactPushEnvelope() throws {
+    let emailMessage = "\\\"\u{0000}\u{001F}" + String(repeating: "\u{0000}", count: 8_187)
+    let draft = validationDraft(name: "M", emailMessage: emailMessage)
+    try BirthdayValidator.validate(draft)
+    #expect((draft.name + draft.reminder.emailMessage).utf8.count == 8_192)
+
+    let entityId = try #require(UUID(uuidString: "22222222-2222-4222-8222-222222222222"))
+    let operationId = try #require(UUID(uuidString: "33333333-3333-4333-8333-333333333333"))
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let payload = BirthdayOutboxPayload(record: BirthdayRecord(
+        id: entityId,
+        name: draft.name,
+        lunarBirthday: draft.lunarBirthday,
+        reminder: draft.reminder,
+        nextSolarDate: now,
+        version: 0,
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: nil,
+        syncState: .pending
+    ))
+    let envelope = Plan3PushEnvelope(operations: [Plan3PushOperationEnvelope(
+        operationId: operationId,
+        entityId: entityId,
+        type: "upsert",
+        baseVersion: "0",
+        payload: payload
+    )])
+
+    let compactJSON = try JSONEncoder().encode(envelope)
+    #expect(compactJSON.count > 32 * 1_024)
+    #expect(compactJSON.count <= 60 * 1_024)
 }
 
 @Test func exposesPublicInitializersForPersistenceAndSyncModels() {

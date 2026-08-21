@@ -104,6 +104,25 @@ private func insertSyncedBirthday(
   #expect(try await store.pendingOperations().count == 1)
 }
 
+@Test func overlongEnabledEmailIsRejectedBeforeBirthdayOrOutboxPersistence() async throws {
+  let store = makeStore(try makeContainer())
+  let reminder = ReminderConfig(
+    timeMinutes: 540,
+    notifyDayBefore: true,
+    notifySameDay: true,
+    emailEnabled: true,
+    emailAddress: "a@b",
+    emailMessage: String(repeating: "a", count: 8_192)
+  )
+
+  await #expect(throws: BirthdayValidationError.emailMessageTooLong) {
+    try await store.save(
+      draft(name: "M", reminder: reminder), id: nil, now: storeNow, timeZone: storeTimeZone)
+  }
+  #expect(try await store.activeBirthdays().isEmpty)
+  #expect(try await store.pendingOperations().isEmpty)
+}
+
 @Test func saveRoundTripsAllReminderFieldsAndInitialVersion() async throws {
   let store = makeStore(try makeContainer())
   let reminder = ReminderConfig(

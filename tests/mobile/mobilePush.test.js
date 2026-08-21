@@ -216,19 +216,19 @@ test('server fails explicitly if Intl.Segmenter is unavailable', () => {
   )
 })
 
-test('enabled email final storage is capped at 32768 UTF-8 bytes while disabled content is ignored', () => {
+test('enabled email final storage is capped at 8192 UTF-8 bytes while disabled content is ignored', () => {
   assert.doesNotThrow(() => normalizeBirthdayPayload(validPayload({
     name: 'M',
     emailEnabled: true,
     emailAddress: 'a@b',
-    emailMessage: 'a'.repeat(32767),
+    emailMessage: 'a'.repeat(8191),
   })))
   assert.throws(
     () => normalizeBirthdayPayload(validPayload({
       name: 'M',
       emailEnabled: true,
       emailAddress: 'a@b',
-      emailMessage: 'a'.repeat(32768),
+      emailMessage: 'a'.repeat(8192),
     })),
     error => error.code === 'invalid_birthday_payload',
   )
@@ -236,14 +236,14 @@ test('enabled email final storage is capped at 32768 UTF-8 bytes while disabled 
     name: 'M',
     emailEnabled: true,
     emailAddress: 'a@b',
-    emailMessage: '🎂'.repeat(8191),
+    emailMessage: '🎂'.repeat(2047),
   })))
   assert.throws(
     () => normalizeBirthdayPayload(validPayload({
       name: 'M',
       emailEnabled: true,
       emailAddress: 'a@b',
-      emailMessage: '🎂'.repeat(8192),
+      emailMessage: '🎂'.repeat(2048),
     })),
     error => error.code === 'invalid_birthday_payload',
   )
@@ -416,24 +416,47 @@ test('the production-equivalent 64 KiB parser returns 413 before push validation
   assert.equal(pool.getConnectionCalls, 0)
 })
 
-test('one operation at the 32768-byte enabled-email storage limit fits the push envelope', async () => {
-  const database = new FakeDatabase()
-  const pool = new FakePool(database)
-  const app = createPushApp({ repository: createMobileSyncRepository({ pool }) })
+test('one escaped-control operation at the 8192-byte storage limit fits parser and push limits', async () => {
+  const emailMessage = ['\\', '"', '\u0000', '\u001f', '\u0000'.repeat(8187)].join('')
   const body = { operations: [operation({
     payload: validPayload({
       name: 'M',
       emailEnabled: true,
       emailAddress: 'a@b',
-      emailMessage: 'a'.repeat(32767),
+      emailMessage,
     }),
   })] }
-  assert.ok(Buffer.byteLength(JSON.stringify(body), 'utf8') < 60 * 1024)
+  assert.equal(Buffer.byteLength(`M${emailMessage}`, 'utf8'), 8192)
+  const compactRequestBytes = Buffer.byteLength(JSON.stringify(body), 'utf8')
+  assert.ok(compactRequestBytes > 32 * 1024)
+  assert.ok(compactRequestBytes <= MAX_PUSH_REQUEST_BYTES)
 
+  const database = new FakeDatabase()
+  const pool = new FakePool(database)
+  const app = createPushApp({ repository: createMobileSyncRepository({ pool }) })
   const response = await request(app).post('/api/mobile/sync/push').send(body)
   assert.equal(response.status, 200)
   assert.equal(response.body.results[0].status, 'applied')
   assert.equal(pool.getConnectionCalls, 1)
+
+  const rejectedPool = new FakePool(new FakeDatabase())
+  const rejectedApp = createPushApp({
+    repository: createMobileSyncRepository({ pool: rejectedPool }),
+  })
+  const rejected = await request(rejectedApp)
+    .post('/api/mobile/sync/push')
+    .send({ operations: [operation({
+      operationId: SECOND_OPERATION_ID,
+      payload: validPayload({
+        name: 'M',
+        emailEnabled: true,
+        emailAddress: 'a@b',
+        emailMessage: 'a'.repeat(8192),
+      }),
+    })] })
+  assert.equal(rejected.status, 400)
+  assert.deepEqual(rejected.body, { error: 'invalid_birthday_payload' })
+  assert.equal(rejectedPool.getConnectionCalls, 0)
 })
 
 test('new upsert atomically inserts birthday, one email reminder, one change, and its stored response', async () => {
@@ -609,27 +632,35 @@ test('a birthday primary-key race retries with a new transaction and persists co
   ])
 })
 
-test('deadlock and lock-wait timeout each retry the complete operation on a new connection', async () => {
-  for (const code of ['ER_LOCK_DEADLOCK', 'ER_LOCK_WAIT_TIMEOUT']) {
+test('retryable errors can succeed on the second or third total operation attempt', async () => {
+  for (const [code, failureCount] of [
+    ['ER_LOCK_DEADLOCK', 1],
+    ['ER_LOCK_WAIT_TIMEOUT', 2],
+  ]) {
     const database = new FakeDatabase()
-    const transient = Object.assign(new Error(`${code} transient`), { code })
-    database.failNext(/^SELECT .* FROM birthdays .* FOR UPDATE$/i, transient)
+    for (let index = 0; index < failureCount; index += 1) {
+      const transient = Object.assign(new Error(`${code} transient ${index + 1}`), { code })
+      database.failNext(/^SELECT .* FROM birthdays .* FOR UPDATE$/i, transient)
+    }
     const pool = new FakePool(database)
 
     const result = await createMobileSyncRepository({ pool }).applyOperation(DEVICE_ID, operation())
 
     assert.equal(result.status, 'applied')
-    assert.equal(pool.getConnectionCalls, 2)
-    assert.deepEqual(database.connections.map(connection => connection.lifecycle), [
-      ['begin', 'rollback', 'release'],
-      ['begin', 'commit', 'release'],
-    ])
+    assert.equal(pool.getConnectionCalls, failureCount + 1)
+    assert.deepEqual(
+      database.connections.map(connection => connection.lifecycle),
+      [
+        ...Array.from({ length: failureCount }, () => ['begin', 'rollback', 'release']),
+        ['begin', 'commit', 'release'],
+      ],
+    )
   }
 })
 
-test('three retry rounds exhausted rethrow the final retryable database error unchanged', async () => {
+test('three total attempts exhausted rethrow the third retryable database error unchanged', async () => {
   const database = new FakeDatabase()
-  const failures = Array.from({ length: 4 }, (_, index) => Object.assign(
+  const failures = Array.from({ length: 3 }, (_, index) => Object.assign(
     new Error(`timeout ${index + 1}`),
     { code: 'ER_LOCK_WAIT_TIMEOUT' },
   ))
@@ -640,11 +671,10 @@ test('three retry rounds exhausted rethrow the final retryable database error un
 
   await assert.rejects(
     createMobileSyncRepository({ pool }).applyOperation(DEVICE_ID, operation()),
-    error => error === failures[3],
+    error => error === failures[2],
   )
-  assert.equal(pool.getConnectionCalls, 4)
+  assert.equal(pool.getConnectionCalls, 3)
   assert.deepEqual(database.connections.map(connection => connection.lifecycle), [
-    ['begin', 'rollback', 'release'],
     ['begin', 'rollback', 'release'],
     ['begin', 'rollback', 'release'],
     ['begin', 'rollback', 'release'],

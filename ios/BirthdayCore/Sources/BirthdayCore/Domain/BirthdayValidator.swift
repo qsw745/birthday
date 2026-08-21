@@ -25,7 +25,7 @@ public enum BirthdayValidator {
                   !emailParts[0].isEmpty,
                   !emailParts[1].isEmpty
             else { throw BirthdayValidationError.invalidEmail }
-            guard (name + draft.reminder.emailMessage).utf8.count <= 32_768 else {
+            guard (name + draft.reminder.emailMessage).utf8.count <= 8_192 else {
                 throw BirthdayValidationError.emailMessageTooLong
             }
         }
