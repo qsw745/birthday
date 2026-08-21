@@ -8,7 +8,7 @@ const TIME_PATTERN = /^(\d{2}):(\d{2})(?::(\d{2}))?$/
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const EDGE_WHITE_SPACE_PATTERN = /^(?:\p{White_Space})+|(?:\p{White_Space})+$/gu
 const STORAGE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
-const ISO8601_OFFSET_PATTERN = /(?:Z|([+-])(\d{2}):?(\d{2}))$/i
+const RFC3339_INSTANT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:Z|[+-](\d{2}):(\d{2}))$/
 const INT64_MAX = BigInt(MOBILE_API_CONTRACT.limits.signedInt64Maximum)
 const INT64_MAX_DECIMAL = INT64_MAX.toString(10)
 const MAX_ENABLED_EMAIL_STORAGE_BYTES = MOBILE_API_CONTRACT.limits.enabledEmailStorageBytes
@@ -73,10 +73,33 @@ function normalizeInt64String(value) {
 
 function isStrictISO8601Instant(value) {
   if (typeof value !== 'string') return false
-  const offset = value.match(ISO8601_OFFSET_PATTERN)
-  if (!offset) return false
-  if (offset[1] && (Number(offset[2]) > 23 || Number(offset[3]) > 59)) return false
-  return moment.parseZone(value, moment.ISO_8601, true).isValid()
+  const match = value.match(RFC3339_INSTANT_PATTERN)
+  if (!match) return false
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  const offsetHour = match[8] === undefined ? 0 : Number(match[8])
+  const offsetMinute = match[9] === undefined ? 0 : Number(match[9])
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+  ]
+
+  return month >= 1
+    && month <= 12
+    && day >= 1
+    && day <= daysInMonth[month - 1]
+    && hour <= 23
+    && minute <= 59
+    && second <= 59
+    && offsetHour <= 23
+    && offsetMinute <= 59
 }
 
 function invalidAPIRecord(message = 'invalid API birthday record') {
@@ -163,7 +186,15 @@ function assertAPIBirthdayChange({ entityId, operation, entityVersion, record })
     || record.version !== entityVersion
     || (operation !== 'upsert' && operation !== 'delete')
     || (operation === 'upsert' && record.deletedAt !== null)
-    || (operation === 'delete' && record.deletedAt === null)
+    || (
+      operation === 'delete'
+      && (
+        record.deletedAt === null
+        || record.emailEnabled !== false
+        || record.emailAddress !== ''
+        || record.emailMessage !== ''
+      )
+    )
   ) {
     invalidAPIRecord('change metadata does not match its birthday record')
   }
@@ -431,6 +462,7 @@ function toISO(value) {
 
   const input = String(value)
   const hasExplicitOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(input)
+  if (hasExplicitOffset && !isStrictISO8601Instant(input)) return null
   const parsed = hasExplicitOffset
     ? moment.parseZone(input, moment.ISO_8601, true)
     : moment.tz(
@@ -438,8 +470,6 @@ function toISO(value) {
       [
         'YYYY-MM-DD HH:mm:ss',
         'YYYY-MM-DD HH:mm',
-        'YYYY-MM-DDTHH:mm:ss.SSS',
-        'YYYY-MM-DDTHH:mm:ss',
       ],
       true,
       TZ,

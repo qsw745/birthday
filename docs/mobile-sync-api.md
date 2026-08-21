@@ -8,7 +8,7 @@
 - 请求和响应均为 JSON；有请求体时发送 `Content-Type: application/json`。
 - `login`、`refresh` 不需要 Cookie 或 Bearer；`revoke`、`devices`、`snapshot`、`push`、`pull` 必须发送 `Authorization: Bearer <accessToken>`。
 - 网页端 `birthday_session` Cookie 不参与移动端认证。仅有 Cookie、没有有效 Bearer 时返回 `mobile_auth_required`。
-- 日期时间使用带明确 UTC 偏移的有效 ISO 8601 字符串，例如 `2026-08-22T00:15:00.000Z`；可空日期使用 JSON `null`。服务端不会用宽松日期解析接受尾随垃圾或越界日期/偏移。
+- 日期时间使用与移动端 `MobileJSON` 共同支持的严格 RFC 3339 instant：仅接受 `YYYY-MM-DDTHH:mm:ssZ`、带一位或更多小数秒的 `YYYY-MM-DDTHH:mm:ss.S...Z`，或把 `Z` 换成带冒号的 `±HH:MM` 偏移；例如 `2026-08-22T00:15:00.000Z`。可空日期使用 JSON `null`。前后空白、空格分隔日期时间、basic/week/ordinal date、无时区、`±HHMM`、小写 `z`、无效闰日及时分秒/偏移越界均不接受。
 - 设备、生日、操作 ID 均为 UUID 字符串。服务端接受 UUID v1...v8 和大小写输入，并在同步操作中规范化为小写。
 - 游标、变更序号、`baseVersion` 和生日 `version` 是非负 signed Int64（`0...9223372036854775807`）的规范十进制字符串，不能发送 JSON 数字，也不能带符号、空格、指数或前导零；零只能写作 `"0"`。
 - 访问令牌和刷新令牌是不透明字符串，客户端不得解析。当前访问令牌有效期为 15 分钟，刷新令牌有效期为 180 天；每次刷新同时轮换两枚令牌，旧刷新令牌立即失效。
@@ -75,7 +75,7 @@
 - `reminderTimeMinutes` 为 JSON 整数 0...1439；`notifyDayBefore` 与 `notifySameDay` 至少一个为 `true`。
 - `emailEnabled` 为 `true` 时，`emailAddress` 去除两端 Unicode 空白后最多 128 个扩展字素和 128 个 Unicode 标量，且必须恰有一个 `@`、两侧均非空；`emailMessage` 必须是字符串，去除两端 Unicode 空白后的 `name` 与 `emailMessage` 的 UTF-8 总长度最多 8192 字节。
 - `emailEnabled` 为 `false` 时，DTO 中 `emailAddress` 和 `emailMessage` 必须同时是空字符串；服务端接收写入负载时会把禁用状态下的输入内容清空。
-- `nextSolarDate` 可为 `null` 或有效 ISO 8601 字符串；`createdAt`、`updatedAt` 必须是有效 ISO 8601 字符串；`deletedAt` 可为 `null` 或有效 ISO 8601 字符串。`deletedAt` 非空表示墓碑，快照和增量拉取都可能返回墓碑，客户端不能把它当作普通活跃记录。
+- `nextSolarDate` 可为 `null` 或上述严格 RFC 3339 字符串；`createdAt`、`updatedAt` 必须是上述字符串；`deletedAt` 可为 `null` 或上述字符串。`deletedAt` 非空表示墓碑，快照和增量拉取都可能返回墓碑，客户端不能把它当作普通活跃记录。
 
 ## 账号与设备
 
@@ -365,7 +365,7 @@
 }
 ```
 
-`hasMore: true` 表示应立即使用 `nextCursor` 继续拉取。空页返回规范输入游标作为 `nextCursor`，并返回 `hasMore: false`。每条 `record` 都是该次变更提交后、在同一事务中保存的完整 APIBirthday 事件快照，不会用当前生日行覆盖历史事件。因此同一 ID 的 upsert、delete、restore 跨页拉取时仍各自保留当时的版本和墓碑状态；变更查询后的并发修改也不会改变已选中页面。`operation: "delete"` 的 `record` 必须是完整墓碑；客户端应用墓碑后再推进本地游标。
+`hasMore: true` 表示应立即使用 `nextCursor` 继续拉取。空页返回规范输入游标作为 `nextCursor`，并返回 `hasMore: false`。每条 `record` 都是该次变更提交后、在同一事务中保存的完整 APIBirthday 事件快照，不会用当前生日行覆盖历史事件。因此同一 ID 的 upsert、delete、restore 跨页拉取时仍各自保留当时的版本和墓碑状态；变更查询后的并发修改也不会改变已选中页面。`operation: "delete"` 的 `record` 必须是完整墓碑，且必须同时满足 `emailEnabled: false`、`emailAddress: ""`、`emailMessage: ""`；客户端应用墓碑后再推进本地游标。页内任一事件不满足完整 DTO、元数据、日期或墓碑约束时，整页失败且客户端不得推进游标。
 
 ## 稳定错误与状态
 

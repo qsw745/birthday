@@ -397,6 +397,67 @@ test('pull accepts JSON-column objects and JSON strings without consulting mutab
   assert.equal(pool.calls.length, 1)
 })
 
+test('pull preserves every supported RFC3339 UTC, fractional, and colon-offset instant', async () => {
+  const values = [
+    '2026-08-22T12:34:56Z',
+    '2026-08-22T12:34:56.123456789Z',
+    '2026-08-22T12:34:56+08:00',
+    '2026-08-22T12:34:56.1-03:30',
+  ]
+  const rows = values.map((value, index) => {
+    const row = change(String(index + 10), `${String(index + 1).repeat(8)}-${String(index + 1).repeat(4)}-4${String(index + 1).repeat(3)}-8${String(index + 1).repeat(3)}-${String(index + 1).repeat(12)}`)
+    row.record_json.nextSolarDate = value
+    row.record_json.createdAt = value
+    row.record_json.updatedAt = value
+    return row
+  })
+  const repository = createMobileSyncRepository({ pool: createPullPool({ changes: rows }) })
+
+  const result = await repository.pull('9', values.length)
+
+  assert.deepEqual(result.changes.map(changeItem => changeItem.record.createdAt), values)
+  assert.equal(result.nextCursor, '13')
+  assert.equal(result.hasMore, false)
+})
+
+test('pull rejects a whole page for every forbidden non-RFC3339 wire instant', async () => {
+  for (const value of [
+    ' 2026-08-22T12:34:56Z',
+    '2026-08-22T12:34:56Z ',
+    '20260822T123456Z',
+    '2026-W34-6T12:34:56Z',
+    '2026-234T12:34:56Z',
+    '2026-08-22 12:34:56Z',
+    '2026-08-22T12:34:56 Z',
+    '2026-08-22T12:34:56',
+    '2026-08-22T12:34:56+0800',
+    '2026-08-22T12:34:56z',
+    '2026-08-22T12:34:56.Z',
+    '2026-08-22T24:00:00Z',
+    '2026-08-22T12:60:00Z',
+    '2026-08-22T12:34:60Z',
+    '2026-08-22T12:34:56+24:00',
+    '2026-08-22T12:34:56+08:60',
+    '2023-02-29T12:34:56Z',
+    '2024-02-30T12:34:56Z',
+    '2026-13-01T12:34:56Z',
+  ]) {
+    const valid = change('10', BIRTHDAY_ID)
+    const corrupted = change('11', SECOND_BIRTHDAY_ID)
+    corrupted.record_json.createdAt = value
+    const pool = createPullPool({ changes: [valid, corrupted] })
+    const repository = createMobileSyncRepository({ pool })
+
+    await assert.rejects(
+      repository.pull('9', 2),
+      error => error.name === 'MobileSyncDataConsistencyError'
+        && error.code === 'mobile_sync_inconsistent_state',
+      value,
+    )
+    assert.equal(pool.calls.length, 1, value)
+  }
+})
+
 for (const [name, mutate] of [
   ['malformed JSON', row => { row.record_json = '{' }],
   ['non-object JSON', row => { row.record_json = [] }],
@@ -416,6 +477,10 @@ for (const [name, mutate] of [
   ['birthday enabled-email semantic violation', row => { row.record_json.emailAddress = 'a@@b' }],
   ['unknown operation', row => { row.operation = 'restore' }],
   ['delete without tombstone', row => { row.operation = 'delete' }],
+  ['delete retaining enabled email data', row => {
+    row.operation = 'delete'
+    row.record_json.deletedAt = '2026-08-21T02:30:00.000Z'
+  }],
   ['delete missing deletedAt', row => { row.operation = 'delete'; delete row.record_json.deletedAt }],
   ['upsert carrying tombstone', row => { row.record_json.deletedAt = '2026-08-21T02:30:00.000Z' }],
   ['noncanonical sequence', row => { row.seq = '011' }],
@@ -614,6 +679,27 @@ test('pull consistency failures propagate through Express without returning a cu
 
   assert.equal(response.status, 503)
   assert.deepEqual(response.body, { error: 'server_error' })
+  assert.equal(Object.hasOwn(response.body, 'nextCursor'), false)
+  assert.equal(pool.calls.length, 1)
+})
+
+test('delete email consistency failures return no partial change page or cursor', async () => {
+  const valid = change('10', BIRTHDAY_ID)
+  const corrupted = change('11', SECOND_BIRTHDAY_ID)
+  corrupted.operation = 'delete'
+  corrupted.record_json.deletedAt = '2026-08-21T02:30:00.000Z'
+  const pool = createPullPool({ changes: [valid, corrupted] })
+  const syncRepository = createMobileSyncRepository({ pool })
+  const app = createRouterApp(
+    { syncRepository, mobileAuth: authenticateAs() },
+    { errorHandler: true },
+  )
+
+  const response = await request(app).get('/api/mobile/sync/pull?cursor=9&limit=2')
+
+  assert.equal(response.status, 503)
+  assert.deepEqual(response.body, { error: 'server_error' })
+  assert.equal(Object.hasOwn(response.body, 'changes'), false)
   assert.equal(Object.hasOwn(response.body, 'nextCursor'), false)
   assert.equal(pool.calls.length, 1)
 })

@@ -881,6 +881,40 @@ test('write-side change persistence rejects an invalid serialized record before 
   assert.deepEqual(database.connections[0].lifecycle, ['begin', 'rollback', 'release'])
 })
 
+test('write-side delete rejects a tombstone that still exposes email data before inserting record_json', async () => {
+  const database = new FakeDatabase({
+    birthdays: [birthdayRow({ version: '2' })],
+    reminders: [reminderRow()],
+  })
+  const connection = database.createConnection()
+  const realQuery = connection.query.bind(connection)
+  connection.query = async function queryWithStaleReminder(sql, params) {
+    if (/DELETE FROM email_reminders WHERE birthday_id = \?/i.test(sql)) {
+      return [{ affectedRows: 1 }]
+    }
+    return realQuery(sql, params)
+  }
+  const repository = createMobileSyncRepository({
+    pool: { getConnection: async () => connection },
+  })
+
+  await assert.rejects(
+    repository.applyOperation(DEVICE_ID, operation({
+      type: 'delete',
+      baseVersion: '2',
+      payload: undefined,
+    })),
+    error => error.name === 'MobileSyncDataConsistencyError'
+      && error.code === 'mobile_sync_inconsistent_state',
+  )
+
+  assert.equal(database.state.changes.length, 0)
+  assert.equal(database.birthday(BIRTHDAY_ID).deleted_at, null)
+  assert.ok(database.reminder(BIRTHDAY_ID))
+  assert.equal(connection.queries.some(entry => /^INSERT INTO mobile_sync_changes/.test(entry.sql)), false)
+  assert.deepEqual(connection.lifecycle, ['begin', 'rollback', 'release'])
+})
+
 test('delete keeps a versioned birthday tombstone, removes its reminder, and appends one delete change', async () => {
   const database = new FakeDatabase({
     birthdays: [birthdayRow({ version: '2' })],
