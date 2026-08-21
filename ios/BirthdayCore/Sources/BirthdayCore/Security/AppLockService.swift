@@ -17,6 +17,11 @@ internal enum LocalAuthenticationSystemError: Error, Sendable {
   case other
 }
 
+internal func localAuthenticationSystemError(from error: NSError) -> LocalAuthenticationSystemError
+{
+  .laError(domain: error.domain, code: error.code)
+}
+
 internal protocol AppLockSystemContext: Sendable {
   func canEvaluateDeviceOwnerAuthentication() -> Result<Void, LocalAuthenticationSystemError>
   func evaluateDeviceOwnerAuthentication(reason: String) async throws -> Bool
@@ -44,7 +49,7 @@ internal final class SystemAppLockSystemContext: AppLockSystemContext, @unchecke
     var error: NSError?
     guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
       if let error {
-        return .failure(.laError(domain: error.domain, code: error.code))
+        return .failure(localAuthenticationSystemError(from: error))
       }
       return .failure(.unavailable)
     }
@@ -55,7 +60,7 @@ internal final class SystemAppLockSystemContext: AppLockSystemContext, @unchecke
     do {
       return try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
     } catch let error as NSError {
-      throw LocalAuthenticationSystemError.laError(domain: error.domain, code: error.code)
+      throw localAuthenticationSystemError(from: error)
     } catch {
       throw LocalAuthenticationSystemError.other
     }

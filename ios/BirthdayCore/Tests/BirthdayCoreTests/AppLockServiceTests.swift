@@ -1,3 +1,4 @@
+import Foundation
 import LocalAuthentication
 import Testing
 
@@ -71,7 +72,11 @@ private func makeLocalAuthenticationService(
 @Test(arguments: [LAError.Code.userCancel, .appCancel, .systemCancel])
 func localAuthenticationMapsCancellationErrors(_ code: LAError.Code) async {
   let service = makeLocalAuthenticationService(
-    evaluation: .failure(.laError(domain: LAError.errorDomain, code: code.rawValue))
+    evaluation: .failure(
+      localAuthenticationSystemError(
+        from: NSError(domain: LAError.errorDomain, code: code.rawValue)
+      )
+    )
   )
 
   await #expect(throws: AppLockError.cancelled) {
@@ -82,7 +87,11 @@ func localAuthenticationMapsCancellationErrors(_ code: LAError.Code) async {
 @Test(arguments: [LAError.Code.authenticationFailed, .invalidContext])
 func localAuthenticationMapsNonCancellationErrors(_ code: LAError.Code) async {
   let service = makeLocalAuthenticationService(
-    evaluation: .failure(.laError(domain: LAError.errorDomain, code: code.rawValue))
+    evaluation: .failure(
+      localAuthenticationSystemError(
+        from: NSError(domain: LAError.errorDomain, code: code.rawValue)
+      )
+    )
   )
 
   await #expect(throws: AppLockError.evaluationFailed) {
@@ -94,7 +103,9 @@ func localAuthenticationMapsNonCancellationErrors(_ code: LAError.Code) async {
 func localAuthenticationRejectsCancellationCodesFromAnotherDomain(_ code: LAError.Code) async {
   let service = makeLocalAuthenticationService(
     evaluation: .failure(
-      .laError(domain: "top.qisw.birthday.tests", code: code.rawValue)
+      localAuthenticationSystemError(
+        from: NSError(domain: "top.qisw.birthday.tests", code: code.rawValue)
+      )
     )
   )
 
