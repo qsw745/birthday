@@ -106,9 +106,16 @@ import Testing
 }
 
 @Test func keepsSevenCalendarColumnsAtLeastFortyFourPointsWideOnNarrowPhones() {
-  for containerWidth in [CGFloat(320), CGFloat(375)] {
+  for containerWidth in [CGFloat(320), 341, 359, 360, 375] {
     let metrics = SevenColumnGridMetrics.make(containerWidth: containerWidth)
+    let minimumOccupiedWidth =
+      CGFloat(7 * 44)
+      + CGFloat(6) * metrics.columnSpacing
+      + CGFloat(2) * (metrics.pageHorizontalPadding + metrics.cardHorizontalPadding)
 
     #expect(metrics.availableCellWidth >= 44)
+    #expect(minimumOccupiedWidth <= containerWidth)
   }
+
+  #expect(SevenColumnGridMetrics.make(containerWidth: 360).availableCellWidth == 44)
 }

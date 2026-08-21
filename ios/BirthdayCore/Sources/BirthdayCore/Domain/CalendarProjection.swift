@@ -79,29 +79,38 @@ public struct SevenColumnGridMetrics: Equatable, Sendable {
   }
 
   public static func make(containerWidth: CGFloat) -> SevenColumnGridMetrics {
-    if containerWidth <= 340 {
-      return SevenColumnGridMetrics(
-        containerWidth: containerWidth,
-        pageHorizontalPadding: 6,
-        cardHorizontalPadding: 0,
-        columnSpacing: 0
-      )
+    let roomy = (pagePadding: CGFloat(16), cardPadding: CGFloat(12), spacing: CGFloat(4))
+    let regular = (pagePadding: CGFloat(12), cardPadding: CGFloat(8), spacing: CGFloat(2))
+    let compact = (pagePadding: CGFloat(6), cardPadding: CGFloat(0), spacing: CGFloat(0))
+
+    if containerWidth >= minimumContainerWidth(for: roomy) {
+      return make(containerWidth: containerWidth, using: roomy)
     }
 
-    if containerWidth <= 390 {
-      return SevenColumnGridMetrics(
-        containerWidth: containerWidth,
-        pageHorizontalPadding: 12,
-        cardHorizontalPadding: 8,
-        columnSpacing: 2
-      )
+    if containerWidth >= minimumContainerWidth(for: regular) {
+      return make(containerWidth: containerWidth, using: regular)
     }
 
-    return SevenColumnGridMetrics(
+    return make(containerWidth: containerWidth, using: compact)
+  }
+
+  private static func make(
+    containerWidth: CGFloat,
+    using values: (pagePadding: CGFloat, cardPadding: CGFloat, spacing: CGFloat)
+  ) -> SevenColumnGridMetrics {
+    SevenColumnGridMetrics(
       containerWidth: containerWidth,
-      pageHorizontalPadding: 16,
-      cardHorizontalPadding: 12,
-      columnSpacing: 4
+      pageHorizontalPadding: values.pagePadding,
+      cardHorizontalPadding: values.cardPadding,
+      columnSpacing: values.spacing
     )
+  }
+
+  private static func minimumContainerWidth(
+    for values: (pagePadding: CGFloat, cardPadding: CGFloat, spacing: CGFloat)
+  ) -> CGFloat {
+    CGFloat(columnCount) * minimumCellWidth
+      + CGFloat(columnCount - 1) * values.spacing
+      + 2 * (values.pagePadding + values.cardPadding)
   }
 }
