@@ -2,6 +2,16 @@ import BirthdayCore
 import Foundation
 import Observation
 
+struct UITestBootstrap: Equatable, Sendable {
+  let isEnabled: Bool
+  let networkDisabled: Bool
+
+  init(arguments: [String] = ProcessInfo.processInfo.arguments) {
+    isEnabled = arguments.contains("-ui-testing")
+    networkDisabled = arguments.contains("-network-disabled")
+  }
+}
+
 private actor ReminderRebuildCoordinator {
   private struct Request: Sendable {
     let records: [BirthdayRecord]

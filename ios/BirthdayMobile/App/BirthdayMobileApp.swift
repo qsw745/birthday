@@ -19,6 +19,7 @@ private struct BirthdayAppBootstrapView: View {
   @State private var model: AppModel?
   @State private var initializationError: String?
   @State private var initializationAttempt = 0
+  private let uiTestBootstrap = UITestBootstrap()
 
   var body: some View {
     Group {
@@ -68,29 +69,78 @@ private struct BirthdayAppBootstrapView: View {
     initializationError = nil
 
     do {
+      let configuration = ModelConfiguration(
+        isStoredInMemoryOnly: uiTestBootstrap.isEnabled
+      )
       let container = try ModelContainer(
         for: BirthdayEntity.self,
-        SyncOperationEntity.self
+        SyncOperationEntity.self,
+        configurations: configuration
       )
-      let notificationCenter = UNUserNotificationCenter.current()
       self.container = container
-      model = AppModel(
-        store: BirthdayStore(modelContainer: container),
-        preferences: .standard,
-        authenticator: LocalAuthenticationService(),
-        notificationScheduler: UserNotificationScheduler(
-          center: SystemNotificationCenterClient(center: notificationCenter)
-        ),
-        reminderPlanner: ReminderPlanner(),
-        requestNotificationAuthorization: {
-          try await notificationCenter.requestAuthorization(options: [.alert, .sound, .badge])
-        }
-      )
+      model = makeAppModel(container: container)
     } catch {
       container = nil
       model = nil
       initializationError = "无法打开本地生日资料。请确认设备有可用存储空间后重新尝试；若问题持续，请重新打开应用。"
     }
+  }
+
+  private func makeAppModel(container: ModelContainer) -> AppModel {
+    if uiTestBootstrap.isEnabled {
+      let suiteName = "top.qisw.birthday.ui-tests"
+      let preferences = UserDefaults(suiteName: suiteName)!
+      preferences.removePersistentDomain(forName: suiteName)
+
+      // The offline milestone has no mobile API to construct. Parsing
+      // networkDisabled keeps that boundary explicit without inventing one.
+      precondition(
+        uiTestBootstrap.networkDisabled,
+        "UI tests must opt into the no-network composition"
+      )
+
+      return AppModel(
+        store: BirthdayStore(modelContainer: container),
+        preferences: preferences,
+        authenticator: UITestAppLockAuthenticator(),
+        notificationScheduler: UITestNotificationScheduler(),
+        reminderPlanner: ReminderPlanner(),
+        requestNotificationAuthorization: { true }
+      )
+    }
+
+    let notificationCenter = UNUserNotificationCenter.current()
+    return AppModel(
+      store: BirthdayStore(modelContainer: container),
+      preferences: .standard,
+      authenticator: LocalAuthenticationService(),
+      notificationScheduler: UserNotificationScheduler(
+        center: SystemNotificationCenterClient(center: notificationCenter)
+      ),
+      reminderPlanner: ReminderPlanner(),
+      requestNotificationAuthorization: {
+        try await notificationCenter.requestAuthorization(options: [.alert, .sound, .badge])
+      }
+    )
+  }
+}
+
+private struct UITestAppLockAuthenticator: AppLockAuthenticating {
+  func unlock(reason: String) async throws -> Bool {
+    true
+  }
+}
+
+private struct UITestNotificationScheduler: NotificationScheduling {
+  func apply(_ plan: ReminderPlan) async throws -> NotificationHealth {
+    let scheduledCount = plan.birthdayNotifications.count
+      + (plan.maintenanceNotification == nil ? 0 : 1)
+    return NotificationHealth(
+      state: .scheduled,
+      scheduledCount: scheduledCount,
+      coverageEnd: plan.coverageEnd,
+      errorCategory: nil
+    )
   }
 }
 

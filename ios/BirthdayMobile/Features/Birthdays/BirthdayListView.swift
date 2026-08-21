@@ -1,5 +1,6 @@
 import BirthdayCore
 import SwiftUI
+import UIKit
 
 struct BirthdayListView: View {
   @Bindable var model: AppModel
@@ -48,6 +49,13 @@ struct BirthdayListView: View {
     .background(ModernAirTheme.mist.ignoresSafeArea())
     .navigationTitle("全部")
     .searchable(text: $query, prompt: "搜索姓名")
+    .background {
+      SearchFieldAccessibilityIdentifier(
+        identifier: "birthdaySearchField",
+        placeholder: "搜索姓名"
+      )
+      .frame(width: 0, height: 0)
+    }
     .toolbar {
       ToolbarItem(placement: .topBarTrailing) {
         Button {
@@ -57,6 +65,7 @@ struct BirthdayListView: View {
             .frame(width: 44, height: 44)
         }
         .accessibilityLabel("添加生日")
+        .accessibilityIdentifier("addBirthdayButton")
         .disabled(isDeletingRecord)
       }
     }
@@ -148,6 +157,7 @@ struct BirthdayListView: View {
       Button("添加生日") {
         model.isPresentingEditor = true
       }
+      .accessibilityIdentifier("addBirthdayButton")
       .buttonStyle(.borderedProminent)
       .tint(ModernAirTheme.tide)
       .frame(minHeight: 44)
@@ -196,6 +206,76 @@ struct BirthdayListView: View {
       }
       deletingRecordID = nil
     }
+  }
+}
+
+private struct SearchFieldAccessibilityIdentifier: UIViewRepresentable {
+  let identifier: String
+  let placeholder: String
+
+  func makeUIView(context: Context) -> InstallerView {
+    InstallerView(identifier: identifier, placeholder: placeholder)
+  }
+
+  func updateUIView(_ uiView: InstallerView, context: Context) {
+    uiView.installIdentifier()
+  }
+
+  final class InstallerView: UIView {
+    private let identifier: String
+    private let placeholder: String
+
+    init(identifier: String, placeholder: String) {
+      self.identifier = identifier
+      self.placeholder = placeholder
+      super.init(frame: .zero)
+      isAccessibilityElement = false
+      isUserInteractionEnabled = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+      fatalError("init(coder:) has not been implemented")
+    }
+
+    override func didMoveToWindow() {
+      super.didMoveToWindow()
+      installIdentifier()
+      DispatchQueue.main.async { [weak self] in
+        self?.installIdentifier()
+      }
+    }
+
+    override func layoutSubviews() {
+      super.layoutSubviews()
+      installIdentifier()
+    }
+
+    func installIdentifier() {
+      guard
+        let searchField = window?.firstDescendant(of: UISearchTextField.self, where: {
+          $0.placeholder == self.placeholder
+        })
+      else { return }
+      searchField.accessibilityIdentifier = identifier
+    }
+  }
+}
+
+private extension UIView {
+  func firstDescendant<View: UIView>(
+    of type: View.Type,
+    where predicate: (View) -> Bool
+  ) -> View? {
+    for subview in subviews {
+      if let match = subview as? View, predicate(match) {
+        return match
+      }
+      if let nested = subview.firstDescendant(of: type, where: predicate) {
+        return nested
+      }
+    }
+    return nil
   }
 }
 

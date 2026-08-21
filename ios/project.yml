@@ -33,3 +33,10 @@ targets:
           - top.qisw.birthday.refresh
     dependencies:
       - package: BirthdayCore
+  BirthdayMobileUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - BirthdayMobileUITests
+    dependencies:
+      - target: BirthdayMobile

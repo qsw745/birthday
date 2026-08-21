@@ -65,6 +65,7 @@ struct CalendarHomeView: View {
             .frame(width: 44, height: 44)
         }
         .accessibilityLabel("添加生日")
+        .accessibilityIdentifier("addBirthdayButton")
       }
     }
     .onAppear(perform: selectDefaultDayIfNeeded)
@@ -333,6 +334,7 @@ struct CalendarHomeView: View {
         Button("添加生日") {
           model.isPresentingEditor = true
         }
+        .accessibilityIdentifier("addBirthdayButton")
         .buttonStyle(.bordered)
         .tint(ModernAirTheme.tide)
         .frame(minHeight: 44)

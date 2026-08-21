@@ -46,6 +46,7 @@ struct BirthdayEditorView: View {
               .focused($focusedField, equals: .name)
               .textContentType(.name)
               .submitLabel(.done)
+              .accessibilityIdentifier("birthdayNameField")
 
             LunarDatePicker(value: $editor.draft.lunarBirthday)
 
@@ -116,6 +117,7 @@ struct BirthdayEditorView: View {
                   .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
               }
               .disabled(isInteractionLocked)
+              .accessibilityIdentifier("deleteBirthdayButton")
             } footer: {
               Text("删除后将从本机立即隐藏，并在联网后同步删除。")
             }
@@ -164,6 +166,7 @@ struct BirthdayEditorView: View {
           }
           .frame(minWidth: 44, minHeight: 44)
           .disabled(isInteractionLocked)
+          .accessibilityIdentifier("saveBirthdayButton")
         }
       }
       .confirmationDialog(
