@@ -121,15 +121,60 @@ test('login rejects malformed credentials and device binding input without creat
   assert.deepEqual(created, [])
 })
 
-test('login propagates a repository failure through the Express error path instead of treating it as bad credentials', async () => {
-  const sessions = { createSession: async () => { throw new Error('database unavailable') } }
-  const response = await request(createErrorApp(createRouter({ sessions })))
-    .post('/api/mobile/auth/login')
-    .send(loginPayload())
+const repositoryErrorCases = [
+  {
+    name: 'createSession',
+    createRequest: () => {
+      const sessions = { createSession: async () => { throw new Error('database unavailable') } }
+      const app = createErrorApp(createRouter({ sessions }))
+      return request(app).post('/api/mobile/auth/login').send(loginPayload())
+    },
+  },
+  {
+    name: 'rotateByRefreshToken',
+    createRequest: () => {
+      const sessions = { rotateByRefreshToken: async () => { throw new Error('database unavailable') } }
+      const app = createErrorApp(createRouter({ sessions }))
+      return request(app).post('/api/mobile/auth/refresh').send({ refreshToken: 'valid-refresh-token' })
+    },
+  },
+  {
+    name: 'revoke',
+    createRequest: () => {
+      const sessions = { revoke: async () => { throw new Error('database unavailable') } }
+      const app = createErrorApp(createRouter({ sessions, mobileAuth: authenticateAs('admin') }))
+      return request(app).post('/api/mobile/auth/revoke').send({ deviceId: DEVICE_ID })
+    },
+  },
+  {
+    name: 'list',
+    createRequest: () => {
+      const sessions = { list: async () => { throw new Error('database unavailable') } }
+      const app = createErrorApp(createRouter({ sessions, mobileAuth: authenticateAs('admin') }))
+      return request(app).get('/api/mobile/auth/devices')
+    },
+  },
+  {
+    name: 'default Bearer findByAccessToken',
+    createRequest: () => {
+      const sessions = {
+        findByAccessToken: async () => { throw new Error('database unavailable') },
+        list: async () => assert.fail('list must not run after bearer lookup failure'),
+      }
+      const app = createErrorApp(createRouter({ sessions }))
+      return request(app).get('/api/mobile/auth/devices').set('Authorization', 'Bearer opaque-token')
+    },
+  },
+]
 
-  assert.equal(response.status, 503)
-  assert.deepEqual(response.body, { error: 'server_error' })
-})
+for (const { name, createRequest } of repositoryErrorCases) {
+  test(`${name} failure propagates through the Express error path without a fallback response`, async () => {
+    const response = await createRequest()
+
+    assert.equal(response.status, 503)
+    assert.deepEqual(response.body, { error: 'server_error' })
+  })
+}
 
 test('refresh rotates both raw tokens and never echoes the old refresh token', async () => {
   let rotated
@@ -280,4 +325,68 @@ test('each router has its own login rate-limit state and its short test window r
   await new Promise(resolve => setTimeout(resolve, 35))
   const reset = await request(firstApp).post('/api/mobile/auth/login').send(loginPayload())
   assert.equal(reset.status, 200)
+})
+
+test('login limiter accepts only bounded safe-integer configuration and falls back to secure defaults', async () => {
+  const cases = [
+    {
+      name: 'common safe values',
+      env: { ...ADMIN_ENV, AUTH_LOGIN_LIMIT: '3', AUTH_LOGIN_WINDOW_MS: '60000' },
+      expectedLimit: '3',
+      expectedPolicy: '3;w=60',
+    },
+    {
+      name: 'safe upper bounds',
+      env: { ...ADMIN_ENV, AUTH_LOGIN_LIMIT: '10000', AUTH_LOGIN_WINDOW_MS: '2147483647' },
+      expectedLimit: '10000',
+      expectedPolicy: '10000;w=2147484',
+    },
+    {
+      name: 'fractional limit and window',
+      env: { ...ADMIN_ENV, AUTH_LOGIN_LIMIT: '0.5', AUTH_LOGIN_WINDOW_MS: '0.5' },
+      expectedLimit: '10',
+      expectedPolicy: '10;w=900',
+    },
+    {
+      name: 'zero limit and window',
+      env: { ...ADMIN_ENV, AUTH_LOGIN_LIMIT: '0', AUTH_LOGIN_WINDOW_MS: '0' },
+      expectedLimit: '10',
+      expectedPolicy: '10;w=900',
+    },
+    {
+      name: 'negative limit and window',
+      env: { ...ADMIN_ENV, AUTH_LOGIN_LIMIT: '-1', AUTH_LOGIN_WINDOW_MS: '-1' },
+      expectedLimit: '10',
+      expectedPolicy: '10;w=900',
+    },
+    {
+      name: 'oversized limit and Node timer window',
+      env: { ...ADMIN_ENV, AUTH_LOGIN_LIMIT: '10001', AUTH_LOGIN_WINDOW_MS: '2147483648' },
+      expectedLimit: '10',
+      expectedPolicy: '10;w=900',
+    },
+    {
+      name: 'non-numeric values',
+      env: { ...ADMIN_ENV, AUTH_LOGIN_LIMIT: 'NaN', AUTH_LOGIN_WINDOW_MS: 'NaN' },
+      expectedLimit: '10',
+      expectedPolicy: '10;w=900',
+    },
+    {
+      name: 'non-safe integers',
+      env: { ...ADMIN_ENV, AUTH_LOGIN_LIMIT: '9007199254740992', AUTH_LOGIN_WINDOW_MS: '9007199254740992' },
+      expectedLimit: '10',
+      expectedPolicy: '10;w=900',
+    },
+  ]
+
+  for (const config of cases) {
+    const sessions = { createSession: async () => {} }
+    const response = await request(createApp(createRouter({ sessions, env: config.env })))
+      .post('/api/mobile/auth/login')
+      .send(loginPayload())
+
+    assert.equal(response.status, 200, config.name)
+    assert.equal(response.headers['ratelimit-limit'], config.expectedLimit, config.name)
+    assert.equal(response.headers['ratelimit-policy'], config.expectedPolicy, config.name)
+  }
 })

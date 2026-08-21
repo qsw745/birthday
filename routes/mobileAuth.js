@@ -7,10 +7,20 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 const OPAQUE_TOKEN_PATTERN = /^[A-Za-z0-9_-]+$/
 const DEFAULT_LOGIN_WINDOW_MS = 15 * 60 * 1000
 const DEFAULT_LOGIN_LIMIT = 10
+const MAX_LOGIN_LIMIT = 10000
+const MAX_LOGIN_WINDOW_MS = 2147483647
 
-function positiveNumber(value, fallback) {
+function parseBoundedSafeInteger(value, fallback, maximum) {
   const parsed = Number(value)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+  return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= maximum ? parsed : fallback
+}
+
+function parseLoginLimit(value) {
+  return parseBoundedSafeInteger(value, DEFAULT_LOGIN_LIMIT, MAX_LOGIN_LIMIT)
+}
+
+function parseLoginWindowMs(value) {
+  return parseBoundedSafeInteger(value, DEFAULT_LOGIN_WINDOW_MS, MAX_LOGIN_WINDOW_MS)
 }
 
 function isUuid(value) {
@@ -62,8 +72,8 @@ function createMobileAuthRouter({
 }) {
   const router = express.Router()
   const loginLimiter = rateLimit({
-    windowMs: positiveNumber(env.AUTH_LOGIN_WINDOW_MS, DEFAULT_LOGIN_WINDOW_MS),
-    limit: positiveNumber(env.AUTH_LOGIN_LIMIT, DEFAULT_LOGIN_LIMIT),
+    windowMs: parseLoginWindowMs(env.AUTH_LOGIN_WINDOW_MS),
+    limit: parseLoginLimit(env.AUTH_LOGIN_LIMIT),
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: '登录尝试过多，请稍后再试' },
