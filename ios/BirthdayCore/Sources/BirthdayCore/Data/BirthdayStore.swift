@@ -1,9 +1,35 @@
 import Foundation
 import SwiftData
 
-@ModelActor
-public actor BirthdayStore {
-  private let calculator: any LunarBirthdayCalculating = ChineseCalendarBirthdayCalculator()
+public enum BirthdayStoreError: Error, Equatable, Sendable {
+  case unknownSyncState(String)
+}
+
+public actor BirthdayStore: ModelActor {
+  nonisolated public let modelContainer: ModelContainer
+  nonisolated public let modelExecutor: any ModelExecutor
+
+  private let calculator: any LunarBirthdayCalculating
+  private let transactionCommitter: @Sendable (ModelContext) throws -> Void
+
+  public init(modelContainer: ModelContainer) {
+    let context = ModelContext(modelContainer)
+    self.modelContainer = modelContainer
+    modelExecutor = DefaultSerialModelExecutor(modelContext: context)
+    calculator = ChineseCalendarBirthdayCalculator()
+    transactionCommitter = { context in try context.save() }
+  }
+
+  init(
+    modelContainer: ModelContainer,
+    transactionCommitter: @escaping @Sendable (ModelContext) throws -> Void
+  ) {
+    let context = ModelContext(modelContainer)
+    self.modelContainer = modelContainer
+    modelExecutor = DefaultSerialModelExecutor(modelContext: context)
+    calculator = ChineseCalendarBirthdayCalculator()
+    self.transactionCommitter = transactionCommitter
+  }
 
   public func save(
     _ draft: BirthdayDraft,
@@ -24,6 +50,7 @@ public actor BirthdayStore {
     do {
       let entity: BirthdayEntity
       if let existing = try modelContext.fetch(descriptor).first {
+        _ = try requireKnownSyncState(existing.syncStateRaw)
         entity = existing
         apply(draft, nextSolarDate: nextSolarDate, now: now, to: entity)
       } else {
@@ -31,7 +58,7 @@ public actor BirthdayStore {
         modelContext.insert(entity)
       }
 
-      let record = map(entity)
+      let record = try map(entity)
       modelContext.insert(
         try makeOperation(
           entityID: targetID,
@@ -39,7 +66,7 @@ public actor BirthdayStore {
           record: record,
           createdAt: now
         ))
-      try modelContext.save()
+      try transactionCommitter(modelContext)
       return record
     } catch {
       modelContext.rollback()
@@ -47,7 +74,7 @@ public actor BirthdayStore {
     }
   }
 
-  public func activeBirthdays() -> [BirthdayRecord] {
+  public func activeBirthdays() throws -> [BirthdayRecord] {
     let descriptor = FetchDescriptor<BirthdayEntity>(
       predicate: #Predicate { $0.deletedAt == nil },
       sortBy: [
@@ -56,7 +83,7 @@ public actor BirthdayStore {
         SortDescriptor(\.id),
       ]
     )
-    return (try? modelContext.fetch(descriptor).map(map)) ?? []
+    return try modelContext.fetch(descriptor).map { try map($0) }
   }
 
   public func softDelete(id: UUID, now: Date) throws {
@@ -64,10 +91,11 @@ public actor BirthdayStore {
 
     do {
       guard let entity = try modelContext.fetch(descriptor).first else { return }
+      _ = try requireKnownSyncState(entity.syncStateRaw)
       entity.deletedAt = now
       entity.updatedAt = now
       entity.syncStateRaw = SyncState.pendingDelete.rawValue
-      let record = map(entity)
+      let record = try map(entity)
       modelContext.insert(
         try makeOperation(
           entityID: id,
@@ -75,7 +103,7 @@ public actor BirthdayStore {
           record: record,
           createdAt: now
         ))
-      try modelContext.save()
+      try transactionCommitter(modelContext)
     } catch {
       modelContext.rollback()
       throw error
@@ -87,10 +115,11 @@ public actor BirthdayStore {
 
     do {
       guard let entity = try modelContext.fetch(descriptor).first else { return }
+      _ = try requireKnownSyncState(entity.syncStateRaw)
       entity.deletedAt = nil
       entity.updatedAt = now
       entity.syncStateRaw = SyncState.pending.rawValue
-      let record = map(entity)
+      let record = try map(entity)
       modelContext.insert(
         try makeOperation(
           entityID: id,
@@ -98,21 +127,21 @@ public actor BirthdayStore {
           record: record,
           createdAt: now
         ))
-      try modelContext.save()
+      try transactionCommitter(modelContext)
     } catch {
       modelContext.rollback()
       throw error
     }
   }
 
-  public func pendingOperations() -> [SyncOperation] {
+  public func pendingOperations() throws -> [SyncOperation] {
     let descriptor = FetchDescriptor<SyncOperationEntity>(
       sortBy: [
         SortDescriptor(\.createdAt),
         SortDescriptor(\.operationId),
       ]
     )
-    return (try? modelContext.fetch(descriptor).map(map)) ?? []
+    return try modelContext.fetch(descriptor).map(map)
   }
 
   private func apply(
@@ -154,7 +183,7 @@ public actor BirthdayStore {
     )
   }
 
-  private func map(_ entity: BirthdayEntity) -> BirthdayRecord {
+  private func map(_ entity: BirthdayEntity) throws -> BirthdayRecord {
     BirthdayRecord(
       id: entity.id,
       name: entity.name,
@@ -176,8 +205,15 @@ public actor BirthdayStore {
       createdAt: entity.createdAt,
       updatedAt: entity.updatedAt,
       deletedAt: entity.deletedAt,
-      syncState: SyncState(rawValue: entity.syncStateRaw) ?? .pending
+      syncState: try requireKnownSyncState(entity.syncStateRaw)
     )
+  }
+
+  private func requireKnownSyncState(_ rawValue: String) throws -> SyncState {
+    guard let syncState = SyncState(rawValue: rawValue) else {
+      throw BirthdayStoreError.unknownSyncState(rawValue)
+    }
+    return syncState
   }
 
   private func map(_ entity: SyncOperationEntity) -> SyncOperation {
