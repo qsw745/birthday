@@ -139,6 +139,8 @@
 
 - `version BIGINT UNSIGNED NOT NULL DEFAULT 1`
 - `deleted_at DATETIME NULL`
+- `notify_day_before TINYINT(1) NOT NULL DEFAULT 1`
+- `notify_same_day TINYINT(1) NOT NULL DEFAULT 1`
 
 新增 `mobile_sync_changes`，使用自增 `seq` 作为全局同步游标，记录实体、操作、版本和时间。新增 `mobile_sync_operations`，以 `operation_id` 为唯一键保存已处理操作结果，保证客户端重试幂等。新增 `mobile_device_sessions`，保存设备、刷新令牌哈希、有效期、撤销状态和最近使用时间。
 
