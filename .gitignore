@@ -1,5 +1,10 @@
 .DS_Store
 .worktrees/
+.superpowers/
+ios/BirthdayMobile.xcodeproj/
+ios/.build/
+ios/BirthdayCore/.build/
+ios/DerivedData/
 node_modules/
 uploads/
 .env
