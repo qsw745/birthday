@@ -2,6 +2,7 @@ const { generateUUID } = require('../utils/helpers')
 const {
   invalidBirthdayPayload,
   isNormalizedPushOperation,
+  normalizeBirthdayPayload,
   normalizePushRequest,
   serializeBirthdayRow,
 } = require('../utils/mobileSyncContract')
@@ -23,7 +24,10 @@ const BIRTHDAY_BY_ID_SELECT = `SELECT
   b.created_at,
   b.updated_at,
   r.email AS userEmail,
-  r.message AS message
+  r.message AS message,
+  r.id AS emailReminderId,
+  r.remind_time AS emailReminderTime,
+  r.status AS emailReminderStatus
 FROM birthdays b
 LEFT JOIN email_reminders r ON r.birthday_id = b.id
 WHERE b.id = ?`
@@ -118,7 +122,28 @@ async function persistConflict(connection, context, remoteRow) {
   return response
 }
 
-async function upsertBirthday(connection, operation, currentRow, version) {
+async function upsertEmailReminder(connection, {
+  id,
+  birthdayId,
+  name,
+  email,
+  remindTime,
+  message,
+}) {
+  await connection.query(
+    `INSERT INTO email_reminders
+      (id, birthday_id, name, email, remind_time, message, status)
+     VALUES (?, ?, ?, ?, ?, ?, 0)
+     ON DUPLICATE KEY UPDATE
+       name = VALUES(name), email = VALUES(email),
+       remind_time = VALUES(remind_time), message = VALUES(message), status = 0`,
+    [id, birthdayId, name, email, remindTime, message],
+  )
+}
+
+async function upsertBirthday(connection, operation, currentRow, version, {
+  generateUUIDFn = generateUUID,
+} = {}) {
   const payload = operation.payload
   const nextSolarDate = payload.nextSolarDate
   const birthdayParams = [
@@ -160,22 +185,14 @@ async function upsertBirthday(connection, operation, currentRow, version) {
   }
 
   if (payload.emailEnabled) {
-    await connection.query(
-      `INSERT INTO email_reminders
-        (id, birthday_id, name, email, remind_time, message, status)
-       VALUES (?, ?, ?, ?, ?, ?, 0)
-       ON DUPLICATE KEY UPDATE
-         name = VALUES(name), email = VALUES(email),
-         remind_time = VALUES(remind_time), message = VALUES(message), status = 0`,
-      [
-        generateUUID(),
-        operation.entityId,
-        payload.name,
-        payload.emailAddress,
-        nextSolarDate,
-        `${payload.name}${payload.emailMessage}`,
-      ],
-    )
+    await upsertEmailReminder(connection, {
+      id: generateUUIDFn(),
+      birthdayId: operation.entityId,
+      name: payload.name,
+      email: payload.emailAddress,
+      remindTime: nextSolarDate,
+      message: `${payload.name}${payload.emailMessage}`,
+    })
   } else {
     await connection.query(
       'DELETE FROM email_reminders WHERE birthday_id = ?',
@@ -203,6 +220,100 @@ async function appendChange(connection, operation, version) {
      VALUES (?, ?, ?, ?)`,
     ['birthday', operation.entityId, operation.type, version],
   )
+}
+
+function birthdayNotFound(message = '没有找到对应的生日记录') {
+  const error = new Error(message)
+  error.code = 'birthday_not_found'
+  return error
+}
+
+function serializeWebBirthdayRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    lunarMonth: Number(row.lunarMonth),
+    lunarDay: Number(row.lunarDay),
+    isLeapMonth: row.isLeapMonth === true || row.isLeapMonth === 1 || row.isLeapMonth === '1',
+    remindTime: row.remindTime || null,
+    nextSolarDate: row.nextSolarDate || null,
+    version: String(row.version),
+    deletedAt: row.deleted_at || null,
+    userEmail: row.userEmail || '',
+    message: row.message || '',
+    emailReminderId: row.emailReminderId || null,
+    emailReminderTime: row.emailReminderTime || null,
+    emailReminderStatus: row.emailReminderStatus == null ? null : Number(row.emailReminderStatus),
+  }
+}
+
+async function requireStoredBirthday(connection, entityId) {
+  const storedRow = await readBirthday(connection, entityId)
+  if (!storedRow) {
+    const error = new Error('birthday missing after web mutation')
+    error.code = 'mobile_sync_inconsistent_state'
+    throw error
+  }
+  return storedRow
+}
+
+async function applyWebUpsert(connection, {
+  id,
+  payload,
+  dateOptions,
+  generateUUIDFn = generateUUID,
+}) {
+  const normalizedPayload = normalizeBirthdayPayload({ ...payload, id }, dateOptions)
+  const operation = {
+    entityId: normalizedPayload.id,
+    type: 'upsert',
+    payload: normalizedPayload,
+  }
+  const currentRow = await readBirthday(connection, operation.entityId, { forUpdate: true })
+  const version = nextVersion(currentRow ? String(currentRow.version) : '0')
+
+  await upsertBirthday(connection, operation, currentRow, version, { generateUUIDFn })
+  await appendChange(connection, operation, version)
+  return serializeWebBirthdayRow(await requireStoredBirthday(connection, operation.entityId))
+}
+
+async function applyWebDelete(connection, { id }) {
+  const entityId = String(id || '').toLowerCase()
+  const currentRow = await readBirthday(connection, entityId, { forUpdate: true })
+  if (!currentRow || currentRow.deleted_at) {
+    throw birthdayNotFound('没有找到要删除的生日记录')
+  }
+
+  const version = nextVersion(String(currentRow.version))
+  const operation = { entityId, type: 'delete' }
+  await softDeleteBirthday(connection, operation, version)
+  await appendChange(connection, operation, version)
+  return serializeWebBirthdayRow(await requireStoredBirthday(connection, entityId))
+}
+
+async function applyWebReminderUpsert(connection, {
+  birthdayId,
+  reminder,
+}) {
+  const entityId = String(birthdayId || '').toLowerCase()
+  const currentRow = await readBirthday(connection, entityId, { forUpdate: true })
+  if (!currentRow || currentRow.deleted_at) throw birthdayNotFound()
+
+  const version = nextVersion(String(currentRow.version))
+  await connection.query(
+    'UPDATE birthdays SET version = ? WHERE id = ? AND deleted_at IS NULL',
+    [version, entityId],
+  )
+  await upsertEmailReminder(connection, {
+    id: reminder.id,
+    birthdayId: entityId,
+    name: reminder.name,
+    email: reminder.email,
+    remindTime: reminder.remindTime,
+    message: reminder.message,
+  })
+  await appendChange(connection, { entityId, type: 'upsert' }, version)
+  return serializeWebBirthdayRow(await requireStoredBirthday(connection, entityId))
 }
 
 async function applyMobileOperation(connection, context) {
@@ -249,5 +360,8 @@ async function applyMobileOperation(connection, context) {
 
 module.exports = {
   applyMobileOperation,
+  applyWebDelete,
+  applyWebReminderUpsert,
+  applyWebUpsert,
   readStoredOperation,
 }

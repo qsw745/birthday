@@ -293,6 +293,9 @@ class FakeConnection {
       ...clone(birthday),
       userEmail: reminder ? reminder.email : null,
       message: reminder ? reminder.message : null,
+      emailReminderId: reminder ? reminder.id : null,
+      emailReminderTime: reminder ? reminder.remind_time : null,
+      emailReminderStatus: reminder ? reminder.status : null,
     }
   }
 
@@ -335,6 +338,13 @@ class FakeConnection {
       }
       const row = this.joinedBirthday(params[0])
       return [[row].filter(Boolean)]
+    }
+
+    if (/^SELECT birthday_id FROM email_reminders WHERE id = \?$/i.test(sql)) {
+      assert.equal(params.length, 1)
+      const reminder = [...this.state().reminders.values()]
+        .find(row => String(row.id) === String(params[0]))
+      return [[reminder ? { birthday_id: reminder.birthday_id } : null].filter(Boolean)]
     }
 
     if (/^INSERT INTO birthdays \(id, name, lunarMonth, lunarDay, isLeapMonth, remindTime, nextSolarDate, version, deleted_at, notify_day_before, notify_same_day\) VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, NULL, \?, \?\)$/i.test(sql)) {
@@ -396,6 +406,20 @@ class FakeConnection {
         ...current,
         version: String(version),
         deleted_at: FIXED_UPDATED_AT,
+        updated_at: FIXED_UPDATED_AT,
+      })
+      return [{ affectedRows: 1 }]
+    }
+
+    if (/^UPDATE birthdays SET version = \? WHERE id = \? AND deleted_at IS NULL$/i.test(sql)) {
+      this.requireTransaction(sql)
+      assert.equal(params.length, 2)
+      const [version, id] = params
+      const current = this.state().birthdays.get(String(id))
+      assert.ok(current && !current.deleted_at, 'active birthday update target missing')
+      this.state().birthdays.set(String(id), {
+        ...current,
+        version: String(version),
         updated_at: FIXED_UPDATED_AT,
       })
       return [{ affectedRows: 1 }]
