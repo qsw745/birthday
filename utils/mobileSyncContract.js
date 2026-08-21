@@ -4,6 +4,7 @@ const { TZ } = require('./helpers')
 const DECIMAL_PATTERN = /^\d+$/
 const LIMIT_PATTERN = /^[1-9]\d*$/
 const TIME_PATTERN = /^(\d{2}):(\d{2})(?::(\d{2}))?$/
+const UINT64_MAX = 18446744073709551615n
 
 class MobileSyncValidationError extends Error {
   constructor(code) {
@@ -14,7 +15,11 @@ class MobileSyncValidationError extends Error {
 }
 
 function normalizeCursor(value) {
-  if (typeof value !== 'string' || !DECIMAL_PATTERN.test(value)) {
+  if (
+    typeof value !== 'string'
+    || !DECIMAL_PATTERN.test(value)
+    || BigInt(value) > UINT64_MAX
+  ) {
     throw new MobileSyncValidationError('invalid_cursor')
   }
   return value

@@ -11,6 +11,8 @@ const { createMobileSyncRouter } = require('../../routes/mobileSync')
 
 const BIRTHDAY_ID = '11111111-1111-4111-8111-111111111111'
 const SECOND_BIRTHDAY_ID = '22222222-2222-4222-8222-222222222222'
+const UINT64_MAX = '18446744073709551615'
+const UINT64_MAX_PLUS_ONE = '18446744073709551616'
 
 function birthdayRow(overrides = {}) {
   return {
@@ -280,7 +282,7 @@ for (const { name, changes, limit, expectedHasMore, expectedSeqs, expectedLimitP
     assert.equal(result.hasMore, expectedHasMore)
     assert.deepEqual(result.changes.map(item => item.seq), expectedSeqs)
     assert.equal(result.nextCursor, expectedSeqs.at(-1))
-    assert.match(pool.calls[0].sql, /seq\s*>\s*\?[\s\S]*ORDER\s+BY\s+seq\s+ASC[\s\S]*LIMIT\s+\?/i)
+    assert.match(pool.calls[0].sql, /seq\s*>\s*CAST\s*\(\s*\?\s+AS\s+UNSIGNED\s*\)[\s\S]*ORDER\s+BY\s+seq\s+ASC[\s\S]*LIMIT\s+\?/i)
     assert.deepEqual(pool.calls[0].params, ['birthday', '0', expectedLimitParam])
     assert.equal(pool.calls[0].params[1], '0')
   })
@@ -314,10 +316,10 @@ test('pull never converts BIGINT cursor or sequence values through Number', asyn
   assert.equal(result.changes[0].seq, next)
   assert.equal(result.changes[0].record.version, '18446744073709551615')
   assert.match(pool.calls[0].sql, /CAST\s*\(\s*seq\s+AS\s+CHAR\s*\)/i)
+  assert.match(pool.calls[0].sql, /seq\s*>\s*CAST\s*\(\s*\?\s+AS\s+UNSIGNED\s*\)/i)
 })
 
-test('pull keeps every ordered change, reuses one current tombstone for duplicate IDs, and emits null for a missing current row', async () => {
-  const maliciousMissingId = "x') OR 1=1 --"
+test('pull keeps every ordered change and reuses one complete current tombstone for duplicate IDs', async () => {
   const tombstone = birthdayRow({
     version: '12',
     deleted_at: '2026-08-21 10:30:00',
@@ -328,13 +330,12 @@ test('pull keeps every ordered change, reuses one current tombstone for duplicat
     changes: [
       change('10', BIRTHDAY_ID, 'upsert'),
       change('11', BIRTHDAY_ID, 'delete'),
-      change('12', maliciousMissingId, 'upsert'),
     ],
     rows: [tombstone],
   })
   const repository = createMobileSyncRepository({ pool })
 
-  const result = await repository.pull('9', 3)
+  const result = await repository.pull('9', 2)
 
   assert.deepEqual(result.changes.map(item => ({
     seq: item.seq,
@@ -344,16 +345,55 @@ test('pull keeps every ordered change, reuses one current tombstone for duplicat
   })), [
     { seq: '10', operation: 'upsert', id: BIRTHDAY_ID, deletedAt: '2026-08-21T02:30:00.000Z' },
     { seq: '11', operation: 'delete', id: BIRTHDAY_ID, deletedAt: '2026-08-21T02:30:00.000Z' },
-    { seq: '12', operation: 'upsert', id: null, deletedAt: null },
   ])
   assert.equal(result.changes[0].record, result.changes[1].record)
-  assert.equal(result.changes[2].record, null)
-  assert.equal(result.nextCursor, '12')
+  assert.ok(result.changes.every(item => item.record !== null))
+  assert.equal(result.nextCursor, '11')
   assert.equal(result.hasMore, false)
   assert.equal(pool.calls.length, 2)
+  assert.deepEqual(pool.calls[1].params, [BIRTHDAY_ID])
+  assert.equal((pool.calls[1].sql.match(/\?/g) || []).length, 1)
+})
+
+test('pull rejects the entire page with a stable consistency error when one current birthday row is missing', async () => {
+  const missingId = "x') OR 1=1 --"
+  const pool = createPullPool({
+    changes: [change('10', missingId)],
+    rows: [],
+  })
+  const repository = createMobileSyncRepository({ pool })
+
+  await assert.rejects(
+    repository.pull('9', 1),
+    error => error.name === 'MobileSyncDataConsistencyError'
+      && error.code === 'mobile_sync_inconsistent_state'
+      && error.message === 'current birthday row missing for sync change',
+  )
+
+  assert.equal(pool.calls.length, 2)
   assert.doesNotMatch(pool.calls[1].sql, /x'\) OR 1=1/)
-  assert.deepEqual(pool.calls[1].params, [BIRTHDAY_ID, maliciousMissingId])
-  assert.equal((pool.calls[1].sql.match(/\?/g) || []).length, 2)
+  assert.deepEqual(pool.calls[1].params, [missingId])
+})
+
+test('pull rejects a partially resolvable page before constructing changes or performing later side effects', async () => {
+  const pool = createPullPool({
+    changes: [
+      change('10', BIRTHDAY_ID),
+      change('11', SECOND_BIRTHDAY_ID),
+    ],
+    rows: [birthdayRow()],
+  })
+  const repository = createMobileSyncRepository({ pool })
+
+  let result
+  await assert.rejects(
+    async () => { result = await repository.pull('9', 2) },
+    error => error.code === 'mobile_sync_inconsistent_state',
+  )
+
+  assert.equal(result, undefined)
+  assert.equal(pool.calls.length, 2)
+  assert.deepEqual(pool.calls[1].params, [BIRTHDAY_ID, SECOND_BIRTHDAY_ID])
 })
 
 test('pull defaults limit to 200 and binds limit+1 as an integer query parameter', async () => {
@@ -367,7 +407,7 @@ test('pull defaults limit to 200 and binds limit+1 as an integer query parameter
 })
 
 test('pull rejects malformed cursor strings before touching the database', async () => {
-  const invalidCursors = [undefined, null, '', -1, 0, '-1', '+1', '1.0', '1e3', ' 1', '1 ', '0 OR 1=1']
+  const invalidCursors = [undefined, null, '', -1, 0, '-1', '+1', '1.0', '1e3', ' 1', '1 ', '0 OR 1=1', UINT64_MAX_PLUS_ONE]
   let executeCalls = 0
   const repository = createMobileSyncRepository({
     pool: { execute: async () => { executeCalls += 1; return [[]] } },
@@ -377,6 +417,18 @@ test('pull rejects malformed cursor strings before touching the database', async
     await assert.rejects(repository.pull(cursor), error => error.code === 'invalid_cursor', String(cursor))
   }
   assert.equal(executeCalls, 0)
+})
+
+test('pull accepts the UInt64 maximum cursor as an exact bound string', async () => {
+  const pool = createPullPool({ changes: [] })
+  const repository = createMobileSyncRepository({ pool })
+
+  const result = await repository.pull(UINT64_MAX, 1)
+
+  assert.deepEqual(result, { changes: [], nextCursor: UINT64_MAX, hasMore: false })
+  assert.deepEqual(pool.calls[0].params, ['birthday', UINT64_MAX, 2])
+  assert.equal(typeof pool.calls[0].params[1], 'string')
+  assert.match(pool.calls[0].sql, /seq\s*>\s*CAST\s*\(\s*\?\s+AS\s+UNSIGNED\s*\)/i)
 })
 
 test('pull accepts only a safe integer limit from 1 through 200 before touching the database', async () => {
@@ -440,6 +492,7 @@ test('pull route returns exact validation errors and never calls the repository 
     '/api/mobile/sync/pull?cursor=-1',
     '/api/mobile/sync/pull?cursor=1.5',
     '/api/mobile/sync/pull?cursor=0%20OR%201%3D1',
+    `/api/mobile/sync/pull?cursor=${UINT64_MAX_PLUS_ONE}`,
   ]) {
     const response = await request(app).get(path)
     assert.equal(response.status, 400, path)
@@ -498,3 +551,22 @@ for (const method of ['snapshot', 'pull']) {
     assert.deepEqual(response.body, { error: 'server_error' })
   })
 }
+
+test('pull consistency failures propagate through Express without returning a cursor or partial page', async () => {
+  const pool = createPullPool({
+    changes: [change('10', BIRTHDAY_ID)],
+    rows: [],
+  })
+  const syncRepository = createMobileSyncRepository({ pool })
+  const app = createRouterApp(
+    { syncRepository, mobileAuth: authenticateAs() },
+    { errorHandler: true },
+  )
+
+  const response = await request(app).get('/api/mobile/sync/pull?cursor=9')
+
+  assert.equal(response.status, 503)
+  assert.deepEqual(response.body, { error: 'server_error' })
+  assert.equal(Object.hasOwn(response.body, 'nextCursor'), false)
+  assert.equal(pool.calls.length, 2)
+})

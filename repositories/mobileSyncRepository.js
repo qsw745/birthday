@@ -24,6 +24,14 @@ const BIRTHDAY_SELECT = `SELECT
 FROM birthdays b
 LEFT JOIN email_reminders r ON r.birthday_id = b.id`
 
+class MobileSyncDataConsistencyError extends Error {
+  constructor() {
+    super('current birthday row missing for sync change')
+    this.name = 'MobileSyncDataConsistencyError'
+    this.code = 'mobile_sync_inconsistent_state'
+  }
+}
+
 function requireUsername(username) {
   if (typeof username !== 'string' || username.trim().length === 0) {
     const error = new TypeError('username is required for the single-admin snapshot')
@@ -73,7 +81,7 @@ function createMobileSyncRepository({ pool }) {
          CAST(version AS CHAR) AS version
        FROM mobile_sync_changes
        WHERE entity_type = ?
-         AND seq > ?
+         AND seq > CAST(? AS UNSIGNED)
        ORDER BY seq ASC
        LIMIT ?`,
       ['birthday', normalizedCursor, normalizedLimit + 1],
@@ -89,13 +97,17 @@ function createMobileSyncRepository({ pool }) {
       `${BIRTHDAY_SELECT}\nWHERE b.id IN (${placeholders})`,
       entityIds,
     )
+    const rowsById = new Map(birthdayRows.map(row => [String(row.id), row]))
+    if (entityIds.some(entityId => !rowsById.has(entityId))) {
+      throw new MobileSyncDataConsistencyError()
+    }
     const records = new Map(
-      birthdayRows.map(row => [String(row.id), serializeBirthdayRow(row)]),
+      entityIds.map(entityId => [entityId, serializeBirthdayRow(rowsById.get(entityId))]),
     )
     const changes = pageRows.map(row => ({
       seq: decimalString(row.seq, 'sequence'),
       operation: row.operation,
-      record: records.get(String(row.entity_id)) || null,
+      record: records.get(String(row.entity_id)),
     }))
 
     return {
