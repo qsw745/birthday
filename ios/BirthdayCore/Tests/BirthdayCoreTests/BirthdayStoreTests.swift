@@ -8,6 +8,23 @@ private enum InjectedCommitFailure: Error, Equatable {
   case saveFailed
 }
 
+private final class FailOnceCommitter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var hasFailed = false
+
+  func commit(_ modelContext: ModelContext) throws {
+    lock.lock()
+    let shouldFail = !hasFailed
+    hasFailed = true
+    lock.unlock()
+
+    if shouldFail {
+      throw InjectedCommitFailure.saveFailed
+    }
+    try modelContext.save()
+  }
+}
+
 private func makeContainer() throws -> ModelContainer {
   try ModelContainer(
     for: BirthdayEntity.self,
@@ -20,11 +37,12 @@ private func makeStore(_ container: ModelContainer) -> BirthdayStore {
   BirthdayStore(modelContainer: container)
 }
 
-private func makeFailingStore(_ container: ModelContainer) -> BirthdayStore {
-  BirthdayStore(
+private func makeFailOnceStore(_ container: ModelContainer) -> BirthdayStore {
+  let committer = FailOnceCommitter()
+  return BirthdayStore(
     modelContainer: container,
-    transactionCommitter: { _ in
-      throw InjectedCommitFailure.saveFailed
+    transactionCommitter: { modelContext in
+      try committer.commit(modelContext)
     })
 }
 
@@ -218,25 +236,31 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   #expect(persisted.syncStateRaw == "unexpected-state")
 }
 
-@Test func failedNewSaveRollsBackBirthdayAndOutboxTogether() async throws {
+@Test func failedNewSaveLeavesSameStoreReadyForOneCleanLaterCommit() async throws {
   let container = try makeContainer()
-  let store = makeFailingStore(container)
+  let store = makeFailOnceStore(container)
 
   await #expect(throws: InjectedCommitFailure.saveFailed) {
     try await store.save(draft(name: "妈妈"), id: nil, now: storeNow, timeZone: storeTimeZone)
   }
 
-  let observer = makeStore(container)
-  #expect(try await observer.activeBirthdays().isEmpty)
-  #expect(try await observer.pendingOperations().isEmpty)
+  let saved = try await store.save(
+    draft(name: "成功保存"), id: nil, now: storeNow.addingTimeInterval(1), timeZone: storeTimeZone)
+  let operation = try #require(try await store.pendingOperations().last)
+
+  #expect(try await store.activeBirthdays() == [saved])
+  #expect(try await store.pendingOperations().count == 1)
+  #expect(operation.operationType == "upsert")
+  #expect(operation.entityId == saved.id)
+  #expect(try JSONDecoder().decode(BirthdayRecord.self, from: operation.payloadJSON) == saved)
 }
 
-@Test func failedUpdateRollsBackBirthdayAndSecondOutbox() async throws {
+@Test func failedUpdateLeavesSameStoreReadyForOneCleanLaterCommit() async throws {
   let container = try makeContainer()
   let seedStore = makeStore(container)
   let original = try await seedStore.save(
     draft(name: "原始姓名"), id: nil, now: storeNow, timeZone: storeTimeZone)
-  let failingStore = makeFailingStore(container)
+  let failingStore = makeFailOnceStore(container)
 
   await #expect(throws: InjectedCommitFailure.saveFailed) {
     try await failingStore.save(
@@ -247,42 +271,67 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
     )
   }
 
-  let observer = makeStore(container)
-  #expect(try await observer.activeBirthdays() == [original])
-  #expect(try await observer.pendingOperations().count == 1)
+  let updated = try await failingStore.save(
+    draft(name: "成功更新"),
+    id: original.id,
+    now: storeNow.addingTimeInterval(2),
+    timeZone: storeTimeZone
+  )
+  let operation = try #require(try await failingStore.pendingOperations().last)
+
+  #expect(try await failingStore.activeBirthdays() == [updated])
+  #expect(try await failingStore.pendingOperations().count == 2)
+  #expect(operation.operationType == "upsert")
+  #expect(operation.entityId == original.id)
+  #expect(try JSONDecoder().decode(BirthdayRecord.self, from: operation.payloadJSON) == updated)
 }
 
-@Test func failedSoftDeleteRollsBackTombstoneAndDeleteOutbox() async throws {
+@Test func failedSoftDeleteLeavesSameStoreReadyForOneCleanLaterCommit() async throws {
   let container = try makeContainer()
   let seedStore = makeStore(container)
   let original = try await seedStore.save(
     draft(name: "爸爸"), id: nil, now: storeNow, timeZone: storeTimeZone)
-  let failingStore = makeFailingStore(container)
+  let failingStore = makeFailOnceStore(container)
 
   await #expect(throws: InjectedCommitFailure.saveFailed) {
     try await failingStore.softDelete(id: original.id, now: storeNow.addingTimeInterval(1))
   }
 
-  let observer = makeStore(container)
-  #expect(try await observer.activeBirthdays() == [original])
-  #expect(try await observer.pendingOperations().count == 1)
+  let deletedAt = storeNow.addingTimeInterval(2)
+  try await failingStore.softDelete(id: original.id, now: deletedAt)
+  let operation = try #require(try await failingStore.pendingOperations().last)
+  let payload = try JSONDecoder().decode(BirthdayRecord.self, from: operation.payloadJSON)
+
+  #expect(try await failingStore.activeBirthdays().isEmpty)
+  #expect(try await failingStore.pendingOperations().count == 2)
+  #expect(operation.operationType == "delete")
+  #expect(operation.entityId == original.id)
+  #expect(payload.id == original.id)
+  #expect(payload.deletedAt == deletedAt)
+  #expect(payload.syncState == .pendingDelete)
 }
 
-@Test func failedRestoreRollsBackActiveStateAndUpsertOutbox() async throws {
+@Test func failedRestoreLeavesSameStoreReadyForOneCleanLaterCommit() async throws {
   let container = try makeContainer()
   let seedStore = makeStore(container)
   let saved = try await seedStore.save(
     draft(name: "爸爸"), id: nil, now: storeNow, timeZone: storeTimeZone)
   try await seedStore.softDelete(id: saved.id, now: storeNow.addingTimeInterval(1))
-  let failingStore = makeFailingStore(container)
+  let failingStore = makeFailOnceStore(container)
 
   await #expect(throws: InjectedCommitFailure.saveFailed) {
     try await failingStore.restore(id: saved.id, now: storeNow.addingTimeInterval(2))
   }
 
-  let observer = makeStore(container)
-  #expect(try await observer.activeBirthdays().isEmpty)
-  let operations = try await observer.pendingOperations()
-  #expect(operations.count == 2)
-  #expect(operations.last?.operationType == "delete")
+  try await failingStore.restore(id: saved.id, now: storeNow.addingTimeInterval(3))
+  let restored = try #require(try await failingStore.activeBirthdays().first)
+  let operation = try #require(try await failingStore.pendingOperations().last)
+
+  #expect(restored.id == saved.id)
+  #expect(restored.deletedAt == nil)
+  #expect(restored.syncState == .pending)
+  #expect(try await failingStore.pendingOperations().count == 3)
+  #expect(operation.operationType == "upsert")
+  #expect(operation.entityId == saved.id)
+  #expect(try JSONDecoder().decode(BirthdayRecord.self, from: operation.payloadJSON) == restored)
 }
