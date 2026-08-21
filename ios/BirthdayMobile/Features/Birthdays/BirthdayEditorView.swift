@@ -7,6 +7,11 @@ struct BirthdayEditorView: View {
     case emailAddress
   }
 
+  private enum ActiveOperation: Equatable {
+    case save
+    case delete
+  }
+
   @Bindable var model: AppModel
   @Environment(\.dismiss) private var dismiss
   @Environment(\.timeZone) private var timeZone
@@ -14,6 +19,7 @@ struct BirthdayEditorView: View {
   @State private var editorModel: BirthdayEditorModel
   @State private var isShowingDeleteConfirmation = false
   @State private var isShowingDeleteFailure = false
+  @State private var activeOperation: ActiveOperation?
 
   private let record: BirthdayRecord?
 
@@ -23,6 +29,10 @@ struct BirthdayEditorView: View {
     _editorModel = State(
       initialValue: BirthdayEditorModel(store: model.store, record: record)
     )
+  }
+
+  private var isInteractionLocked: Bool {
+    activeOperation != nil || editorModel.isBusy
   }
 
   var body: some View {
@@ -92,7 +102,7 @@ struct BirthdayEditorView: View {
             Section {
               Label(errorMessage, systemImage: "exclamationmark.triangle")
                 .foregroundStyle(.red)
-                .accessibilityLabel("保存错误：\(errorMessage)")
+                .accessibilityLabel("操作错误：\(errorMessage)")
             }
             .id(BirthdayEditorModel.SectionLocation.general)
           }
@@ -105,12 +115,13 @@ struct BirthdayEditorView: View {
                 Label("删除生日", systemImage: "trash")
                   .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
               }
-              .disabled(editor.isBusy)
+              .disabled(isInteractionLocked)
             } footer: {
               Text("删除后将从本机立即隐藏，并在联网后同步删除。")
             }
           }
         }
+        .disabled(isInteractionLocked)
         .scrollContentBackground(.hidden)
         .background(ModernAirTheme.mist)
         .onChange(of: editor.errorField) { _, errorField in
@@ -136,14 +147,14 @@ struct BirthdayEditorView: View {
             dismiss()
           }
           .frame(minHeight: 44)
-          .disabled(editor.isBusy)
+          .disabled(isInteractionLocked)
         }
 
         ToolbarItem(placement: .confirmationAction) {
           Button {
             save()
           } label: {
-            if editor.isSaving {
+            if activeOperation == .save {
               ProgressView()
                 .accessibilityLabel("正在保存")
             } else {
@@ -152,20 +163,20 @@ struct BirthdayEditorView: View {
             }
           }
           .frame(minWidth: 44, minHeight: 44)
-          .disabled(editor.isBusy)
+          .disabled(isInteractionLocked)
         }
       }
       .confirmationDialog(
-        "确认删除这个生日？",
+        "确认删除",
         isPresented: $isShowingDeleteConfirmation,
         titleVisibility: .visible
       ) {
-        Button("删除生日", role: .destructive) {
+        Button("确认删除", role: .destructive) {
           deleteRecord()
         }
         Button("取消", role: .cancel) {}
       } message: {
-        Text("记录会立即从本机隐藏，并在联网后同步删除。")
+        Text(deleteConfirmationMessage)
       }
       .alert("删除失败", isPresented: $isShowingDeleteFailure) {
         Button("重试") {
@@ -177,6 +188,7 @@ struct BirthdayEditorView: View {
       }
     }
     .tint(ModernAirTheme.tide)
+    .interactiveDismissDisabled(isInteractionLocked)
   }
 
   @ViewBuilder
@@ -191,22 +203,39 @@ struct BirthdayEditorView: View {
   }
 
   private func save() {
+    guard !isInteractionLocked else { return }
+    activeOperation = .save
+
     Task {
-      guard await editorModel.save(timeZone: timeZone) else { return }
+      guard await editorModel.save(timeZone: timeZone) else {
+        activeOperation = nil
+        return
+      }
       await model.reload()
       dismiss()
     }
   }
 
   private func deleteRecord() {
+    guard !isInteractionLocked else { return }
+    activeOperation = .delete
+
     Task {
       guard await editorModel.delete() else {
+        activeOperation = nil
         isShowingDeleteFailure = true
         return
       }
       await model.reload()
       dismiss()
     }
+  }
+
+  private var deleteConfirmationMessage: String {
+    if let record {
+      return "确定删除“\(record.name)”吗？记录会立即从本机隐藏，并在联网后同步删除。"
+    }
+    return "记录会立即从本机隐藏，并在联网后同步删除。"
   }
 }
 

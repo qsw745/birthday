@@ -24,6 +24,10 @@ struct BirthdayListView: View {
     !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
+  private var isDeletingRecord: Bool {
+    deletingRecordID != nil
+  }
+
   var body: some View {
     Group {
       if model.isLoading || model.loadState == .idle {
@@ -53,23 +57,24 @@ struct BirthdayListView: View {
             .frame(width: 44, height: 44)
         }
         .accessibilityLabel("添加生日")
+        .disabled(isDeletingRecord)
       }
     }
     .sheet(item: $editingRecord) { record in
       BirthdayEditorView(model: model, record: record)
     }
     .confirmationDialog(
-      "确认删除这个生日？",
+      "确认删除",
       isPresented: deleteConfirmationPresented,
       titleVisibility: .visible,
       presenting: deleteCandidate
     ) { record in
-      Button("删除“\(record.name)”", role: .destructive) {
+      Button("确认删除", role: .destructive) {
         delete(record)
       }
       Button("取消", role: .cancel) {}
-    } message: { _ in
-      Text("记录会立即从本机隐藏，并在联网后同步删除。")
+    } message: { record in
+      Text("确定删除“\(record.name)”吗？记录会立即从本机隐藏，并在联网后同步删除。")
     }
     .alert("删除失败", isPresented: $isShowingDeleteError) {
       Button("重试") {
@@ -94,13 +99,14 @@ struct BirthdayListView: View {
       }
       .buttonStyle(.plain)
       .frame(minHeight: 58)
-      .disabled(deletingRecordID == record.id)
+      .disabled(isDeletingRecord)
       .swipeActions(edge: .trailing, allowsFullSwipe: false) {
         Button(role: .destructive) {
           deleteCandidate = record
         } label: {
           Label("删除", systemImage: "trash")
         }
+        .disabled(isDeletingRecord)
       }
     }
     .listStyle(.insetGrouped)
