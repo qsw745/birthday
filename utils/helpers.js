@@ -36,6 +36,25 @@ function parseTimeOfDay(tod) {
   return { h: +m[1], m: +m[2], s: m[3] ? +m[3] : 0 }
 }
 
+function toShanghaiCandidate(ymd, h, m, s) {
+  return moment.tz(
+    `${ymd} ${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`,
+    STORAGE_FMT,
+    TZ
+  )
+}
+
+function lunarToSolar(lunarYear, month, day, isLeapMonth) {
+  if (isLeapMonth) {
+    try {
+      return Lunar.fromYmd(lunarYear, -month, day).getSolar()
+    } catch {
+      return Lunar.fromYmd(lunarYear, month, day).getSolar()
+    }
+  }
+  return Lunar.fromYmd(lunarYear, month, day).getSolar()
+}
+
 /**
  * 计算下一次阳历提醒时间（上海时区）
  * 入参字段：
@@ -45,8 +64,8 @@ function parseTimeOfDay(tod) {
  *   - remindTime: 'HH:mm' 或 'HH:mm:ss'
  * 返回：'YYYY-MM-DD HH:mm:ss'（Asia/Shanghai）
  */
-function calculateNextSolarDate(item) {
-  const now = moment.tz(TZ)
+function calculateNextSolarDate(item, nowInput = new Date()) {
+  const now = moment.tz(nowInput, TZ)
 
   const lunarMonth = Number(item.lunarMonth)
   const lunarDay = Number(item.lunarDay)
@@ -61,25 +80,14 @@ function calculateNextSolarDate(item) {
   let lunarYear = Lunar.fromDate(now.toDate()).getYear()
 
   // 当年农历 -> 阳历
-  let solar = Lunar.fromYmd(lunarYear, lunarMonth, lunarDay, isLeap).getSolar()
-  let solarYmd = solar.toYmd() // 'YYYY-MM-DD'
-
-  // 组合每日提醒时刻，按上海时区
-  let candidate = moment.tz(
-    `${solarYmd} ${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`,
-    STORAGE_FMT,
-    TZ
-  )
+  let solar = lunarToSolar(lunarYear, lunarMonth, lunarDay, isLeap)
+  let candidate = toShanghaiCandidate(solar.toYmd(), h, m, s)
 
   // 若已过，则取下一年
   if (!candidate.isValid() || candidate.isSameOrBefore(now)) {
-    solar = Lunar.fromYmd(lunarYear + 1, lunarMonth, lunarDay, isLeap).getSolar()
-    solarYmd = solar.toYmd()
-    candidate = moment.tz(
-      `${solarYmd} ${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`,
-      STORAGE_FMT,
-      TZ
-    )
+    lunarYear += 1
+    solar = lunarToSolar(lunarYear, lunarMonth, lunarDay, isLeap)
+    candidate = toShanghaiCandidate(solar.toYmd(), h, m, s)
   }
 
   if (!candidate.isValid()) {

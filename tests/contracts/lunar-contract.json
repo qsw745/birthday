@@ -1,0 +1,6 @@
+[
+  { "name": "ordinary-new-year", "after": "2026-01-01T00:00:00+08:00", "month": 1, "day": 1, "leap": false, "expectedDate": "2026-02-17" },
+  { "name": "ordinary-mid-autumn", "after": "2026-01-01T00:00:00+08:00", "month": 8, "day": 15, "leap": false, "expectedDate": "2026-09-25" },
+  { "name": "leap-six-present", "after": "2025-01-01T00:00:00+08:00", "month": 6, "day": 1, "leap": true, "expectedDate": "2025-07-25" },
+  { "name": "leap-six-missing-falls-back", "after": "2026-01-01T00:00:00+08:00", "month": 6, "day": 1, "leap": true, "expectedDate": "2026-07-14" }
+]
