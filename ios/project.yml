@@ -26,6 +26,7 @@ targets:
       path: BirthdayMobile/Info.plist
       properties:
         CFBundleDisplayName: 岁时
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
         UILaunchScreen: {}
         NSFaceIDUsageDescription: 使用 Face ID 保护生日资料
         BGTaskSchedulerPermittedIdentifiers:
