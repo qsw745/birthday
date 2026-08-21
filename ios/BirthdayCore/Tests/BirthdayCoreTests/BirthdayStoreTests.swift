@@ -57,6 +57,8 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   )
 }
 
+@Suite(.serialized) struct BirthdayStoreTests {
+
 @Test func savePersistsBirthdayAndOutboxAtomically() async throws {
   let store = makeStore(try makeContainer())
 
@@ -334,4 +336,6 @@ private func draft(name: String, reminder: ReminderConfig = .defaults) -> Birthd
   #expect(operation.operationType == "upsert")
   #expect(operation.entityId == saved.id)
   #expect(try JSONDecoder().decode(BirthdayRecord.self, from: operation.payloadJSON) == restored)
+}
+
 }
