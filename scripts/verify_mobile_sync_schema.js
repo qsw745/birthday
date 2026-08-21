@@ -12,6 +12,8 @@ const COLUMN_CONTRACTS = [
   { table: 'birthdays', column: 'notify_day_before', kind: 'tinyint_bool', nullable: false, defaultValue: '1', label: 'TINYINT(1)' },
   { table: 'birthdays', column: 'notify_same_day', kind: 'tinyint_bool', nullable: false, defaultValue: '1', label: 'TINYINT(1)' },
 
+  { table: 'email_reminders', column: 'status', kind: 'tinyint', nullable: false, defaultValue: '0', label: 'TINYINT' },
+  { table: 'email_reminders', column: 'remind_time', kind: 'datetime', nullable: false, defaultValue: null, label: 'DATETIME' },
   { table: 'email_reminders', column: 'schedule_mode', kind: 'enum', values: ['derived', 'exact'], nullable: false, defaultValue: null, label: "ENUM('derived','exact')" },
   { table: 'email_reminders', column: 'generation', kind: 'char', length: 36, nullable: false, defaultValue: null, label: 'CHAR(36)' },
   { table: 'email_reminders', column: 'claim_token', kind: 'char', length: 36, nullable: true, defaultValue: null, label: 'CHAR(36)' },
@@ -110,19 +112,25 @@ const REMINDER_STATE_SQL = `
   ORDER BY schedule_mode, status
 `
 
+const REMINDER_DELIVERY_MATCH_SQL = '(delivered_remind_time <=> remind_time)'
+
 const INVALID_STATE_SQL = `
   SELECT
     (SELECT COUNT(*) FROM birthdays
       WHERE version < 1 OR notify_day_before NOT IN (0, 1) OR notify_same_day NOT IN (0, 1)) AS invalid_birthday_rows,
     (SELECT COUNT(*) FROM email_reminders
-      WHERE schedule_mode NOT IN ('derived', 'exact')
+      WHERE status IS NULL
+         OR remind_time IS NULL
+         OR schedule_mode IS NULL
+         OR schedule_mode NOT IN ('derived', 'exact')
+         OR generation IS NULL
          OR CHAR_LENGTH(generation) <> 36
          OR status NOT IN (0, 1)
          OR ((claim_token IS NULL) <> (claim_generation IS NULL))
          OR ((claim_token IS NULL) <> (claim_remind_time IS NULL))
          OR ((claim_token IS NULL) <> (claimed_at IS NULL))
-         OR (status = 0 AND delivered_remind_time IS NOT NULL)
-         OR (status = 1 AND delivered_remind_time IS NULL)) AS invalid_reminder_rows,
+         OR (status = 1 AND NOT ${REMINDER_DELIVERY_MATCH_SQL})
+         OR (status = 0 AND ${REMINDER_DELIVERY_MATCH_SQL})) AS invalid_reminder_rows,
     (SELECT COUNT(*) FROM mobile_sync_changes
       WHERE seq < 1 OR entity_version < 1 OR operation NOT IN ('upsert', 'delete')) AS invalid_change_rows,
     (SELECT COUNT(*) FROM mobile_sync_operations
@@ -181,6 +189,8 @@ function isExpectedColumnType(row, contract) {
       return dataType === 'bigint' && /^bigint(?:\(\d+\))?$/.test(columnType) && !columnType.includes('unsigned')
     case 'tinyint_bool':
       return dataType === 'tinyint' && columnType === 'tinyint(1)' && !columnType.includes('unsigned')
+    case 'tinyint':
+      return dataType === 'tinyint' && /^tinyint(?:\(\d+\))?$/.test(columnType) && !columnType.includes('unsigned')
     case 'datetime':
       return dataType === 'datetime' && /^(?:datetime|datetime\(0\))$/.test(columnType)
     case 'timestamp':
@@ -221,31 +231,68 @@ function collectIndexes(rows) {
     groups.set(key, group)
   }
 
-  return [...groups.values()].map(group => ({
-    table: group.table,
-    name: group.name,
-    unique: group.unique,
-    type: group.type,
-    columns: group.entries
-      .sort((left, right) => left.position - right.position)
-      .map(entry => entry.column),
-    fullLength: group.entries.every(entry => entry.fullLength),
-  }))
+  return [...groups.values()].map(group => {
+    const entries = group.entries.sort((left, right) => left.position - right.position)
+    return {
+      table: group.table,
+      name: group.name,
+      unique: group.unique,
+      type: group.type,
+      columns: entries.map(entry => entry.column),
+      fullLengths: entries.map(entry => entry.fullLength),
+    }
+  })
 }
 
 function hasCompatibleIndex(indexes, contract) {
   return indexes.some(index => {
     if (index.table !== contract.table) return false
-    if (index.type !== 'btree' || !index.fullLength) return false
+    if (index.type !== 'btree') return false
     if (contract.primary && index.name !== 'primary') return false
     if (contract.unique && !index.unique) return false
     if (!contract.unique && index.unique) return false
-    if (contract.unique || contract.primary) {
-      return index.columns.length === contract.columns.length
-        && contract.columns.every((column, offset) => index.columns[offset] === column)
-    }
-    return contract.columns.every((column, offset) => index.columns[offset] === column)
+    const requiredPrefixMatches = contract.columns.every((column, offset) => (
+      index.columns[offset] === column && index.fullLengths[offset]
+    ))
+    if (!requiredPrefixMatches) return false
+    return contract.unique || contract.primary
+      ? index.columns.length === contract.columns.length
+      : true
   })
+}
+
+function nullSafeValueEqual(left, right) {
+  const leftNull = left === null || left === undefined
+  const rightNull = right === null || right === undefined
+  if (leftNull || rightNull) return leftNull && rightNull
+  if (left instanceof Date || right instanceof Date) {
+    const leftTime = left instanceof Date ? left.getTime() : new Date(left).getTime()
+    const rightTime = right instanceof Date ? right.getTime() : new Date(right).getTime()
+    return Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime === rightTime
+  }
+  return String(left) === String(right)
+}
+
+function reminderStateIsCompatible(row) {
+  if (!row || (row.status !== 0 && row.status !== 1)) return false
+  if (row.remind_time === null || row.remind_time === undefined) return false
+  if (row.schedule_mode !== 'derived' && row.schedule_mode !== 'exact') return false
+  if (typeof row.generation !== 'string' || row.generation.length !== 36) return false
+
+  const claimFields = [
+    row.claim_token,
+    row.claim_generation,
+    row.claim_remind_time,
+    row.claimed_at,
+  ]
+  const nullClaimFields = claimFields.filter(value => value === null || value === undefined).length
+  if (nullClaimFields !== 0 && nullClaimFields !== claimFields.length) return false
+
+  const currentOccurrenceDelivered = nullSafeValueEqual(
+    row.delivered_remind_time,
+    row.remind_time,
+  )
+  return row.status === 1 ? currentOccurrenceDelivered : !currentOccurrenceDelivered
 }
 
 function validateMetadata(tableRows, columnRows, indexRows) {
@@ -465,4 +512,5 @@ module.exports = {
   verifyMobileSyncSchema,
   runCli,
   SchemaVerificationError,
+  reminderStateIsCompatible,
 }

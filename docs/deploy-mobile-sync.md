@@ -11,11 +11,15 @@
 - 下列变量只使用本次切换专用名称；值由获批操作者在安全终端中提供，不写入仓库：
 
 ```sh
+set -euo pipefail
 export BIRTHDAY_DB_USER='已审批的数据库用户'
 export BIRTHDAY_DB_NAME='email_server'
 export BIRTHDAY_REVIEW_BASE='服务器当前已核验提交号'
 export BIRTHDAY_RELEASE_ID='审核通过的提交号'
-export BIRTHDAY_BACKUP_DIR="/root/birthday-backups/${BIRTHDAY_RELEASE_ID}"
+export BIRTHDAY_BACKUP_ROOT='/root/birthday-backups'
+export BIRTHDAY_CUTOVER_UTC="$(date -u '+%Y%m%dT%H%M%SZ')"
+export BIRTHDAY_BACKUP_NONCE="$(openssl rand -hex 8)"
+export BIRTHDAY_BACKUP_DIR="${BIRTHDAY_BACKUP_ROOT}/${BIRTHDAY_RELEASE_ID}-${BIRTHDAY_CUTOVER_UTC}-${BIRTHDAY_BACKUP_NONCE}"
 printf 'Database password: ' >&2
 IFS= read -r -s BIRTHDAY_DB_PASSWORD
 printf '\n' >&2
@@ -65,60 +69,149 @@ date -u '+claim-lease-ended-at=%Y-%m-%dT%H:%M:%SZ'
 ### 4. 备份应用、Nginx 和三个既有业务表，并验证可读
 
 ```sh
+set -euo pipefail
+test ! -e "$BIRTHDAY_BACKUP_DIR"
 install -d -m 700 "$BIRTHDAY_BACKUP_DIR"
-tar -C /data/app -czf "$BIRTHDAY_BACKUP_DIR/birthday-server.tgz" birthday-server
-cp -a /opt/nginx/conf.d/site.conf "$BIRTHDAY_BACKUP_DIR/site.conf"
-set -o pipefail
-docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 \
+
+BIRTHDAY_APP_TMP="$BIRTHDAY_BACKUP_DIR/.birthday-server.tgz.tmp"
+BIRTHDAY_NGINX_TMP="$BIRTHDAY_BACKUP_DIR/.site.conf.tmp"
+BIRTHDAY_DUMP_TMP="$BIRTHDAY_BACKUP_DIR/.business-tables.sql.gz.tmp"
+
+tar -C /data/app -czf "$BIRTHDAY_APP_TMP" birthday-server
+tar -tzf "$BIRTHDAY_APP_TMP" | awk '
+  /^birthday-server\// { found = 1 }
+  END { exit !found }
+'
+mv -- "$BIRTHDAY_APP_TMP" "$BIRTHDAY_BACKUP_DIR/birthday-server.tgz"
+
+cp -a /opt/nginx/conf.d/site.conf "$BIRTHDAY_NGINX_TMP"
+test -s "$BIRTHDAY_NGINX_TMP"
+cmp -s /opt/nginx/conf.d/site.conf "$BIRTHDAY_NGINX_TMP"
+mv -- "$BIRTHDAY_NGINX_TMP" "$BIRTHDAY_BACKUP_DIR/site.conf"
+
+if ! docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 \
   mysqldump --single-transaction --skip-lock-tables \
   -u"$BIRTHDAY_DB_USER" "$BIRTHDAY_DB_NAME" \
   birthdays email_reminders webauthn_credentials \
-  | gzip -c > "$BIRTHDAY_BACKUP_DIR/business-tables.sql.gz"
-tar -tzf "$BIRTHDAY_BACKUP_DIR/birthday-server.tgz"
-gzip -t "$BIRTHDAY_BACKUP_DIR/business-tables.sql.gz"
-test -s "$BIRTHDAY_BACKUP_DIR/site.conf"
-test -s "$BIRTHDAY_BACKUP_DIR/business-tables.sql.gz"
+  | gzip -c > "$BIRTHDAY_DUMP_TMP"; then
+  printf 'business table dump failed; stop cutover\n' >&2
+  exit 1
+fi
+gzip -t "$BIRTHDAY_DUMP_TMP"
+if ! gzip -dc "$BIRTHDAY_DUMP_TMP" | awk '
+  /CREATE TABLE .*`birthdays`/ { birthdays = 1 }
+  /CREATE TABLE .*`email_reminders`/ { reminders = 1 }
+  /CREATE TABLE .*`webauthn_credentials`/ { webauthn = 1 }
+  END { exit !(birthdays && reminders && webauthn) }
+'; then
+  printf 'dump is readable but misses a required CREATE TABLE; stop cutover\n' >&2
+  exit 1
+fi
+mv -- "$BIRTHDAY_DUMP_TMP" "$BIRTHDAY_BACKUP_DIR/business-tables.sql.gz"
+
+sha256sum \
+  "$BIRTHDAY_BACKUP_DIR/birthday-server.tgz" \
+  "$BIRTHDAY_BACKUP_DIR/site.conf" \
+  "$BIRTHDAY_BACKUP_DIR/business-tables.sql.gz" \
+  > "$BIRTHDAY_BACKUP_DIR/backup.sha256"
 ```
 
 - [ ] 备份范围恰好包含应用目录、当前 `site.conf`、`birthdays`、`email_reminders`、`webauthn_credentials`。
-- [ ] `tar -tzf`、`gzip -t` 和非空检查全部成功，并把文件大小与校验和写入切换记录。
+- [ ] 本次目录由 release、UTC 时间和随机 nonce 组成；`test ! -e` 与 `install -d` 必须成功，禁止复用或覆盖旧目录。
+- [ ] 每个产物先在同目录写 `.tmp`，校验成功后才原子改名；dump 必须解压读取并找到三个带反引号表名的 `CREATE TABLE`，仅“gzip 非空”不算有效备份。
+- [ ] `tar` 内容、Nginx 字节比较、dump 表结构检查和 `backup.sha256` 全部成功。
 
 **停止点：** 任一备份缺失或不可读，恢复到备份步骤，不得上传或迁移。
 
 ### 5. 导出历史已标记提醒和 provenance 候选，逐行人工审核
 
 ```sh
-docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 mysql \
-  --batch --raw -u"$BIRTHDAY_DB_USER" "$BIRTHDAY_DB_NAME" \
+set -euo pipefail
+BIRTHDAY_STATUS1_COUNT_TMP="$BIRTHDAY_BACKUP_DIR/.legacy-status-1-count.txt.tmp"
+BIRTHDAY_STATUS1_TSV_TMP="$BIRTHDAY_BACKUP_DIR/.legacy-status-1.tsv.tmp"
+BIRTHDAY_PROVENANCE_COUNT_TMP="$BIRTHDAY_BACKUP_DIR/.legacy-provenance-count.txt.tmp"
+BIRTHDAY_PROVENANCE_TSV_TMP="$BIRTHDAY_BACKUP_DIR/.legacy-provenance-candidates.tsv.tmp"
+
+if ! docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 mysql \
+  --batch --skip-column-names -u"$BIRTHDAY_DB_USER" "$BIRTHDAY_DB_NAME" \
+  -e "SELECT COUNT(*) FROM email_reminders WHERE status = 1" \
+  > "$BIRTHDAY_STATUS1_COUNT_TMP"; then
+  printf 'legacy status count failed; stop cutover\n' >&2
+  exit 1
+fi
+awk 'NR == 1 && /^[0-9]+$/ { valid = 1 } END { exit !(NR == 1 && valid) }' \
+  "$BIRTHDAY_STATUS1_COUNT_TMP"
+BIRTHDAY_STATUS1_EXPECTED="$(tr -d '\r\n' < "$BIRTHDAY_STATUS1_COUNT_TMP")"
+
+if ! docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 mysql \
+  --batch -u"$BIRTHDAY_DB_USER" "$BIRTHDAY_DB_NAME" \
   -e "SELECT r.*, b.nextSolarDate,
              (r.remind_time = b.nextSolarDate) AS equals_next_solar_date
       FROM email_reminders r
-      JOIN birthdays b ON b.id = r.birthday_id
+      LEFT JOIN birthdays b ON b.id = r.birthday_id
       WHERE r.status = 1
       ORDER BY r.id" \
-  > "$BIRTHDAY_BACKUP_DIR/legacy-status-1.tsv"
+  > "$BIRTHDAY_STATUS1_TSV_TMP"; then
+  printf 'legacy status export failed; stop cutover\n' >&2
+  exit 1
+fi
+awk -F '\t' -v expected="$BIRTHDAY_STATUS1_EXPECTED" '
+  NR == 1 {
+    for (i = 1; i <= NF; i++) header[$i] = i
+    valid_header = header["id"] && header["birthday_id"] && header["status"] \
+      && header["nextSolarDate"] && header["equals_next_solar_date"]
+    next
+  }
+  { rows++ }
+  END { exit !(valid_header && rows == expected) }
+' "$BIRTHDAY_STATUS1_TSV_TMP"
 
-docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 mysql \
-  --batch --raw -u"$BIRTHDAY_DB_USER" "$BIRTHDAY_DB_NAME" \
+if ! docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 mysql \
+  --batch --skip-column-names -u"$BIRTHDAY_DB_USER" "$BIRTHDAY_DB_NAME" \
+  -e "SELECT COUNT(*) FROM email_reminders" \
+  > "$BIRTHDAY_PROVENANCE_COUNT_TMP"; then
+  printf 'legacy provenance count failed; stop cutover\n' >&2
+  exit 1
+fi
+awk 'NR == 1 && /^[0-9]+$/ { valid = 1 } END { exit !(NR == 1 && valid) }' \
+  "$BIRTHDAY_PROVENANCE_COUNT_TMP"
+BIRTHDAY_PROVENANCE_EXPECTED="$(tr -d '\r\n' < "$BIRTHDAY_PROVENANCE_COUNT_TMP")"
+
+if ! docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 mysql \
+  --batch -u"$BIRTHDAY_DB_USER" "$BIRTHDAY_DB_NAME" \
   -e "SELECT r.id, r.birthday_id, r.remind_time, b.nextSolarDate,
              CASE
+               WHEN b.id IS NULL THEN 'orphan-stop'
                WHEN b.nextSolarDate IS NULL THEN 'nextSolarDate-null'
                WHEN r.remind_time = b.nextSolarDate THEN 'equal-candidate'
                ELSE 'legacy-exact-candidate'
              END AS provenance_candidate
       FROM email_reminders r
-      JOIN birthdays b ON b.id = r.birthday_id
-      WHERE b.nextSolarDate IS NULL
-         OR r.remind_time = b.nextSolarDate
-         OR r.remind_time <> b.nextSolarDate
+      LEFT JOIN birthdays b ON b.id = r.birthday_id
       ORDER BY r.id" \
-  > "$BIRTHDAY_BACKUP_DIR/legacy-provenance-candidates.tsv"
+  > "$BIRTHDAY_PROVENANCE_TSV_TMP"; then
+  printf 'legacy provenance export failed; stop cutover\n' >&2
+  exit 1
+fi
+awk -F '\t' -v expected="$BIRTHDAY_PROVENANCE_EXPECTED" '
+  NR == 1 {
+    for (i = 1; i <= NF; i++) header[$i] = i
+    valid_header = header["id"] && header["birthday_id"] && header["remind_time"] \
+      && header["nextSolarDate"] && header["provenance_candidate"]
+    next
+  }
+  { rows++ }
+  END { exit !(valid_header && rows == expected) }
+' "$BIRTHDAY_PROVENANCE_TSV_TMP"
 
-test -f "$BIRTHDAY_BACKUP_DIR/legacy-status-1.tsv"
-test -f "$BIRTHDAY_BACKUP_DIR/legacy-provenance-candidates.tsv"
+mv -- "$BIRTHDAY_STATUS1_COUNT_TMP" "$BIRTHDAY_BACKUP_DIR/legacy-status-1-count.txt"
+mv -- "$BIRTHDAY_STATUS1_TSV_TMP" "$BIRTHDAY_BACKUP_DIR/legacy-status-1.tsv"
+mv -- "$BIRTHDAY_PROVENANCE_COUNT_TMP" "$BIRTHDAY_BACKUP_DIR/legacy-provenance-count.txt"
+mv -- "$BIRTHDAY_PROVENANCE_TSV_TMP" "$BIRTHDAY_BACKUP_DIR/legacy-provenance-candidates.tsv"
 ```
 
 - [ ] `legacy-status-1.tsv` 保留全部旧 `status=1` 行；旧状态只表示“曾被领取或送达”，不能单独证明 SMTP 已送达。
+- [ ] 两个 TSV 都通过表头与独立 `COUNT(*)` 核对；`status=1` 为零时允许只有表头，但 count 必须严格为 `0`。任何 `orphan-stop` 行都阻塞迁移。
 - [ ] 对照 SMTP/邮件投递日志，为每一行记录“明确已送达 / 明确未送达 / 不确定”。
 - [ ] 逐行人工确认 derived/exact 来源，特别审阅 `nextSolarDate IS NULL` 和 `remind_time = nextSolarDate`；相等的历史 exact 无法靠数据库自动区分。
 
@@ -197,7 +290,7 @@ docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 mysql \
            'mobile_sync_operations','mobile_device_sessions')
       ORDER BY TABLE_NAME;
 
-      SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, EXTRA
+      SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA
       FROM information_schema.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
         AND ((TABLE_NAME = 'birthdays'
@@ -205,7 +298,7 @@ docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 mysql \
                 ('version','deleted_at','notify_day_before','notify_same_day'))
           OR (TABLE_NAME = 'email_reminders'
               AND COLUMN_NAME IN
-                ('schedule_mode','generation','claim_token','claim_generation',
+                ('status','remind_time','schedule_mode','generation','claim_token','claim_generation',
                  'claim_remind_time','claimed_at','delivered_remind_time'))
           OR (TABLE_NAME = 'mobile_sync_changes'
               AND COLUMN_NAME IN ('seq','entity_version','record_json'))
@@ -215,7 +308,10 @@ docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 mysql \
 
       SELECT COUNT(*) AS invalid_schedule_or_generation
       FROM email_reminders
-      WHERE schedule_mode NOT IN ('derived','exact') OR CHAR_LENGTH(generation) <> 36;
+      WHERE schedule_mode IS NULL
+         OR schedule_mode NOT IN ('derived','exact')
+         OR generation IS NULL
+         OR CHAR_LENGTH(generation) <> 36;
 
       SELECT COUNT(*) AS non_null_claim_fields
       FROM email_reminders
@@ -228,7 +324,7 @@ docker exec -i -e MYSQL_PWD="$BIRTHDAY_DB_PASSWORD" mysql8 mysql \
 ```
 
 - [ ] 三张移动表都存在且为 InnoDB；`seq`、`entity_version`、`base_version` 都是 signed `BIGINT`。
-- [ ] `record_json`、`response_json` 为 `JSON`；四个生日列、提醒 7 个新增列全部符合迁移 SQL。
+- [ ] `record_json`、`response_json` 为 `JSON`；四个生日列、提醒 7 个新增列全部符合迁移 SQL；既有 `status` 必须是 signed `TINYINT NOT NULL DEFAULT 0`，`remind_time` 必须是 `DATETIME NOT NULL`。
 - [ ] `schedule_mode`/`generation` 全部有效；四个 claim 字段全部为 `NULL`。
 - [ ] 在人工恢复前，全部 legacy 行都必须是 `status=0` 且 `delivered_remind_time IS NULL`。
 

@@ -1,9 +1,12 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const path = require('node:path')
+const { spawnSync } = require('node:child_process')
 
 const {
   verifyMobileSyncSchema,
   runCli,
+  reminderStateIsCompatible,
 } = require('../../scripts/verify_mobile_sync_schema')
 
 function column(tableName, columnName, dataType, columnType, options = {}) {
@@ -46,6 +49,8 @@ function validMetadata() {
     column('birthdays', 'notify_day_before', 'tinyint', 'tinyint(1)', { defaultValue: '1' }),
     column('birthdays', 'notify_same_day', 'tinyint', 'tinyint(1)', { defaultValue: '1' }),
 
+    column('email_reminders', 'status', 'tinyint', 'tinyint', { defaultValue: '0' }),
+    column('email_reminders', 'remind_time', 'datetime', 'datetime'),
     column('email_reminders', 'schedule_mode', 'enum', "enum('derived','exact')"),
     column('email_reminders', 'generation', 'char', 'char(36)', { length: 36 }),
     column('email_reminders', 'claim_token', 'char', 'char(36)', { nullable: true, length: 36 }),
@@ -185,6 +190,24 @@ test('rejects incompatible signedness, type, nullability, enum, length, and auto
       expected: /mobile_sync_operations\.response_json: expected NOT NULL/,
     },
     {
+      name: 'reminder status uses the wrong type',
+      target: ['email_reminders', 'status'],
+      patch: { data_type: 'bigint', column_type: 'bigint' },
+      expected: /email_reminders\.status: expected TINYINT/,
+    },
+    {
+      name: 'reminder status uses the wrong default',
+      target: ['email_reminders', 'status'],
+      patch: { column_default: '1' },
+      expected: /email_reminders\.status: expected default 0/,
+    },
+    {
+      name: 'reminder time is nullable',
+      target: ['email_reminders', 'remind_time'],
+      patch: { is_nullable: 'YES' },
+      expected: /email_reminders\.remind_time: expected NOT NULL/,
+    },
+    {
       name: 'enum loses a value',
       target: ['email_reminders', 'schedule_mode'],
       patch: { column_type: "enum('derived')" },
@@ -256,6 +279,40 @@ test('rejects non-InnoDB tables and missing required indexes', async t => {
       /mobile_device_sessions: missing UNIQUE index \(access_token_hash\)/,
     )
   })
+
+  await t.test('prefix on a trailing extra query-index column remains compatible', async () => {
+    const metadata = validMetadata()
+    const indexes = [
+      ...metadata.indexes,
+      {
+        table_name: 'email_reminders',
+        index_name: 'idx_status_time',
+        non_unique: 1,
+        seq_in_index: 3,
+        column_name: 'id',
+        sub_part: 8,
+        index_type: 'BTREE',
+      },
+    ]
+    const fake = validQuery({ indexes })
+
+    await verifyMobileSyncSchema({ query: fake.query })
+  })
+
+  await t.test('prefix on a required query-index column is incompatible', async () => {
+    const metadata = validMetadata()
+    const indexes = metadata.indexes.map(row => (
+      row.index_name === 'idx_status_time' && row.column_name === 'remind_time'
+        ? { ...row, sub_part: 4 }
+        : row
+    ))
+    const fake = validQuery({ indexes })
+
+    await assert.rejects(
+      verifyMobileSyncSchema({ query: fake.query }),
+      /email_reminders: missing index \(status, remind_time\)/,
+    )
+  })
 })
 
 test('rejects a partially applied migration instead of accepting the objects that exist', async () => {
@@ -287,6 +344,65 @@ test('rejects incompatible post-migration row state reported by read-only checks
     verifyMobileSyncSchema({ query: fake.query }),
     /email_reminders: 1 incompatible row state/,
   )
+})
+
+test('reminder delivery state follows the current occurrence with null-safe equality', async () => {
+  const base = {
+    schedule_mode: 'derived',
+    generation: '11111111-1111-4111-8111-111111111111',
+    remind_time: '2027-08-22 09:00:00',
+    claim_token: null,
+    claim_generation: null,
+    claim_remind_time: null,
+    claimed_at: null,
+  }
+
+  assert.equal(reminderStateIsCompatible({
+    ...base,
+    status: 1,
+    delivered_remind_time: base.remind_time,
+  }), true, 'current occurrence delivered')
+  assert.equal(reminderStateIsCompatible({
+    ...base,
+    status: 0,
+    delivered_remind_time: '2026-08-22 09:00:00',
+  }), true, 'old delivered marker retained after advancing occurrence')
+  assert.equal(reminderStateIsCompatible({
+    ...base,
+    status: 1,
+    delivered_remind_time: null,
+  }), false, 'delivered status without current marker')
+  assert.equal(reminderStateIsCompatible({
+    ...base,
+    status: 0,
+    delivered_remind_time: base.remind_time,
+  }), false, 'pending status for an already delivered current occurrence')
+  assert.equal(reminderStateIsCompatible({
+    ...base,
+    status: null,
+    delivered_remind_time: null,
+  }), false, 'NULL status is explicit corruption')
+  assert.equal(reminderStateIsCompatible({
+    ...base,
+    status: 0,
+    remind_time: null,
+    delivered_remind_time: null,
+  }), false, 'NULL occurrence is explicit corruption')
+  assert.equal(reminderStateIsCompatible({
+    ...base,
+    status: 0,
+    generation: null,
+    delivered_remind_time: null,
+  }), false, 'NULL generation is explicit corruption')
+
+  const fake = validQuery()
+  await verifyMobileSyncSchema({ query: fake.query })
+  const stateSql = fake.sql.at(-1)
+  assert.match(stateSql, /status IS NULL/)
+  assert.match(stateSql, /remind_time IS NULL/)
+  assert.match(stateSql, /generation IS NULL/)
+  assert.match(stateSql, /status = 1 AND NOT \(delivered_remind_time <=> remind_time\)/)
+  assert.match(stateSql, /status = 0 AND \(delivered_remind_time <=> remind_time\)/)
 })
 
 test('accepts harmless metadata casing and current-timestamp display variants', async () => {
@@ -372,4 +488,46 @@ test('CLI treats pool close failure as failure and does not print PASS', async (
   assert.equal(exitCode, 1)
   assert.deepEqual(stdout, [])
   assert.deepEqual(stderr, ['MOBILE_SYNC_SCHEMA=FAIL database close failed'])
+})
+
+test('a clean child process can import the verifier silently and exit immediately', () => {
+  const modulePath = require.resolve('../../scripts/verify_mobile_sync_schema')
+  const child = spawnSync(process.execPath, ['-e', `require(${JSON.stringify(modulePath)})`], {
+    cwd: path.resolve(__dirname, '../..'),
+    encoding: 'utf8',
+    timeout: 2000,
+  })
+
+  assert.equal(child.error, undefined)
+  assert.equal(child.signal, null)
+  assert.equal(child.status, 0)
+  assert.equal(child.stdout, '')
+  assert.equal(child.stderr, '')
+})
+
+test('an independent child runner reports sanitized CLI query failure with exit code 1', () => {
+  const modulePath = require.resolve('../../scripts/verify_mobile_sync_schema')
+  const runner = `
+    const { runCli } = require(${JSON.stringify(modulePath)})
+    runCli({
+      loadDb: () => ({
+        query: async () => { throw new Error('password=hunter2 host=secret.example') },
+        pool: { end: async () => {} },
+      }),
+      stdout: line => console.log(line),
+      stderr: line => console.error(line),
+    }).then(code => { process.exitCode = code })
+  `
+  const child = spawnSync(process.execPath, ['-e', runner], {
+    cwd: path.resolve(__dirname, '../..'),
+    encoding: 'utf8',
+    timeout: 2000,
+  })
+
+  assert.equal(child.error, undefined)
+  assert.equal(child.signal, null)
+  assert.equal(child.status, 1)
+  assert.equal(child.stdout, '')
+  assert.match(child.stderr, /^MOBILE_SYNC_SCHEMA=FAIL schema query failed \(tables\)\n$/)
+  assert.doesNotMatch(child.stderr, /hunter2|secret\.example|password/i)
 })
