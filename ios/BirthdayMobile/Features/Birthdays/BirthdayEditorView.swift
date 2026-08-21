@@ -5,6 +5,7 @@ struct BirthdayEditorView: View {
   private enum FocusField: Hashable {
     case name
     case emailAddress
+    case emailMessage
   }
 
   private enum ActiveOperation: Equatable {
@@ -92,6 +93,7 @@ struct BirthdayEditorView: View {
                 text: $editor.draft.reminder.emailMessage,
                 axis: .vertical
               )
+              .focused($focusedField, equals: .emailMessage)
               .lineLimit(3...6)
             } header: {
               Text("邮件")
@@ -143,6 +145,8 @@ struct BirthdayEditorView: View {
             focusedField = .name
           case .emailAddress:
             focusedField = .emailAddress
+          case .emailMessage:
+            focusedField = .emailMessage
           default:
             focusedField = nil
           }

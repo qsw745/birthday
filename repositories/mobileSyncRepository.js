@@ -46,6 +46,44 @@ function requireUsername(username) {
   }
 }
 
+function connectionErrorMetadata(error) {
+  const metadata = {
+    name: typeof error?.name === 'string' ? error.name : 'Error',
+  }
+  if (typeof error?.code === 'string') metadata.code = error.code
+  return metadata
+}
+
+function attachRollbackFailure(primaryError, rollbackError) {
+  if (!primaryError || (typeof primaryError !== 'object' && typeof primaryError !== 'function')) {
+    return
+  }
+  try {
+    Object.defineProperty(primaryError, 'rollbackFailure', {
+      configurable: true,
+      enumerable: false,
+      value: connectionErrorMetadata(rollbackError),
+    })
+  } catch {
+    // A frozen third-party error still remains the primary failure.
+  }
+}
+
+async function rollbackAfterFailure(connection, primaryError) {
+  try {
+    await connection.rollback()
+    return false
+  } catch (rollbackError) {
+    attachRollbackFailure(primaryError, rollbackError)
+    try {
+      if (typeof connection.destroy === 'function') connection.destroy()
+    } catch {
+      // The original error remains primary; a tainted connection is never released.
+    }
+    return true
+  }
+}
+
 function createMobileSyncRepository({
   pool,
   applyMobileOperationFn = applyMobileOperation,
@@ -54,6 +92,7 @@ function createMobileSyncRepository({
   async function snapshot(username) {
     requireUsername(username)
     const connection = await pool.getConnection()
+    let destroyed = false
     try {
       await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ', [])
       await connection.beginTransaction()
@@ -69,14 +108,10 @@ function createMobileSyncRepository({
       await connection.commit()
       return result
     } catch (error) {
-      try {
-        await connection.rollback()
-      } catch {
-        // Preserve the operation error while still releasing the connection.
-      }
+      destroyed = await rollbackAfterFailure(connection, error)
       throw error
     } finally {
-      connection.release()
+      if (!destroyed) connection.release()
     }
   }
 
@@ -129,6 +164,7 @@ function createMobileSyncRepository({
 
   async function recoverDuplicateOperation(deviceId, operation, duplicateError) {
     const connection = await pool.getConnection()
+    let destroyed = false
     try {
       await connection.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED', [])
       await connection.beginTransaction()
@@ -137,14 +173,10 @@ function createMobileSyncRepository({
       await connection.commit()
       return stored
     } catch (error) {
-      try {
-        await connection.rollback()
-      } catch {
-        // Preserve the read/replay error while still releasing the connection.
-      }
+      destroyed = await rollbackAfterFailure(connection, error)
       throw error
     } finally {
-      connection.release()
+      if (!destroyed) connection.release()
     }
   }
 
@@ -154,24 +186,21 @@ function createMobileSyncRepository({
       : normalizePushRequest({ operations: [operationInput] }).operations[0]
     const connection = await pool.getConnection()
     let duplicateError = null
+    let destroyed = false
     try {
       await connection.beginTransaction()
       const result = await applyMobileOperationFn(connection, { deviceId, operation })
       await connection.commit()
       return result
     } catch (error) {
-      try {
-        await connection.rollback()
-      } catch {
-        // Preserve the operation error while still releasing the connection.
-      }
+      destroyed = await rollbackAfterFailure(connection, error)
       if (error && error.mobileOperationResponseDuplicate) {
         duplicateError = error
       } else {
         throw error
       }
     } finally {
-      connection.release()
+      if (!destroyed) connection.release()
     }
 
     return recoverDuplicateOperation(deviceId, operation, duplicateError)

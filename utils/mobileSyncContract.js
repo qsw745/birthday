@@ -6,12 +6,16 @@ const LIMIT_PATTERN = /^[1-9]\d*$/
 const TIME_PATTERN = /^(\d{2}):(\d{2})(?::(\d{2}))?$/
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const UINT64_PATTERN = /^(?:0|[1-9]\d*)$/
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const STORAGE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
 const UINT64_MAX = 18446744073709551615n
 const MAX_TEXT_BYTES = 65535
 const MAX_LUNAR_YEAR_PROBES = 20
 const NORMALIZED_PUSH_OPERATION = Symbol('normalizedPushOperation')
+const DEFAULT_GRAPHEME_SEGMENTER = (
+  typeof Intl === 'object' && typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter('und', { granularity: 'grapheme' })
+    : null
+)
 
 class MobileSyncValidationError extends Error {
   constructor(code, message = code) {
@@ -49,8 +53,25 @@ function normalizeUInt64String(value) {
   return value
 }
 
-function characterLength(value) {
-  return Array.from(value).length
+function graphemeLength(value, segmenter = DEFAULT_GRAPHEME_SEGMENTER) {
+  if (!segmenter || typeof segmenter.segment !== 'function') {
+    const error = new Error('Intl.Segmenter is required for birthday validation')
+    error.code = 'grapheme_segmenter_unavailable'
+    throw error
+  }
+
+  let count = 0
+  for (const _part of segmenter.segment(value)) count += 1
+  return count
+}
+
+function isValidEmailAddress(emailAddress) {
+  const atIndex = emailAddress.indexOf('@')
+  return (
+    atIndex > 0
+    && atIndex === emailAddress.lastIndexOf('@')
+    && atIndex < emailAddress.length - 1
+  )
 }
 
 function calculateNextAvailableDate(payload, {
@@ -97,7 +118,7 @@ function normalizeBirthdayPayload(payload, dateOptions) {
   if (typeof rawName !== 'string') throw invalidBirthdayPayload()
 
   const name = rawName.trim()
-  if (!name || characterLength(name) > 64) throw invalidBirthdayPayload()
+  if (!name || graphemeLength(name) > 64) throw invalidBirthdayPayload()
   if (!Number.isInteger(lunarMonth) || lunarMonth < 1 || lunarMonth > 12) {
     throw invalidBirthdayPayload()
   }
@@ -123,14 +144,12 @@ function normalizeBirthdayPayload(payload, dateOptions) {
 
   let emailAddress = rawEmailAddress.trim()
   let emailMessage = rawEmailMessage
-  if (Buffer.byteLength(`${name}${emailMessage}`, 'utf8') > MAX_TEXT_BYTES) {
-    throw invalidBirthdayPayload()
-  }
   if (emailEnabled) {
     if (
       !emailAddress
-      || characterLength(emailAddress) > 128
-      || !EMAIL_PATTERN.test(emailAddress)
+      || graphemeLength(emailAddress) > 128
+      || !isValidEmailAddress(emailAddress)
+      || Buffer.byteLength(`${name}${emailMessage}`, 'utf8') > MAX_TEXT_BYTES
     ) {
       throw invalidBirthdayPayload()
     }
@@ -317,6 +336,7 @@ function serializeBirthdayRow(row) {
 module.exports = {
   MobileSyncValidationError,
   decimalString,
+  graphemeLength,
   invalidBirthdayPayload,
   isNormalizedPushOperation,
   normalizeBirthdayPayload,

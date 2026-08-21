@@ -21,6 +21,7 @@ enum BirthdayErrorMessage {
     case .invalidReminderTime: return "请选择有效提醒时间"
     case .noNotificationSelected: return "至少开启一种本地提醒"
     case .invalidEmail: return "请输入有效收件邮箱"
+    case .emailMessageTooLong: return "提醒内容过长"
     case nil: return "保存失败，输入内容已保留，请重试"
     }
   }
@@ -48,6 +49,7 @@ final class BirthdayEditorModel {
     case reminderTime
     case reminderOptions
     case emailAddress
+    case emailMessage
     case general
 
     var section: SectionLocation {
@@ -56,7 +58,7 @@ final class BirthdayEditorModel {
         return .basicInformation
       case .reminderTime, .reminderOptions:
         return .reminder
-      case .emailAddress:
+      case .emailAddress, .emailMessage:
         return .email
       case .general:
         return .general
@@ -166,6 +168,8 @@ final class BirthdayEditorModel {
       return .reminderOptions
     case .invalidEmail:
       return .emailAddress
+    case .emailMessageTooLong:
+      return .emailMessage
     case nil:
       return .general
     }

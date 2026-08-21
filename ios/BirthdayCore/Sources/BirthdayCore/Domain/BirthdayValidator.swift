@@ -1,7 +1,7 @@
 import Foundation
 
 public enum BirthdayValidationError: Error, Equatable {
-    case emptyName, nameTooLong, invalidLunarMonth, invalidLunarDay, invalidReminderTime, noNotificationSelected, invalidEmail
+    case emptyName, nameTooLong, invalidLunarMonth, invalidLunarDay, invalidReminderTime, noNotificationSelected, invalidEmail, emailMessageTooLong
 }
 
 public enum BirthdayValidator {
@@ -16,7 +16,15 @@ public enum BirthdayValidator {
 
         if draft.reminder.emailEnabled {
             let email = draft.reminder.emailAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard email.contains("@"), email.count <= 128 else { throw BirthdayValidationError.invalidEmail }
+            let emailParts = email.split(separator: "@", omittingEmptySubsequences: false)
+            guard email.count <= 128,
+                  emailParts.count == 2,
+                  !emailParts[0].isEmpty,
+                  !emailParts[1].isEmpty
+            else { throw BirthdayValidationError.invalidEmail }
+            guard (name + draft.reminder.emailMessage).utf8.count <= 65_535 else {
+                throw BirthdayValidationError.emailMessageTooLong
+            }
         }
     }
 }

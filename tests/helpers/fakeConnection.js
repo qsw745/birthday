@@ -77,6 +77,7 @@ class FakeDatabase {
     this.connections = []
     this.failures = []
     this.operationInsertRace = null
+    this.birthdayLocks = new Map()
   }
 
   failNext(matcher, error) {
@@ -87,6 +88,33 @@ class FakeDatabase {
     const connection = new FakeConnection({ database: this })
     this.connections.push(connection)
     return connection
+  }
+
+  async acquireBirthdayLock(id, connection) {
+    const key = String(id)
+    const current = this.birthdayLocks.get(key)
+    if (!current) {
+      this.birthdayLocks.set(key, { owner: connection, waiters: [] })
+      return
+    }
+    if (current.owner === connection) return
+
+    await new Promise(resolve => {
+      current.waiters.push({ connection, resolve })
+    })
+  }
+
+  releaseBirthdayLock(id, connection) {
+    const key = String(id)
+    const current = this.birthdayLocks.get(key)
+    assert.equal(current?.owner, connection, `birthday lock not owned: ${key}`)
+    const next = current.waiters.shift()
+    if (!next) {
+      this.birthdayLocks.delete(key)
+      return
+    }
+    current.owner = next.connection
+    next.resolve()
   }
 
   birthday(id) {
@@ -124,6 +152,8 @@ class FakeConnection {
     this.lifecycle = []
     this.transactionState = null
     this.released = false
+    this.destroyed = false
+    this.lockedBirthdayIds = new Set()
   }
 
   static withBirthday(row) {
@@ -172,17 +202,46 @@ class FakeConnection {
     this.lifecycle.push('commit')
     this.database.state = this.transactionState
     this.transactionState = null
+    this.releaseBirthdayLocks()
   }
 
   async rollback() {
     this.lifecycle.push('rollback')
     this.transactionState = null
+    this.releaseBirthdayLocks()
   }
 
   release() {
     assert.equal(this.released, false, 'connection released twice')
+    assert.equal(this.destroyed, false, 'destroyed connection returned to pool')
     this.lifecycle.push('release')
     this.released = true
+  }
+
+  destroy() {
+    assert.equal(this.released, false, 'released connection destroyed')
+    assert.equal(this.destroyed, false, 'connection destroyed twice')
+    this.lifecycle.push('destroy')
+    this.destroyed = true
+    this.transactionState = null
+    this.releaseBirthdayLocks()
+  }
+
+  releaseBirthdayLocks() {
+    for (const id of this.lockedBirthdayIds) {
+      this.database.releaseBirthdayLock(id, this)
+    }
+    this.lockedBirthdayIds.clear()
+  }
+
+  async lockBirthday(id) {
+    this.requireTransaction('SELECT birthday FOR UPDATE')
+    const key = String(id)
+    if (this.lockedBirthdayIds.has(key)) return
+    await this.database.acquireBirthdayLock(key, this)
+    this.lockedBirthdayIds.add(key)
+    // A locking read observes the latest state after any prior owner commits.
+    this.transactionState = clone(this.database.state)
   }
 
   joinedBirthday(id) {
@@ -224,6 +283,15 @@ class FakeConnection {
 
     if (/^SELECT [\s\S]+ FROM birthdays b LEFT JOIN email_reminders r ON r\.birthday_id = b\.id WHERE b\.id = \?(?: FOR UPDATE)?$/i.test(sql)) {
       assert.equal(params.length, 1)
+      const id = String(params[0])
+      if (/ FOR UPDATE$/i.test(sql)) {
+        await this.lockBirthday(id)
+      } else {
+        assert.ok(
+          this.lockedBirthdayIds.has(id),
+          'first birthday read must use FOR UPDATE',
+        )
+      }
       const row = this.joinedBirthday(params[0])
       return [[row].filter(Boolean)]
     }

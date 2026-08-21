@@ -12,6 +12,7 @@ const {
   validPayload,
 } = require('../helpers/fakeConnection')
 const {
+  graphemeLength,
   normalizeBirthdayPayload,
   normalizePushRequest,
 } = require('../../utils/mobileSyncContract')
@@ -116,13 +117,94 @@ test('semantic normalization finds the next real lunar day 30 instead of failing
   assert.equal(normalized.operations[0].payload.nextSolarDate, '2028-03-25 09:00:00')
 })
 
-test('payload validation enforces schema lengths, stable email syntax, notification range, and disabled-email clearing', () => {
+test('server validation matches iOS for trimmed minimal email addresses and common whitespace', () => {
+  for (const { name, emailAddress } of [
+    { name: '妈妈', emailAddress: 'a@b' },
+    { name: '\t\n妈妈\r ', emailAddress: ' \t a@b \n' },
+  ]) {
+    const normalized = normalizeBirthdayPayload(validPayload({
+      name,
+      emailEnabled: true,
+      emailAddress,
+    }))
+    assert.equal(normalized.name, '妈妈')
+    assert.equal(normalized.emailAddress, 'a@b')
+  }
+
+  for (const emailAddress of ['@b', 'a@', 'a@@b']) {
+    assert.throws(
+      () => normalizeBirthdayPayload(validPayload({ emailEnabled: true, emailAddress })),
+      error => error.code === 'invalid_birthday_payload',
+    )
+  }
+})
+
+test('server name and email limits count extended grapheme clusters like Swift String.count', () => {
+  const combining = 'e\u0301'
+  const family = '👨‍👩‍👧‍👦'
+  for (const name of [combining.repeat(64), family.repeat(64)]) {
+    assert.equal(graphemeLength(name), 64)
+    assert.doesNotThrow(() => normalizeBirthdayPayload(validPayload({ name })))
+  }
+  for (const name of [combining.repeat(65), family.repeat(65)]) {
+    assert.equal(graphemeLength(name), 65)
+    assert.throws(
+      () => normalizeBirthdayPayload(validPayload({ name })),
+      error => error.code === 'invalid_birthday_payload',
+    )
+  }
+
+  const email128 = `${combining.repeat(126)}@b`
+  const email129 = `${combining.repeat(127)}@b`
+  assert.equal(graphemeLength(email128), 128)
+  assert.equal(graphemeLength(email129), 129)
+  assert.doesNotThrow(() => normalizeBirthdayPayload(validPayload({
+    emailEnabled: true,
+    emailAddress: email128,
+  })))
+  assert.throws(
+    () => normalizeBirthdayPayload(validPayload({
+      emailEnabled: true,
+      emailAddress: email129,
+    })),
+    error => error.code === 'invalid_birthday_payload',
+  )
+})
+
+test('server fails explicitly if Intl.Segmenter is unavailable', () => {
+  assert.throws(
+    () => graphemeLength('妈妈', null),
+    error => error.code === 'grapheme_segmenter_unavailable',
+  )
+})
+
+test('email message TEXT limit matches the iOS UTF-8 contract only while email is enabled', () => {
+  assert.doesNotThrow(() => normalizeBirthdayPayload(validPayload({
+    name: 'M',
+    emailEnabled: true,
+    emailAddress: 'a@b',
+    emailMessage: 'a'.repeat(65534),
+  })))
+  assert.throws(
+    () => normalizeBirthdayPayload(validPayload({
+      name: 'M',
+      emailEnabled: true,
+      emailAddress: 'a@b',
+      emailMessage: 'a'.repeat(65535),
+    })),
+    error => error.code === 'invalid_birthday_payload',
+  )
+  assert.doesNotThrow(() => normalizeBirthdayPayload(validPayload({
+    name: 'M',
+    emailEnabled: false,
+    emailMessage: '🎂'.repeat(20000),
+  })))
+})
+
+test('payload validation enforces remaining field ranges and disabled-email clearing', () => {
   for (const payload of [
     validPayload({ name: '人'.repeat(65) }),
-    validPayload({ emailEnabled: true, emailAddress: 'a@b' }),
-    validPayload({ emailEnabled: true, emailAddress: 'a b@example.com' }),
     validPayload({ emailEnabled: true, emailAddress: `${'a'.repeat(117)}@example.com` }),
-    validPayload({ emailMessage: '🎂'.repeat(16384) }),
     validPayload({ lunarMonth: 13 }),
     validPayload({ lunarDay: 31 }),
     validPayload({ reminderTimeMinutes: 1440 }),
@@ -283,6 +365,83 @@ test('applyMobileOperation accepts the documented raw operation inside its calle
 
   assert.equal(result.status, 'applied')
   assert.equal(database.birthday(BIRTHDAY_ID).remindTime, '09:00:00')
+})
+
+test('FakeConnection rejects a first birthday read that omits FOR UPDATE', async () => {
+  const database = new FakeDatabase({ birthdays: [birthdayRow()] })
+  const connection = database.createConnection()
+  await connection.beginTransaction()
+
+  await assert.rejects(
+    connection.query(
+      `SELECT b.id
+         FROM birthdays b
+         LEFT JOIN email_reminders r ON r.birthday_id = b.id
+        WHERE b.id = ?`,
+      [BIRTHDAY_ID],
+    ),
+    /FOR UPDATE/,
+  )
+  await connection.rollback()
+})
+
+test('concurrent updates to one existing birthday serialize so only one baseVersion applies', async () => {
+  const database = new FakeDatabase({ birthdays: [birthdayRow({ version: '1' })] })
+  const repository = createRepository(database)
+  const first = operation({
+    baseVersion: '1',
+    payload: validPayload({ name: '第一项' }),
+  })
+  const second = operation({
+    operationId: SECOND_OPERATION_ID,
+    baseVersion: '1',
+    payload: validPayload({ name: '第二项' }),
+  })
+
+  const results = await Promise.all([
+    repository.applyOperation(DEVICE_ID, first),
+    repository.applyOperation(DEVICE_ID, second),
+  ])
+
+  assert.deepEqual(results.map(result => result.status).sort(), ['applied', 'conflict'])
+  const applied = results.find(result => result.status === 'applied')
+  assert.equal(database.birthday(BIRTHDAY_ID).name, applied.record.name)
+  assert.equal(database.birthday(BIRTHDAY_ID).version, '2')
+  assert.equal(database.state.changes.length, 1)
+  assert.equal(database.state.operations.size, 2)
+})
+
+test('concurrent creates for one missing birthday serialize the gap so only one applies', async () => {
+  const database = new FakeDatabase()
+  const repository = createRepository(database)
+  const results = await Promise.all([
+    repository.applyOperation(DEVICE_ID, operation({ payload: validPayload({ name: '第一项' }) })),
+    repository.applyOperation(DEVICE_ID, operation({
+      operationId: SECOND_OPERATION_ID,
+      payload: validPayload({ name: '第二项' }),
+    })),
+  ])
+
+  assert.deepEqual(results.map(result => result.status).sort(), ['applied', 'conflict'])
+  assert.equal(database.birthday(BIRTHDAY_ID).version, '1')
+  assert.equal(database.state.changes.length, 1)
+  assert.equal(database.state.operations.size, 2)
+})
+
+test('a duplicate-key error from a business INSERT is never recovered as operation idempotency', async () => {
+  const database = new FakeDatabase()
+  const duplicate = Object.assign(new Error('birthday uniqueness failed'), { code: 'ER_DUP_ENTRY' })
+  database.failNext(/^INSERT INTO birthdays /, duplicate)
+  const pool = new FakePool(database)
+  const repository = createMobileSyncRepository({ pool })
+
+  await assert.rejects(
+    repository.applyOperation(DEVICE_ID, operation()),
+    error => error === duplicate && error.mobileOperationResponseDuplicate !== true,
+  )
+  assert.equal(pool.getConnectionCalls, 1)
+  assert.equal(database.birthday(BIRTHDAY_ID), null)
+  assert.equal(database.operation(OPERATION_ID), null)
 })
 
 test('upsert updates an active birthday and disabling email removes its unique reminder in the same transaction', async () => {
@@ -531,6 +690,129 @@ test('transaction failures roll back all staged business writes, release the con
   assert.equal(database.birthday(BIRTHDAY_ID), null)
   assert.equal(database.state.changes.length, 0)
   assert.deepEqual(database.connections[0].lifecycle, ['begin', 'rollback', 'release'])
+})
+
+test('begin and commit failures preserve the primary error, roll back, and release a healthy connection', async () => {
+  for (const failurePoint of ['beginTransaction', 'commit']) {
+    const database = new FakeDatabase()
+    const primary = Object.assign(new Error(`${failurePoint} failed`), {
+      code: failurePoint === 'commit' ? 'ER_COMMIT' : 'ER_BEGIN',
+    })
+    const pool = {
+      async getConnection() {
+        const connection = database.createConnection()
+        if (failurePoint === 'beginTransaction') {
+          connection.beginTransaction = async function beginFailure() {
+            this.lifecycle.push('begin')
+            throw primary
+          }
+        } else {
+          connection.commit = async function commitFailure() {
+            this.lifecycle.push('commit')
+            throw primary
+          }
+        }
+        return connection
+      },
+    }
+
+    await assert.rejects(
+      createMobileSyncRepository({ pool }).applyOperation(DEVICE_ID, operation()),
+      error => error === primary,
+    )
+    assert.deepEqual(
+      database.connections[0].lifecycle,
+      failurePoint === 'beginTransaction'
+        ? ['begin', 'rollback', 'release']
+        : ['begin', 'commit', 'rollback', 'release'],
+    )
+    assert.equal(database.birthday(BIRTHDAY_ID), null)
+  }
+})
+
+test('rollback failure destroys the connection, keeps the primary error, and attaches only sanitized rollback metadata', async () => {
+  const database = new FakeDatabase()
+  const primary = new Error('business failure with private payload')
+  const rollbackFailure = Object.assign(new Error('rollback leaked secret'), { code: 'ER_ROLLBACK' })
+  database.failNext(/^INSERT INTO mobile_sync_changes /, primary)
+  const pool = {
+    async getConnection() {
+      const connection = database.createConnection()
+      connection.rollback = async function rollbackError() {
+        this.lifecycle.push('rollback')
+        throw rollbackFailure
+      }
+      connection.destroy = function destroyAfterRollbackFailure() {
+        this.lifecycle.push('destroy')
+        this.destroyed = true
+        this.transactionState = null
+        this.releaseBirthdayLocks()
+      }
+      return connection
+    },
+  }
+
+  await assert.rejects(
+    createMobileSyncRepository({ pool }).applyOperation(DEVICE_ID, operation()),
+    error => {
+      assert.equal(error, primary)
+      assert.deepEqual(error.rollbackFailure, { name: 'Error', code: 'ER_ROLLBACK' })
+      assert.equal(Object.getOwnPropertyDescriptor(error, 'rollbackFailure').enumerable, false)
+      assert.doesNotMatch(JSON.stringify(error), /rollback leaked secret/)
+      return true
+    },
+  )
+  assert.deepEqual(database.connections[0].lifecycle, ['begin', 'rollback', 'destroy'])
+  assert.equal(database.connections[0].released, false)
+  assert.equal(database.connections[0].destroyed, true)
+  assert.equal(database.birthday(BIRTHDAY_ID), null)
+})
+
+test('a committed first batch item replays exactly when the second item fails and the whole batch is retried', async () => {
+  const database = new FakeDatabase()
+  const pool = new FakePool(database)
+  const realRepository = createMobileSyncRepository({ pool })
+  const secondFailure = new Error('second operation failed')
+  let calls = 0
+  const repository = {
+    ...realRepository,
+    async applyOperation(...args) {
+      calls += 1
+      if (calls === 2) database.failNext(/^INSERT INTO mobile_sync_changes /, secondFailure)
+      return realRepository.applyOperation(...args)
+    },
+  }
+  const app = createPushApp({ repository }, { errorHandler: true })
+  const body = { operations: [
+    operation({ payload: validPayload({ name: '妈妈' }) }),
+    operation({
+      operationId: SECOND_OPERATION_ID,
+      entityId: SECOND_BIRTHDAY_ID,
+      payload: validPayload({ id: SECOND_BIRTHDAY_ID, name: '爸爸' }),
+    }),
+  ] }
+
+  const failed = await request(app).post('/api/mobile/sync/push').send(body)
+  assert.equal(failed.status, 503)
+  const storedFirst = database.operation(OPERATION_ID).response_json
+  assert.equal(storedFirst.status, 'applied')
+  assert.equal(database.operation(SECOND_OPERATION_ID), null)
+  assert.equal(database.state.changes.length, 1)
+
+  const retried = await request(app).post('/api/mobile/sync/push').send(body)
+  assert.equal(retried.status, 200)
+  assert.deepEqual(retried.body.results[0], storedFirst)
+  assert.equal(retried.body.results[1].status, 'applied')
+  assert.equal(database.birthday(BIRTHDAY_ID).version, '1')
+  assert.equal(database.birthday(SECOND_BIRTHDAY_ID).version, '1')
+  assert.equal(database.state.changes.length, 2)
+  assert.equal(database.state.operations.size, 2)
+  assert.deepEqual(database.connections.map(connection => connection.lifecycle), [
+    ['begin', 'commit', 'release'],
+    ['begin', 'rollback', 'release'],
+    ['begin', 'commit', 'release'],
+    ['begin', 'commit', 'release'],
+  ])
 })
 
 test('duplicate-key race rolls back the losing transaction and returns the committed same-device same-entity response from a new consistent read', async () => {
