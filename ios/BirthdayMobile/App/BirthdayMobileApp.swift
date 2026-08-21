@@ -23,21 +23,31 @@ private struct BirthdayAppBootstrapView: View {
   var body: some View {
     Group {
       if let container, let model {
-        AppFlowView(model: model)
-          .modelContainer(container)
-          .task { await model.reload() }
-          .onChange(of: scenePhase) { _, newPhase in
-            switch newPhase {
-            case .active:
-              Task { await model.reload() }
-            case .background:
-              model.lockForBackground()
-            case .inactive:
-              break
-            @unknown default:
-              break
-            }
+        ZStack {
+          AppFlowView(model: model)
+            .accessibilityHidden(scenePhase != .active)
+            .allowsHitTesting(scenePhase == .active)
+
+          if scenePhase != .active {
+            PrivacyShieldView()
+              .transition(.identity)
+              .zIndex(1)
           }
+        }
+        .modelContainer(container)
+        .task { await model.reload() }
+        .onChange(of: scenePhase) { _, newPhase in
+          switch newPhase {
+          case .active:
+            Task { await model.reload() }
+          case .background:
+            model.lockForBackground()
+          case .inactive:
+            break
+          @unknown default:
+            break
+          }
+        }
       } else if let initializationError {
         LocalDatabaseFailureView(message: initializationError) {
           initializationAttempt += 1
@@ -81,6 +91,27 @@ private struct BirthdayAppBootstrapView: View {
       model = nil
       initializationError = "无法打开本地生日资料。请确认设备有可用存储空间后重新尝试；若问题持续，请重新打开应用。"
     }
+  }
+}
+
+private struct PrivacyShieldView: View {
+  var body: some View {
+    VStack(spacing: 12) {
+      Image(systemName: "lock.shield.fill")
+        .font(.system(size: 36, weight: .medium))
+        .foregroundStyle(ModernAirTheme.tide)
+        .accessibilityHidden(true)
+      Text("岁时")
+        .font(.system(.title2, design: .rounded, weight: .semibold))
+        .foregroundStyle(ModernAirTheme.ink)
+      Text("生日资料已隐藏")
+        .font(.subheadline)
+        .foregroundStyle(ModernAirTheme.secondaryInk)
+    }
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel("岁时，生日资料已隐藏")
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background(ModernAirTheme.mist.ignoresSafeArea())
   }
 }
 

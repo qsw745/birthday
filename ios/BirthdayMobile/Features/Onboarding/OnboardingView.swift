@@ -30,6 +30,17 @@ struct OnboardingView: View {
             message: "允许通知后，提醒会直接安排在本机。是否开启由你决定，也可以稍后在系统设置中更改。"
           )
 
+          if let errorMessage = model.onboardingErrorMessage {
+            Label(errorMessage, systemImage: "exclamationmark.circle.fill")
+              .font(.subheadline)
+              .foregroundStyle(ModernAirTheme.ink)
+              .fixedSize(horizontal: false, vertical: true)
+              .padding(16)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .background(ModernAirTheme.glacier, in: RoundedRectangle(cornerRadius: 18))
+              .accessibilityElement(children: .combine)
+          }
+
           VStack(spacing: 12) {
             Button {
               complete(requestNotifications: true)

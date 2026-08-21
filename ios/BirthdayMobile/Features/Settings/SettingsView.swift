@@ -58,7 +58,29 @@ struct SettingsView: View {
           )
           .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
         }
-        .disabled(model.isRebuildingReminders)
+        .disabled(
+          model.isRebuildingReminders || model.isRequestingNotificationAuthorization)
+
+        if canRequestNotificationAuthorization {
+          Button {
+            Task { await model.requestNotificationAuthorizationFromSettings() }
+          } label: {
+            HStack(spacing: 9) {
+              if model.isRequestingNotificationAuthorization {
+                ProgressView()
+                  .accessibilityHidden(true)
+              } else {
+                Image(systemName: "bell.badge")
+                  .accessibilityHidden(true)
+              }
+              Text(
+                model.isRequestingNotificationAuthorization ? "正在请求通知权限" : "开启通知")
+            }
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+          }
+          .disabled(
+            model.isRequestingNotificationAuthorization || model.isRebuildingReminders)
+        }
 
         if model.notificationHealth.state == .permissionDenied {
           Link(destination: URL(string: UIApplication.openSettingsURLString)!) {
@@ -80,6 +102,8 @@ struct SettingsView: View {
         .frame(minHeight: 44)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("服务器同步将在后续步骤启用")
+        .accessibilityValue("不可用")
+        .accessibilityAddTraits(.isStaticText)
       }
     }
     .listStyle(.insetGrouped)
@@ -128,7 +152,8 @@ struct SettingsView: View {
     case .notRequested:
       "尚未请求通知权限"
     case .failed:
-      "本地提醒安排失败"
+      model.notificationHealth.errorCategory == "authorization_request_failed"
+        ? "通知权限请求失败" : "本地提醒安排失败"
     }
   }
 
@@ -162,6 +187,8 @@ struct SettingsView: View {
 
   private var failureDetail: String {
     switch model.notificationHealth.errorCategory {
+    case "local_read_failed":
+      "无法读取最新生日资料，现有提醒没有更改。请稍后重试。"
     case "plan_failed":
       "无法计算提醒日期。请检查生日资料后重试。"
     case "authorization_request_failed":
@@ -169,6 +196,14 @@ struct SettingsView: View {
     default:
       "系统未能安排提醒，请再次尝试。"
     }
+  }
+
+  private var canRequestNotificationAuthorization: Bool {
+    if model.notificationHealth.state == .notRequested {
+      return true
+    }
+    return model.notificationHealth.state == .failed
+      && model.notificationHealth.errorCategory == "authorization_request_failed"
   }
 
   private var coverageText: String {

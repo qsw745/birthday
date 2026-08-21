@@ -7,12 +7,14 @@ private actor ReminderRebuildCoordinator {
     let records: [BirthdayRecord]
     let now: Date
     let timeZone: TimeZone
+    let generation: UInt64
   }
 
   private let planner: ReminderPlanner
   private let scheduler: any NotificationScheduling
   private var pendingRequest: Request?
   private var runningTask: Task<Void, Never>?
+  private var latestRequestedGeneration: UInt64 = 0
   private var latestHealth = NotificationHealth(
     state: .notRequested,
     scheduledCount: 0,
@@ -25,10 +27,28 @@ private actor ReminderRebuildCoordinator {
     self.scheduler = scheduler
   }
 
-  func rebuild(records: [BirthdayRecord], now: Date, timeZone: TimeZone) async
+  func rebuild(
+    records: [BirthdayRecord],
+    now: Date,
+    timeZone: TimeZone,
+    generation: UInt64
+  ) async
     -> NotificationHealth
   {
-    pendingRequest = Request(records: records, now: now, timeZone: timeZone)
+    guard generation >= latestRequestedGeneration else {
+      if let runningTask {
+        await runningTask.value
+      }
+      return latestHealth
+    }
+
+    latestRequestedGeneration = generation
+    pendingRequest = Request(
+      records: records,
+      now: now,
+      timeZone: timeZone,
+      generation: generation
+    )
 
     if runningTask == nil {
       runningTask = Task { await drainPendingRequests() }
@@ -51,14 +71,21 @@ private actor ReminderRebuildCoordinator {
           timeZone: request.timeZone
         )
       } catch {
-        latestHealth = failedHealth(category: "plan_failed")
+        if request.generation == latestRequestedGeneration {
+          latestHealth = failedHealth(category: "plan_failed")
+        }
         continue
       }
 
+      let result: NotificationHealth
       do {
-        latestHealth = try await scheduler.apply(plan)
+        result = try await scheduler.apply(plan)
       } catch {
-        latestHealth = failedHealth(category: "schedule_failed")
+        result = failedHealth(category: "schedule_failed")
+      }
+
+      if request.generation == latestRequestedGeneration {
+        latestHealth = result
       }
     }
 
@@ -110,19 +137,22 @@ final class AppModel {
   private(set) var loadState: LoadState
   private(set) var hasCompletedOnboarding: Bool
   private(set) var lockEnabled: Bool
-  private(set) var isUnlocked: Bool
   private(set) var unlockState: UnlockState = .idle
   private(set) var isCompletingOnboarding = false
+  private(set) var onboardingErrorMessage: String?
+  private(set) var isRequestingNotificationAuthorization = false
   private(set) var notificationHealth = NotificationHealth(
     state: .notRequested,
     scheduledCount: 0,
     coverageEnd: nil,
     errorCategory: nil
   )
-  private(set) var isRebuildingReminders = false
 
   let store: BirthdayStore
 
+  private var appLockSession: AppLockSessionState
+  private var reminderGeneration: UInt64 = 0
+  private var reminderOperationsInFlight = 0
   private let preferences: UserDefaults
   private let authenticator: any AppLockAuthenticating
   private let requestNotificationAuthorization: @MainActor () async throws -> Bool
@@ -143,6 +173,10 @@ final class AppModel {
     loadState == .loaded && records.isEmpty
   }
 
+  var isUnlocked: Bool {
+    appLockSession.isUnlocked
+  }
+
   var launchState: AppLaunchState {
     if !hasCompletedOnboarding {
       return .onboarding
@@ -155,6 +189,10 @@ final class AppModel {
 
   var isUnlocking: Bool {
     unlockState == .authenticating
+  }
+
+  var isRebuildingReminders: Bool {
+    reminderOperationsInFlight > 0
   }
 
   init(
@@ -191,76 +229,132 @@ final class AppModel {
     let storedLockEnabled = preferences.bool(forKey: PreferenceKey.lockEnabled)
     hasCompletedOnboarding = preferences.bool(forKey: PreferenceKey.hasCompletedOnboarding)
     lockEnabled = storedLockEnabled
-    isUnlocked = !storedLockEnabled
+    appLockSession = AppLockSessionState(lockEnabled: storedLockEnabled)
   }
 
   func reload() async {
+    let generation = nextReminderGeneration()
+    beginReminderOperation()
+    defer { endReminderOperation() }
     loadState = .loading
 
     do {
-      records = try await store.activeBirthdays()
+      let snapshot = try await store.activeBirthdays()
+      records = snapshot
       loadState = .loaded
-      await rebuildReminders()
+      await rebuildReminderSnapshot(snapshot, generation: generation)
     } catch {
       loadState = .failed(
         message: "无法读取本地生日资料。请重试；若仍然失败，请重新打开应用。"
       )
+      if generation == reminderGeneration {
+        notificationHealth = failedNotificationHealth(category: "local_read_failed")
+      }
     }
   }
 
   func completeOnboarding(requestNotifications: Bool) async {
-    guard !hasCompletedOnboarding, !isCompletingOnboarding else { return }
-    isCompletingOnboarding = true
+    guard
+      !hasCompletedOnboarding,
+      !isCompletingOnboarding,
+      !isRequestingNotificationAuthorization
+    else { return }
 
-    var shouldRebuildAfterAuthorization = requestNotifications
+    isCompletingOnboarding = true
+    onboardingErrorMessage = nil
+
     if requestNotifications {
+      isRequestingNotificationAuthorization = true
+      let generation = nextReminderGeneration()
+
+      let isAuthorized: Bool
       do {
-        _ = try await requestNotificationAuthorization()
+        isAuthorized = try await requestNotificationAuthorization()
       } catch {
-        shouldRebuildAfterAuthorization = false
-        notificationHealth = NotificationHealth(
-          state: .failed,
-          scheduledCount: 0,
-          coverageEnd: nil,
-          errorCategory: "authorization_request_failed"
-        )
+        if generation == reminderGeneration {
+          notificationHealth = failedNotificationHealth(category: "authorization_request_failed")
+        }
+        onboardingErrorMessage = "通知权限请求未完成。请重试，或选择暂不开启。"
+        isRequestingNotificationAuthorization = false
+        isCompletingOnboarding = false
+        return
       }
+
+      completeOnboardingState()
+      if isAuthorized {
+        await rebuildKnownSnapshot(records, generation: generation)
+      } else if generation == reminderGeneration {
+        notificationHealth = permissionDeniedNotificationHealth()
+      }
+      isRequestingNotificationAuthorization = false
+      isCompletingOnboarding = false
+      return
     }
 
-    preferences.set(true, forKey: PreferenceKey.hasCompletedOnboarding)
-    hasCompletedOnboarding = true
-    isUnlocked = !lockEnabled
+    completeOnboardingState()
     isCompletingOnboarding = false
+  }
 
-    if shouldRebuildAfterAuthorization {
-      await rebuildReminders()
+  func requestNotificationAuthorizationFromSettings() async {
+    guard !isRequestingNotificationAuthorization else { return }
+    isRequestingNotificationAuthorization = true
+    let generation = nextReminderGeneration()
+    defer { isRequestingNotificationAuthorization = false }
+
+    do {
+      if try await requestNotificationAuthorization() {
+        await rebuildFreshSnapshot(generation: generation, reportReadFailure: true)
+      } else if generation == reminderGeneration {
+        notificationHealth = permissionDeniedNotificationHealth()
+      }
+    } catch {
+      if generation == reminderGeneration {
+        notificationHealth = failedNotificationHealth(category: "authorization_request_failed")
+      }
     }
   }
 
+  private func completeOnboardingState() {
+    preferences.set(true, forKey: PreferenceKey.hasCompletedOnboarding)
+    hasCompletedOnboarding = true
+    onboardingErrorMessage = nil
+  }
+
   func unlock() async {
-    guard launchState == .locked, !isUnlocking else { return }
+    guard
+      launchState == .locked,
+      !isUnlocking,
+      let attempt = appLockSession.beginAuthentication()
+    else { return }
+
     unlockState = .authenticating
 
     do {
-      if try await authenticator.unlock(reason: "解锁生日资料") {
-        isUnlocked = true
+      let succeeded = try await authenticator.unlock(reason: "解锁生日资料")
+      guard appLockSession.completeAuthentication(attempt, succeeded: succeeded) else { return }
+
+      if succeeded {
         unlockState = .idle
       } else {
         unlockState = .failed(message: "身份验证未通过。请再次验证 Face ID 或设备密码。")
       }
     } catch AppLockError.cancelled {
+      guard appLockSession.completeAuthentication(attempt, succeeded: false) else { return }
       unlockState = .failed(message: "已取消解锁。需要时可再次验证。")
     } catch AppLockError.unavailable {
+      guard appLockSession.completeAuthentication(attempt, succeeded: false) else { return }
       unlockState = .failed(message: "此设备当前无法使用 Face ID 或设备密码，请检查系统设置后重试。")
     } catch AppLockError.evaluationFailed {
+      guard appLockSession.completeAuthentication(attempt, succeeded: false) else { return }
       unlockState = .failed(message: "未能验证身份。请再次尝试 Face ID 或设备密码。")
     } catch {
+      guard appLockSession.completeAuthentication(attempt, succeeded: false) else { return }
       unlockState = .failed(message: "解锁失败。请稍后重试。")
     }
   }
 
   func lockForBackground() {
-    isUnlocked = false
+    appLockSession.enterBackground(lockEnabled: lockEnabled)
     unlockState = .idle
   }
 
@@ -268,20 +362,78 @@ final class AppModel {
     guard lockEnabled != isEnabled else { return }
     lockEnabled = isEnabled
     preferences.set(isEnabled, forKey: PreferenceKey.lockEnabled)
+    appLockSession.setLockEnabled(isEnabled)
 
     if !isEnabled {
-      isUnlocked = true
       unlockState = .idle
     }
   }
 
   func rebuildReminders() async {
-    isRebuildingReminders = true
-    notificationHealth = await reminderRebuildCoordinator.rebuild(
-      records: records,
+    let generation = nextReminderGeneration()
+    await rebuildFreshSnapshot(generation: generation, reportReadFailure: true)
+  }
+
+  private func rebuildFreshSnapshot(generation: UInt64, reportReadFailure: Bool) async {
+    beginReminderOperation()
+    defer { endReminderOperation() }
+
+    do {
+      let snapshot = try await store.activeBirthdays()
+      await rebuildReminderSnapshot(snapshot, generation: generation)
+    } catch {
+      if reportReadFailure, generation == reminderGeneration {
+        notificationHealth = failedNotificationHealth(category: "local_read_failed")
+      }
+    }
+  }
+
+  private func rebuildKnownSnapshot(_ snapshot: [BirthdayRecord], generation: UInt64) async {
+    beginReminderOperation()
+    defer { endReminderOperation() }
+    await rebuildReminderSnapshot(snapshot, generation: generation)
+  }
+
+  private func rebuildReminderSnapshot(_ snapshot: [BirthdayRecord], generation: UInt64) async {
+    let health = await reminderRebuildCoordinator.rebuild(
+      records: snapshot,
       now: now(),
-      timeZone: timeZone()
+      timeZone: timeZone(),
+      generation: generation
     )
-    isRebuildingReminders = false
+    if generation == reminderGeneration {
+      notificationHealth = health
+    }
+  }
+
+  private func nextReminderGeneration() -> UInt64 {
+    reminderGeneration &+= 1
+    return reminderGeneration
+  }
+
+  private func beginReminderOperation() {
+    reminderOperationsInFlight += 1
+  }
+
+  private func endReminderOperation() {
+    reminderOperationsInFlight = max(0, reminderOperationsInFlight - 1)
+  }
+
+  private func failedNotificationHealth(category: String) -> NotificationHealth {
+    NotificationHealth(
+      state: .failed,
+      scheduledCount: 0,
+      coverageEnd: nil,
+      errorCategory: category
+    )
+  }
+
+  private func permissionDeniedNotificationHealth() -> NotificationHealth {
+    NotificationHealth(
+      state: .permissionDenied,
+      scheduledCount: 0,
+      coverageEnd: nil,
+      errorCategory: nil
+    )
   }
 }
