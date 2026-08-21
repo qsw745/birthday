@@ -43,6 +43,26 @@ test('mobile auth reports a valid-but-unmatched bearer token as expired', async 
   assert.deepEqual(res.body, { error: 'mobile_access_expired' })
 })
 
+test('mobile auth propagates repository failures without returning 401 or calling next', async () => {
+  const failure = new Error('database unavailable')
+  const middleware = createMobileAuth({
+    sessions: { findByAccessToken: async () => { throw failure } },
+  })
+  const req = { headers: { authorization: 'Bearer opaque-token' } }
+  const res = createResponse()
+  let nextCalled = false
+
+  await assert.rejects(
+    middleware(req, res, () => { nextCalled = true }),
+    error => error === failure,
+  )
+
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.body, null)
+  assert.equal(nextCalled, false)
+  assert.equal(req.mobileSession, undefined)
+})
+
 test('mobile auth attaches the resolved session and calls next for exactly formatted bearer input', async () => {
   const session = { device_id: 'device-1', username: 'admin' }
   const middleware = createMobileAuth({ sessions: { findByAccessToken: async () => session } })

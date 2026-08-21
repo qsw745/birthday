@@ -16,6 +16,24 @@ function createPool(results = []) {
   }
 }
 
+function createRefreshPool(session) {
+  const calls = []
+  return {
+    calls,
+    async execute(sql, params) {
+      calls.push({ sql, params })
+      const suppliedRefreshHash = params[5]
+      const currentTime = params[6]
+      const checksRevocation = /revoked_at\s+IS\s+NULL/i.test(sql)
+      const checksStrictExpiry = /refresh_expires_at\s*>\s*\?/i.test(sql)
+      const tokenMatches = suppliedRefreshHash === session.refreshTokenHash
+      const isUnrevoked = !checksRevocation || session.revokedAt === null
+      const isUnexpired = !checksStrictExpiry || session.refreshExpiresAt > currentTime
+      return [{ affectedRows: tokenMatches && isUnrevoked && isUnexpired ? 1 : 0 }]
+    },
+  }
+}
+
 const originalPair = {
   accessToken: 'access-token-that-must-not-be-stored',
   refreshToken: 'refresh-token-that-must-not-be-stored',
@@ -100,20 +118,48 @@ test('rotateByRefreshToken atomically replaces both hashes and both expiry times
   assert.ok(params.every(value => value !== originalPair.refreshToken && value !== nextPair.accessToken && value !== nextPair.refreshToken))
 })
 
-for (const reason of ['unknown', 'revoked', 'expired']) {
-  test(`rotateByRefreshToken returns null for ${reason} refresh credentials`, async () => {
-    const pool = createPool([{ affectedRows: 0 }])
-    const sessions = createMobileSessionRepository({ pool })
-
-    const result = await sessions.rotateByRefreshToken(
-      originalPair.refreshToken,
-      originalPair,
-      new Date('2026-08-21T00:10:00Z'),
-    )
-
-    assert.equal(result, null)
-  })
+const refreshNow = new Date('2026-08-21T00:10:00Z')
+const validRefreshSession = {
+  refreshTokenHash: digest(originalPair.refreshToken),
+  revokedAt: null,
+  refreshExpiresAt: new Date('2026-08-21T00:10:01Z'),
 }
+
+test('rotateByRefreshToken rotates a matching unrevoked unexpired refresh credential', async () => {
+  const sessions = createMobileSessionRepository({ pool: createRefreshPool(validRefreshSession) })
+
+  const result = await sessions.rotateByRefreshToken(originalPair.refreshToken, originalPair, refreshNow)
+
+  assert.notEqual(result, null)
+})
+
+test('rotateByRefreshToken returns null for an unknown refresh credential', async () => {
+  const sessions = createMobileSessionRepository({ pool: createRefreshPool(validRefreshSession) })
+
+  const result = await sessions.rotateByRefreshToken('unknown-refresh-token', originalPair, refreshNow)
+
+  assert.equal(result, null)
+})
+
+test('rotateByRefreshToken returns null for a revoked refresh credential', async () => {
+  const sessions = createMobileSessionRepository({
+    pool: createRefreshPool({ ...validRefreshSession, revokedAt: new Date('2026-08-01T00:00:00Z') }),
+  })
+
+  const result = await sessions.rotateByRefreshToken(originalPair.refreshToken, originalPair, refreshNow)
+
+  assert.equal(result, null)
+})
+
+test('rotateByRefreshToken returns null when refresh expiry equals the current time', async () => {
+  const sessions = createMobileSessionRepository({
+    pool: createRefreshPool({ ...validRefreshSession, refreshExpiresAt: refreshNow }),
+  })
+
+  const result = await sessions.rotateByRefreshToken(originalPair.refreshToken, originalPair, refreshNow)
+
+  assert.equal(result, null)
+})
 
 test('revoke scopes the device update to its owning username', async () => {
   const now = new Date('2026-08-21T00:10:00Z')
