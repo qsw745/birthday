@@ -1,6 +1,7 @@
 const { generateUUID } = require('../utils/helpers')
 const {
   INT64_MAX_DECIMAL,
+  assertAPIBirthdayChange,
   decimalString,
   invalidBirthdayPayload,
   isNormalizedPushOperation,
@@ -222,6 +223,12 @@ async function softDeleteBirthday(connection, operation, version) {
 }
 
 async function appendChange(connection, operation, record) {
+  assertAPIBirthdayChange({
+    entityId: operation.entityId,
+    operation: operation.type,
+    entityVersion: record.version,
+    record,
+  })
   await connection.query(
     `INSERT INTO mobile_sync_changes
       (entity_type, entity_id, operation, entity_version, record_json)

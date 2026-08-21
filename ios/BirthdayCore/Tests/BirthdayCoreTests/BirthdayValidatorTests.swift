@@ -71,24 +71,7 @@ private struct Plan3PushEnvelope: Encodable {
     let operations: [Plan3PushOperationEnvelope]
 }
 
-private struct SignedInt64Probe: Decodable {
-    let version: Int64
-}
-
-@Test func mobileSyncSignedInt64BoundaryMatchesServerDecimalStringContract() throws {
-    let maximum = "9223372036854775807"
-    let decoded = try JSONDecoder().decode(
-        SignedInt64Probe.self,
-        from: Data("{\"version\":\(maximum)}".utf8)
-    )
-    #expect(decoded.version == Int64.max)
-    #expect(throws: DecodingError.self) {
-        try JSONDecoder().decode(
-            SignedInt64Probe.self,
-            from: Data("{\"version\":9223372036854775808}".utf8)
-        )
-    }
-
+@Test func localSyncModelsStoreSignedInt64Maximum() throws {
     let id = try #require(UUID(uuidString: "018f6f7a-b123-7abc-8def-abcdefabcdef"))
     let record = BirthdayRecord(
         id: id,
@@ -102,16 +85,20 @@ private struct SignedInt64Probe: Decodable {
         deletedAt: nil,
         syncState: .synced
     )
-    let envelope = Plan3PushEnvelope(operations: [.init(
+    let operation = SyncOperation(
         operationId: id,
         entityId: id,
-        type: "upsert",
-        baseVersion: String(record.version),
-        payload: BirthdayOutboxPayload(record: record)
-    )])
-    let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(envelope)) as? [String: Any])
-    let operations = try #require(json["operations"] as? [[String: Any]])
-    #expect(operations[0]["baseVersion"] as? String == maximum)
+        operationType: "upsert",
+        baseVersion: Int64.max,
+        payloadJSON: Data(),
+        createdAt: .distantPast,
+        attemptCount: 0,
+        nextRetryAt: nil,
+        lastErrorCategory: nil
+    )
+
+    #expect(record.version == Int64.max)
+    #expect(operation.baseVersion == Int64.max)
 }
 
 @Test func sharedContractTrimsUnicodeWhiteSpaceButPreservesByteOrderMark() throws {

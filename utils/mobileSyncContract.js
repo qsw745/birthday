@@ -8,6 +8,7 @@ const TIME_PATTERN = /^(\d{2}):(\d{2})(?::(\d{2}))?$/
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const EDGE_WHITE_SPACE_PATTERN = /^(?:\p{White_Space})+|(?:\p{White_Space})+$/gu
 const STORAGE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
+const ISO8601_OFFSET_PATTERN = /(?:Z|([+-])(\d{2}):?(\d{2}))$/i
 const INT64_MAX = BigInt(MOBILE_API_CONTRACT.limits.signedInt64Maximum)
 const INT64_MAX_DECIMAL = INT64_MAX.toString(10)
 const MAX_ENABLED_EMAIL_STORAGE_BYTES = MOBILE_API_CONTRACT.limits.enabledEmailStorageBytes
@@ -53,15 +54,120 @@ function normalizeUUID(value) {
   return value.toLowerCase()
 }
 
+function isUUID(value) {
+  return typeof value === 'string' && UUID_PATTERN.test(value)
+}
+
+function isCanonicalInt64String(value) {
+  return typeof value === 'string'
+    && DECIMAL_INT64_PATTERN.test(value)
+    && BigInt(value) <= INT64_MAX
+}
+
 function normalizeInt64String(value) {
-  if (
-    typeof value !== 'string'
-    || !DECIMAL_INT64_PATTERN.test(value)
-    || BigInt(value) > INT64_MAX
-  ) {
+  if (!isCanonicalInt64String(value)) {
     throw invalidBirthdayPayload()
   }
   return value
+}
+
+function isStrictISO8601Instant(value) {
+  if (typeof value !== 'string') return false
+  const offset = value.match(ISO8601_OFFSET_PATTERN)
+  if (!offset) return false
+  if (offset[1] && (Number(offset[2]) > 23 || Number(offset[3]) > 59)) return false
+  return moment.parseZone(value, moment.ISO_8601, true).isValid()
+}
+
+function invalidAPIRecord(message = 'invalid API birthday record') {
+  throw new MobileSyncDataConsistencyError(message)
+}
+
+function hasExactFields(record, expectedFields) {
+  const actualFields = Object.keys(record)
+  return actualFields.length === expectedFields.length
+    && expectedFields.every(field => Object.hasOwn(record, field))
+}
+
+function validateAPIBirthdayDTO(record) {
+  const fields = MOBILE_API_CONTRACT.dtoFields.birthday
+  if (!isPlainObject(record) || !hasExactFields(record, fields)) invalidAPIRecord()
+  if (!isUUID(record.id)) invalidAPIRecord('birthday id is invalid')
+  if (typeof record.name !== 'string') invalidAPIRecord('birthday name is invalid')
+
+  const name = trimUnicodeWhiteSpace(record.name)
+  if (!name || !fitsUTF8MB4Column(name, 64)) {
+    invalidAPIRecord('birthday name is invalid')
+  }
+  if (!Number.isInteger(record.lunarMonth) || record.lunarMonth < 1 || record.lunarMonth > 12) {
+    invalidAPIRecord('birthday lunar month is invalid')
+  }
+  if (!Number.isInteger(record.lunarDay) || record.lunarDay < 1 || record.lunarDay > 30) {
+    invalidAPIRecord('birthday lunar day is invalid')
+  }
+  if (
+    typeof record.isLeapMonth !== 'boolean'
+    || typeof record.notifyDayBefore !== 'boolean'
+    || typeof record.notifySameDay !== 'boolean'
+    || typeof record.emailEnabled !== 'boolean'
+  ) {
+    invalidAPIRecord('birthday boolean field is invalid')
+  }
+  if (!record.notifyDayBefore && !record.notifySameDay) {
+    invalidAPIRecord('birthday notification channel is required')
+  }
+  if (
+    !Number.isInteger(record.reminderTimeMinutes)
+    || record.reminderTimeMinutes < 0
+    || record.reminderTimeMinutes >= 1440
+  ) {
+    invalidAPIRecord('birthday reminder time is invalid')
+  }
+  if (typeof record.emailAddress !== 'string' || typeof record.emailMessage !== 'string') {
+    invalidAPIRecord('birthday email field is invalid')
+  }
+
+  if (record.emailEnabled) {
+    const emailAddress = trimUnicodeWhiteSpace(record.emailAddress)
+    if (
+      !emailAddress
+      || !fitsUTF8MB4Column(emailAddress, 128)
+      || !isValidEmailAddress(emailAddress)
+      || Buffer.byteLength(`${name}${record.emailMessage}`, 'utf8') > MAX_ENABLED_EMAIL_STORAGE_BYTES
+    ) {
+      invalidAPIRecord('birthday enabled email is invalid')
+    }
+  } else if (record.emailAddress !== '' || record.emailMessage !== '') {
+    invalidAPIRecord('birthday disabled email must be empty')
+  }
+
+  if (record.nextSolarDate !== null && !isStrictISO8601Instant(record.nextSolarDate)) {
+    invalidAPIRecord('birthday next date is invalid')
+  }
+  if (!isCanonicalInt64String(record.version)) invalidAPIRecord('birthday version is invalid')
+  if (!isStrictISO8601Instant(record.createdAt) || !isStrictISO8601Instant(record.updatedAt)) {
+    invalidAPIRecord('birthday audit date is invalid')
+  }
+  if (record.deletedAt !== null && !isStrictISO8601Instant(record.deletedAt)) {
+    invalidAPIRecord('birthday deleted date is invalid')
+  }
+  return record
+}
+
+function assertAPIBirthdayChange({ entityId, operation, entityVersion, record }) {
+  validateAPIBirthdayDTO(record)
+  if (
+    !isUUID(entityId)
+    || record.id !== entityId
+    || !isCanonicalInt64String(entityVersion)
+    || record.version !== entityVersion
+    || (operation !== 'upsert' && operation !== 'delete')
+    || (operation === 'upsert' && record.deletedAt !== null)
+    || (operation === 'delete' && record.deletedAt === null)
+  ) {
+    invalidAPIRecord('change metadata does not match its birthday record')
+  }
+  return record
 }
 
 function graphemeLength(value, segmenter = DEFAULT_GRAPHEME_SEGMENTER) {
@@ -349,7 +455,7 @@ function emailMessage(row) {
 }
 
 function serializeBirthdayRow(row) {
-  return {
+  const record = {
     id: row.id,
     name: row.name,
     lunarMonth: Number(row.lunarMonth),
@@ -367,6 +473,7 @@ function serializeBirthdayRow(row) {
     updatedAt: toISO(row.updated_at),
     deletedAt: toISO(row.deleted_at),
   }
+  return validateAPIBirthdayDTO(record)
 }
 
 module.exports = {
@@ -374,6 +481,7 @@ module.exports = {
   MAX_PUSH_REQUEST_BYTES,
   MobileSyncDataConsistencyError,
   MobileSyncValidationError,
+  assertAPIBirthdayChange,
   decimalString,
   graphemeLength,
   invalidBirthdayPayload,
@@ -384,4 +492,5 @@ module.exports = {
   normalizePushRequest,
   serializeBirthdayRow,
   timeToMinutes,
+  validateAPIBirthdayDTO,
 }

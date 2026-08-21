@@ -400,14 +400,28 @@ test('pull accepts JSON-column objects and JSON strings without consulting mutab
 for (const [name, mutate] of [
   ['malformed JSON', row => { row.record_json = '{' }],
   ['non-object JSON', row => { row.record_json = [] }],
+  ['invalid entity UUID even when record id matches', row => {
+    row.entity_id = 'not-a-uuid'
+    row.record_json.id = 'not-a-uuid'
+  }],
   ['record id mismatch', row => { row.record_json.id = BIRTHDAY_ID }],
   ['record version mismatch', row => { row.record_json.version = '9' }],
   ['incomplete birthday DTO', row => { delete row.record_json.name }],
+  ['birthday DTO with an extra field', row => { row.record_json.internalOnly = true }],
+  ['numeric birthday name', row => { row.record_json.name = 42 }],
+  ['string birthday boolean', row => { row.record_json.notifySameDay = 'true' }],
+  ['birthday lunar range violation', row => { row.record_json.lunarMonth = 13 }],
+  ['birthday reminder range violation', row => { row.record_json.reminderTimeMinutes = 1440 }],
+  ['birthday invalid ISO date suffix', row => { row.record_json.updatedAt += 'junk' }],
+  ['birthday enabled-email semantic violation', row => { row.record_json.emailAddress = 'a@@b' }],
+  ['unknown operation', row => { row.operation = 'restore' }],
   ['delete without tombstone', row => { row.operation = 'delete' }],
   ['delete missing deletedAt', row => { row.operation = 'delete'; delete row.record_json.deletedAt }],
   ['upsert carrying tombstone', row => { row.record_json.deletedAt = '2026-08-21T02:30:00.000Z' }],
   ['noncanonical sequence', row => { row.seq = '011' }],
+  ['numeric sequence', row => { row.seq = 11 }],
   ['sequence above Int64', row => { row.seq = INT64_MAX_PLUS_ONE }],
+  ['numeric entity version', row => { row.entity_version = 11 }],
   ['negative entity version', row => { row.entity_version = '-1' }],
   ['entity version above Int64', row => { row.entity_version = INT64_MAX_PLUS_ONE }],
 ]) {

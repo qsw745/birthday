@@ -1,4 +1,5 @@
 const {
+  assertAPIBirthdayChange,
   decimalString,
   isNormalizedPushOperation,
   MobileSyncDataConsistencyError,
@@ -8,7 +9,6 @@ const {
   serializeBirthdayRow,
 } = require('../utils/mobileSyncContract')
 const { MOBILE_API_CONTRACT } = require('../utils/mobileApiContract')
-const BIRTHDAY_DTO_FIELDS = MOBILE_API_CONTRACT.dtoFields.birthday
 const {
   applyMobileOperation,
   readStoredOperation,
@@ -61,27 +61,23 @@ function parseChangeRecord(value) {
   return value
 }
 
-function serializeChangeRow(row) {
-  const seq = decimalString(row.seq, 'sequence')
-  const entityVersion = decimalString(row.entity_version, 'entity version')
-  const record = parseChangeRecord(row.record_json)
-  const recordVersion = decimalString(record.version, 'record version')
-  const isUpsert = row.operation === 'upsert'
-  const isDelete = row.operation === 'delete'
-  const recordFields = Object.keys(record)
-  const hasExactBirthdayFields = recordFields.length === BIRTHDAY_DTO_FIELDS.length
-    && BIRTHDAY_DTO_FIELDS.every(field => Object.hasOwn(record, field))
-  if (
-    (!isUpsert && !isDelete)
-    || !hasExactBirthdayFields
-    || typeof row.entity_id !== 'string'
-    || record.id !== row.entity_id
-    || recordVersion !== entityVersion
-    || (isUpsert && record.deletedAt !== null)
-    || (isDelete && (typeof record.deletedAt !== 'string' || record.deletedAt.length === 0))
-  ) {
-    throw new MobileSyncDataConsistencyError('change metadata does not match its record')
+function canonicalChangeInt64(value, fieldName) {
+  if (typeof value !== 'string') {
+    throw new MobileSyncDataConsistencyError(`${fieldName} must be a canonical string`)
   }
+  return decimalString(value, fieldName)
+}
+
+function serializeChangeRow(row) {
+  const seq = canonicalChangeInt64(row.seq, 'sequence')
+  const entityVersion = canonicalChangeInt64(row.entity_version, 'entity version')
+  const record = parseChangeRecord(row.record_json)
+  assertAPIBirthdayChange({
+    entityId: row.entity_id,
+    operation: row.operation,
+    entityVersion,
+    record,
+  })
   return { seq, operation: row.operation, record }
 }
 

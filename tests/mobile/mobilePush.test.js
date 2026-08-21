@@ -861,6 +861,26 @@ test('signed Int64 maximum is accepted as a base version but cannot be increment
   assert.equal(database.operation(OPERATION_ID), null)
 })
 
+test('write-side change persistence rejects an invalid serialized record before inserting record_json', async () => {
+  const database = new FakeDatabase({
+    birthdays: [birthdayRow({ name: 42, version: '2' })],
+  })
+
+  await assert.rejects(
+    createRepository(database).applyOperation(DEVICE_ID, operation({
+      type: 'delete',
+      baseVersion: '2',
+      payload: undefined,
+    })),
+    error => error.name === 'MobileSyncDataConsistencyError'
+      && error.code === 'mobile_sync_inconsistent_state',
+  )
+
+  assert.equal(database.state.changes.length, 0)
+  assert.equal(database.birthday(BIRTHDAY_ID).deleted_at, null)
+  assert.deepEqual(database.connections[0].lifecycle, ['begin', 'rollback', 'release'])
+})
+
 test('delete keeps a versioned birthday tombstone, removes its reminder, and appends one delete change', async () => {
   const database = new FakeDatabase({
     birthdays: [birthdayRow({ version: '2' })],
