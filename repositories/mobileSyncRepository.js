@@ -1,11 +1,14 @@
 const {
   decimalString,
   isNormalizedPushOperation,
+  MobileSyncDataConsistencyError,
   normalizeCursor,
   normalizeLimit,
   normalizePushRequest,
   serializeBirthdayRow,
 } = require('../utils/mobileSyncContract')
+const { MOBILE_API_CONTRACT } = require('../utils/mobileApiContract')
+const BIRTHDAY_DTO_FIELDS = MOBILE_API_CONTRACT.dtoFields.birthday
 const {
   applyMobileOperation,
   readStoredOperation,
@@ -35,20 +38,51 @@ const RETRYABLE_TRANSACTION_CODES = new Set([
   'ER_LOCK_WAIT_TIMEOUT',
 ])
 
-class MobileSyncDataConsistencyError extends Error {
-  constructor() {
-    super('current birthday row missing for sync change')
-    this.name = 'MobileSyncDataConsistencyError'
-    this.code = 'mobile_sync_inconsistent_state'
-  }
-}
-
 function requireUsername(username) {
   if (typeof username !== 'string' || username.trim().length === 0) {
     const error = new TypeError('username is required for the single-admin snapshot')
     error.code = 'invalid_username'
     throw error
   }
+}
+
+function parseChangeRecord(value) {
+  if (Buffer.isBuffer(value)) value = value.toString('utf8')
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value)
+    } catch {
+      throw new MobileSyncDataConsistencyError('invalid change record JSON')
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new MobileSyncDataConsistencyError('change record must be an object')
+  }
+  return value
+}
+
+function serializeChangeRow(row) {
+  const seq = decimalString(row.seq, 'sequence')
+  const entityVersion = decimalString(row.entity_version, 'entity version')
+  const record = parseChangeRecord(row.record_json)
+  const recordVersion = decimalString(record.version, 'record version')
+  const isUpsert = row.operation === 'upsert'
+  const isDelete = row.operation === 'delete'
+  const recordFields = Object.keys(record)
+  const hasExactBirthdayFields = recordFields.length === BIRTHDAY_DTO_FIELDS.length
+    && BIRTHDAY_DTO_FIELDS.every(field => Object.hasOwn(record, field))
+  if (
+    (!isUpsert && !isDelete)
+    || !hasExactBirthdayFields
+    || typeof row.entity_id !== 'string'
+    || record.id !== row.entity_id
+    || recordVersion !== entityVersion
+    || (isUpsert && record.deletedAt !== null)
+    || (isDelete && (typeof record.deletedAt !== 'string' || record.deletedAt.length === 0))
+  ) {
+    throw new MobileSyncDataConsistencyError('change metadata does not match its record')
+  }
+  return { seq, operation: row.operation, record }
 }
 
 function connectionErrorMetadata(error) {
@@ -127,7 +161,7 @@ function createMobileSyncRepository({
     }
   }
 
-  async function pull(cursor, limit = 200) {
+  async function pull(cursor, limit = MOBILE_API_CONTRACT.limits.pullDefault) {
     const normalizedCursor = normalizeCursor(cursor)
     const normalizedLimit = normalizeLimit(limit)
     const [changeRows] = await pool.execute(
@@ -135,10 +169,11 @@ function createMobileSyncRepository({
          CAST(seq AS CHAR) AS seq,
          entity_id,
          operation,
-         CAST(version AS CHAR) AS version
+         CAST(entity_version AS CHAR) AS entity_version,
+         record_json
        FROM mobile_sync_changes
        WHERE entity_type = ?
-         AND seq > CAST(? AS UNSIGNED)
+         AND seq > CAST(? AS SIGNED)
        ORDER BY seq ASC
        LIMIT ?`,
       ['birthday', normalizedCursor, normalizedLimit + 1],
@@ -148,24 +183,7 @@ function createMobileSyncRepository({
       return { changes: [], nextCursor: normalizedCursor, hasMore: false }
     }
 
-    const entityIds = [...new Set(pageRows.map(row => String(row.entity_id)))]
-    const placeholders = entityIds.map(() => '?').join(', ')
-    const [birthdayRows] = await pool.execute(
-      `${BIRTHDAY_SELECT}\nWHERE b.id IN (${placeholders})`,
-      entityIds,
-    )
-    const rowsById = new Map(birthdayRows.map(row => [String(row.id), row]))
-    if (entityIds.some(entityId => !rowsById.has(entityId))) {
-      throw new MobileSyncDataConsistencyError()
-    }
-    const records = new Map(
-      entityIds.map(entityId => [entityId, serializeBirthdayRow(rowsById.get(entityId))]),
-    )
-    const changes = pageRows.map(row => ({
-      seq: decimalString(row.seq, 'sequence'),
-      operation: row.operation,
-      record: records.get(String(row.entity_id)),
-    }))
+    const changes = pageRows.map(serializeChangeRow)
 
     return {
       changes,

@@ -25,6 +25,8 @@ const SECOND_BIRTHDAY_ID = '44444444-4444-4444-8444-444444444444'
 const OPERATION_ID = '33333333-3333-4333-8333-333333333333'
 const SECOND_OPERATION_ID = '55555555-5555-4555-8555-555555555555'
 const ACCESS_TOKEN = 'opaque-access-token'
+const INT64_MAX = '9223372036854775807'
+const INT64_MAX_PLUS_ONE = '9223372036854775808'
 
 function operation(overrides = {}) {
   return {
@@ -110,6 +112,20 @@ test('strict payload normalization rejects coercions and preserves the exact bir
 test('push normalization accepts Swift-style uppercase UUID JSON and canonicalizes every identifier', () => {
   const operationId = 'ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF'
   const entityId = 'ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDF0'
+  const normalized = normalizePushRequest({ operations: [operation({
+    operationId,
+    entityId,
+    payload: validPayload({ id: entityId }),
+  })] })
+
+  assert.equal(normalized.operations[0].operationId, operationId.toLowerCase())
+  assert.equal(normalized.operations[0].entityId, entityId.toLowerCase())
+  assert.equal(normalized.operations[0].payload.id, entityId.toLowerCase())
+})
+
+test('push normalization accepts UUIDv7 identifiers and canonicalizes them to lowercase', () => {
+  const operationId = '018F6F7A-B123-7ABC-8DEF-ABCDEFABCDEF'
+  const entityId = '018F6F7A-B123-7ABC-8DEF-ABCDEFABCDF0'
   const normalized = normalizePushRequest({ operations: [operation({
     operationId,
     entityId,
@@ -336,7 +352,7 @@ test('all semantic birthday dates are calculated before the first transaction an
   assert.equal(database.state.changes.length, 0)
 })
 
-test('request envelope requires 1...50 operations, canonical UUIDs, UInt64 string versions, matching payload IDs, and no delete payload', () => {
+test('request envelope requires 1...50 operations, UUIDs, canonical signed Int64 strings, matching payload IDs, and no delete payload', () => {
   const invalidRequests = [
     null,
     {},
@@ -348,7 +364,7 @@ test('request envelope requires 1...50 operations, canonical UUIDs, UInt64 strin
     { operations: [operation({ baseVersion: 0 })] },
     { operations: [operation({ baseVersion: '-1' })] },
     { operations: [operation({ baseVersion: '01' })] },
-    { operations: [operation({ baseVersion: '18446744073709551616' })] },
+    { operations: [operation({ baseVersion: INT64_MAX_PLUS_ONE })] },
     { operations: [operation({ payload: validPayload({ id: SECOND_BIRTHDAY_ID }) })] },
     { operations: [operation({ type: 'delete', payload: validPayload() })] },
     { operations: [operation({ type: 'upsert', payload: null })] },
@@ -494,9 +510,16 @@ test('new upsert atomically inserts birthday, one email reminder, one change, an
   assert.deepEqual(database.state.changes.map(change => ({
     entity_id: change.entity_id,
     operation: change.operation,
-    version: change.version,
-  })), [{ entity_id: BIRTHDAY_ID, operation: 'upsert', version: '1' }])
+    entity_version: change.entity_version,
+    record_json: change.record_json,
+  })), [{
+    entity_id: BIRTHDAY_ID,
+    operation: 'upsert',
+    entity_version: '1',
+    record_json: result.record,
+  }])
   assert.deepEqual(database.operation(OPERATION_ID).response_json, result)
+  assert.equal(database.operation(OPERATION_ID).base_version, '0')
   assert.deepEqual(database.connections[0].lifecycle, ['begin', 'commit', 'release'])
 })
 
@@ -620,7 +643,8 @@ test('a birthday primary-key race retries with a new transaction and persists co
       entity_type: 'birthday',
       entity_id: BIRTHDAY_ID,
       operation: 'upsert',
-      version: '1',
+      entity_version: '1',
+      record_json: { id: BIRTHDAY_ID, version: '1', deletedAt: null },
     })
   }
   const pool = new FakePool(database)
@@ -820,7 +844,21 @@ test('birthday versions above Number.MAX_SAFE_INTEGER increment and bind as exac
   assert.equal(database.birthday(BIRTHDAY_ID).version, '9007199254740994')
   const update = database.connections[0].queries.find(entry => /^UPDATE birthdays SET name/.test(entry.sql))
   assert.equal(update.params[6], '9007199254740994')
-  assert.equal(database.state.changes[0].version, '9007199254740994')
+  assert.equal(database.state.changes[0].entity_version, '9007199254740994')
+  assert.deepEqual(database.state.changes[0].record_json, result.record)
+})
+
+test('signed Int64 maximum is accepted as a base version but cannot be incremented', async () => {
+  const database = new FakeDatabase({ birthdays: [birthdayRow({ version: INT64_MAX })] })
+
+  await assert.rejects(
+    createRepository(database).applyOperation(DEVICE_ID, operation({ baseVersion: INT64_MAX })),
+    error => error.code === 'mobile_sync_version_overflow',
+  )
+
+  assert.equal(database.birthday(BIRTHDAY_ID).version, INT64_MAX)
+  assert.equal(database.state.changes.length, 0)
+  assert.equal(database.operation(OPERATION_ID), null)
 })
 
 test('delete keeps a versioned birthday tombstone, removes its reminder, and appends one delete change', async () => {
@@ -882,6 +920,7 @@ test('replay returns the exact stored JSON and performs no birthday, reminder, o
     operation_id: OPERATION_ID,
     device_id: DEVICE_ID,
     entity_id: BIRTHDAY_ID,
+    base_version: '999',
     response_json: stored,
   }] })
   const result = await createRepository(database).applyOperation(DEVICE_ID, operation({ baseVersion: '999' }))
@@ -908,6 +947,7 @@ test('stored operation IDs cannot be replayed across devices or entities', async
       operation_id: OPERATION_ID,
       device_id: DEVICE_ID,
       entity_id: BIRTHDAY_ID,
+      base_version: '0',
       response_json: stored,
     }] })
     await assert.rejects(
@@ -919,6 +959,27 @@ test('stored operation IDs cannot be replayed across devices or entities', async
     )
     assert.deepEqual(database.connections[0].lifecycle, ['begin', 'rollback', 'release'])
   }
+})
+
+test('stored operation IDs cannot be replayed with a different base version', async () => {
+  const stored = {
+    operationId: OPERATION_ID,
+    status: 'applied',
+    record: { id: BIRTHDAY_ID, version: '2' },
+  }
+  const database = new FakeDatabase({ operations: [{
+    operation_id: OPERATION_ID,
+    device_id: DEVICE_ID,
+    entity_id: BIRTHDAY_ID,
+    base_version: '1',
+    response_json: stored,
+  }] })
+
+  await assert.rejects(
+    createRepository(database).applyOperation(DEVICE_ID, operation({ baseVersion: '0' })),
+    error => error.code === 'invalid_birthday_payload',
+  )
+  assert.deepEqual(database.connections[0].lifecycle, ['begin', 'rollback', 'release'])
 })
 
 test('push handles each valid operation in order and a conflict does not roll back another item', async () => {
@@ -948,14 +1009,14 @@ test('push handles each valid operation in order and a conflict does not roll ba
   ])
 })
 
-test('duplicate operation IDs in one batch preserve order and replay the first baseVersion result', async () => {
+test('duplicate operation IDs in one batch preserve order and replay the first identical request result', async () => {
   const database = new FakeDatabase()
   const pool = new FakePool(database)
   const repository = createMobileSyncRepository({ pool })
   const app = createPushApp({ repository })
   const response = await request(app)
     .post('/api/mobile/sync/push')
-    .send({ operations: [operation(), operation({ baseVersion: '18446744073709551615' })] })
+    .send({ operations: [operation(), operation()] })
 
   assert.equal(response.status, 200)
   assert.deepEqual(response.body.results[1], response.body.results[0])
@@ -1149,12 +1210,14 @@ test('duplicate-key race rolls back the losing transaction and returns the commi
       entity_type: 'birthday',
       entity_id: BIRTHDAY_ID,
       operation: 'upsert',
-      version: '1',
+      entity_version: '1',
+      record_json: winner.record,
     })
     db.state.operations.set(OPERATION_ID, {
       operation_id: OPERATION_ID,
       device_id: DEVICE_ID,
       entity_id: BIRTHDAY_ID,
+      base_version: '0',
       response_json: winner,
     })
   }

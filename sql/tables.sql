@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS birthdays (
   isLeapMonth  TINYINT(1)   NOT NULL DEFAULT 0, -- 0/1
   remindTime   VARCHAR(8)   DEFAULT NULL,       -- HH:mm 或 HH:mm:ss
   nextSolarDate DATETIME    DEFAULT NULL,       -- 下一次阳历提醒时间
-  version      BIGINT UNSIGNED NOT NULL DEFAULT 1,
+  version      BIGINT NOT NULL DEFAULT 1,
   deleted_at   DATETIME NULL,
   notify_day_before TINYINT(1) NOT NULL DEFAULT 1,
   notify_same_day  TINYINT(1) NOT NULL DEFAULT 1,
@@ -68,11 +68,12 @@ CREATE TABLE IF NOT EXISTS email_reminders (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS mobile_sync_changes (
-  seq BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  seq BIGINT NOT NULL AUTO_INCREMENT,
   entity_type VARCHAR(32) NOT NULL,
   entity_id VARCHAR(36) NOT NULL,
   operation ENUM('upsert','delete') NOT NULL,
-  version BIGINT UNSIGNED NOT NULL,
+  entity_version BIGINT NOT NULL,
+  record_json JSON NOT NULL,
   changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (seq),
   KEY idx_mobile_changes_entity (entity_type, entity_id, seq)
@@ -81,6 +82,7 @@ CREATE TABLE IF NOT EXISTS mobile_sync_changes (
 CREATE TABLE IF NOT EXISTS mobile_sync_operations (
   operation_id VARCHAR(36) NOT NULL,
   device_id VARCHAR(36) NOT NULL,
+  base_version BIGINT NOT NULL,
   response_json JSON NOT NULL,
   processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_mobile_operation_id (operation_id),

@@ -9,11 +9,38 @@
 - `login`、`refresh` 不需要 Cookie 或 Bearer；`revoke`、`devices`、`snapshot`、`push`、`pull` 必须发送 `Authorization: Bearer <accessToken>`。
 - 网页端 `birthday_session` Cookie 不参与移动端认证。仅有 Cookie、没有有效 Bearer 时返回 `mobile_auth_required`。
 - 日期时间使用 ISO 8601 字符串，例如 `2026-08-22T00:15:00.000Z`；可空日期使用 JSON `null`。
-- 设备、生日、操作 ID 均为 UUID 字符串。服务端接受大小写 UUID，并在同步操作中规范化为小写。
-- 游标、变更序号、`baseVersion` 和生日 `version` 是 UInt64 范围内的十进制字符串，不能发送 JSON 数字，也不能带符号、空格、指数或无意义前导零。游标允许 `"0"`；操作版本允许 `"0"`。
+- 设备、生日、操作 ID 均为 UUID 字符串。服务端接受 UUID v1...v8 和大小写输入，并在同步操作中规范化为小写。
+- 游标、变更序号、`baseVersion` 和生日 `version` 是非负 signed Int64（`0...9223372036854775807`）的规范十进制字符串，不能发送 JSON 数字，也不能带符号、空格、指数或前导零；零只能写作 `"0"`。
 - 访问令牌和刷新令牌是不透明字符串，客户端不得解析。当前访问令牌有效期为 15 分钟，刷新令牌有效期为 180 天；每次刷新同时轮换两枚令牌，旧刷新令牌立即失效。
-- 全局 JSON 解析上限为 64 KiB；超过上限返回 HTTP 413 和 `payload_too_large`。`push` 另要求紧凑 JSON 不超过 60 KiB，为外层 JSON 和解析器留出余量。
+- 全局 JSON 解析契约固定为 64 KiB；`JSON_BODY_LIMIT` 只能为空或精确等于 `64kb`，否则服务器在安装 API 中间件前明确启动失败。超过上限返回 HTTP 413 和 `payload_too_large`。`push` 另要求紧凑 JSON 不超过 60 KiB，为外层 JSON 和解析器留出余量。
 - 服务端必须先完成 `20260821_mobile_sync.sql` 数据库迁移和只读结构核验，才可启用这些路径。未迁移时的数据库错误只会对外表现为 `server_error`。
+
+### 路径与认证索引
+
+| 名称 | 方法 | 完整路径 | 认证 |
+|---|---|---|---|
+| `login` | `POST` | `/api/mobile/auth/login` | `none` |
+| `refresh` | `POST` | `/api/mobile/auth/refresh` | `none` |
+| `revoke` | `POST` | `/api/mobile/auth/revoke` | `bearer` |
+| `devices` | `GET` | `/api/mobile/auth/devices` | `bearer` |
+| `snapshot` | `GET` | `/api/mobile/sync/snapshot` | `bearer` |
+| `push` | `POST` | `/api/mobile/sync/push` | `bearer` |
+| `pull` | `GET` | `/api/mobile/sync/pull` | `bearer` |
+
+### 机器可核验限制
+
+| 契约字段 | 值 |
+|---|---:|
+| `jsonBodyLimit` | `64kb` |
+| `jsonBodyBytes` | `65536` |
+| `pushCompactJSONBytes` | `61440` |
+| `pushOperations` | `50` |
+| `pullDefault` | `200` |
+| `pullMaximum` | `200` |
+| `enabledEmailStorageBytes` | `8192` |
+| `signedInt64Maximum` | `9223372036854775807` |
+| `accessTokenTTLSeconds` | `900` |
+| `refreshTokenTTLSeconds` | `15552000` |
 
 ## 生日 DTO
 
@@ -267,7 +294,7 @@
 }
 ```
 
-版本冲突仍返回 HTTP 200；`conflict` 是该操作的结果状态，不是 HTTP 错误码：
+`conflict` 是该操作的结果状态，不是 HTTP 错误码；版本冲突仍返回 HTTP 200：
 
 ```json
 {
@@ -298,7 +325,7 @@
 }
 ```
 
-`operationId` 是幂等键。相同设备、相同实体重试同一操作时返回首次持久化的 `applied` 或 `conflict` 结果，不重复业务写入；同一操作 ID 跨设备或改指向其他实体会被拒绝为 `invalid_birthday_payload`。一个操作冲突不会回滚同批次已独立处理的其他操作。客户端必须保存本地与 `remote` 两个版本，让用户明确选择，不能自动“最后写入获胜”。
+`operationId` 是幂等键。相同设备、相同实体、相同 `baseVersion` 重试同一操作时返回首次持久化的 `applied` 或 `conflict` 结果，不重复业务写入；同一操作 ID 跨设备、改指向其他实体或更换 `baseVersion` 会被拒绝为 `invalid_birthday_payload`。一个操作冲突不会回滚同批次已独立处理的其他操作。客户端必须保存本地与 `remote` 两个版本，让用户明确选择，不能自动“最后写入获胜”。
 
 ### 增量拉取
 
@@ -337,7 +364,7 @@
 }
 ```
 
-`hasMore: true` 表示应立即使用 `nextCursor` 继续拉取。空页返回原样 `nextCursor` 和 `hasMore: false`。`operation: "delete"` 的 `record` 仍是完整墓碑；客户端应用墓碑后再推进本地游标。
+`hasMore: true` 表示应立即使用 `nextCursor` 继续拉取。空页返回规范输入游标作为 `nextCursor`，并返回 `hasMore: false`。每条 `record` 都是该次变更提交后、在同一事务中保存的完整 APIBirthday 事件快照，不会用当前生日行覆盖历史事件。因此同一 ID 的 upsert、delete、restore 跨页拉取时仍各自保留当时的版本和墓碑状态；变更查询后的并发修改也不会改变已选中页面。`operation: "delete"` 的 `record` 必须是完整墓碑；客户端应用墓碑后再推进本地游标。
 
 ## 稳定错误与状态
 
@@ -354,7 +381,7 @@
 | 400 | `invalid_mobile_login` | 登录请求字段、UUID 或设备名无效。 |
 | 400 | `invalid_mobile_refresh` | 刷新令牌字段缺失、为空、类型错误或含非法字符。 |
 | 400 | `invalid_mobile_device` | 撤销请求的设备 UUID 无效。 |
-| 400 | `invalid_cursor` | 游标缺失、格式错误或超出 UInt64。 |
+| 400 | `invalid_cursor` | 游标缺失、不是规范十进制，或超出非负 signed Int64。 |
 | 400 | `invalid_limit` | `limit` 不在 1...200 或格式不合法。 |
 | 400 | `invalid_birthday_payload` | 批次、操作、版本、UUID、生日或邮件字段不符合契约。 |
 | 400 | `too_many_operations` | 单次 `push` 超过 50 个操作。 |
@@ -364,11 +391,12 @@
 | 401 | `mobile_refresh_invalid` | 刷新令牌未知、过期、已撤销或已被轮换。 |
 | 404 | `mobile_device_not_found` | 当前账号没有对应的可撤销设备。 |
 | 413 | `payload_too_large` | 请求超过 64 KiB JSON 解析上限。 |
+| 429 | `api_rate_limited` | 全局 API 限流窗口内请求次数过多；若它先于登录限流命中，客户端也必须可解码此错误。 |
 | 429 | `mobile_login_rate_limited` | 当前登录限流窗口内尝试次数过多。 |
 | 500 | `server_error` | 未处理的服务器、数据库或内部一致性错误。 |
 | 503 | `mobile_auth_unconfigured` | 服务器未配置移动登录账号或密码哈希。 |
 
-内部一致性代码（例如 `mobile_sync_inconsistent_state`）和异常消息、堆栈、令牌、密码、请求 payload 都不会返回或写入错误日志；对外统一为 HTTP 500 `server_error`。`conflict` 只出现在 HTTP 200 的 `results[].status` 中。
+内部一致性代码（例如 `mobile_sync_inconsistent_state`）不会返回给客户端，对外统一为 HTTP 500 `server_error`。错误日志只保留安全的异常 `name`/`code`，不记录异常消息、堆栈、令牌、密码或请求 payload。`conflict` 只出现在 HTTP 200 的 `results[].status` 中。
 
 ## 上线边界
 

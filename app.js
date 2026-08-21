@@ -10,13 +10,13 @@ scheduleUpdateBirthdaysJob()
 const express = require('express')
 const cors = require('cors')
 const helmet = require('helmet')
-const rateLimit = require('express-rate-limit')
 const https = require('https')
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { createApiRouter } = require('./routes')
 const { createApiErrorHandler } = require('./middleware/apiError')
+const { createApiLimiter, installApiSurface } = require('./middleware/apiSurface')
 const { attachAuth, requirePageAuth } = require('./utils/auth')
 
 // ===== 数据库（用于优雅关闭）=====
@@ -47,13 +47,6 @@ const corsOptions = {
   credentials: true,
 }
 
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: Number(process.env.API_RATE_LIMIT || 300),
-  standardHeaders: true,
-  legacyHeaders: false,
-})
-
 function requireSameOriginForUnsafeMethods(req, res, next) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next()
   const origin = req.headers.origin
@@ -67,9 +60,15 @@ app.use(
   })
 )
 app.use(cors(corsOptions))
-app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '64kb' }))
-app.use(attachAuth)
-app.use('/api', apiLimiter, requireSameOriginForUnsafeMethods)
+installApiSurface({
+  app,
+  env: process.env,
+  attachAuthMiddleware: attachAuth,
+  apiLimiter: createApiLimiter({ env: process.env }),
+  sameOriginMiddleware: requireSameOriginForUnsafeMethods,
+  apiRouter: routes,
+  apiErrorHandler: createApiErrorHandler(),
+})
 
 // ===== 首页资源版本戳 =====
 // nginx 给 scripts.js / styles.css 加了 max-age=300，而资源 URL 没有版本号，
@@ -119,8 +118,6 @@ app.get(['/index.html', `${appBasePath}/index.html`], requirePageAuth, (req, res
 
 app.use(`${appBasePath}/vendor`, express.static(path.join(publicDir, 'vendor'), { index: false }))
 app.use(express.static(publicDir, { index: false }))
-app.use('/api', routes)
-app.use('/api', createApiErrorHandler())
 
 // ===== 启动 HTTPS Server（保存 server 引用）=====
 const PORT = process.env.PORT || 3300

@@ -228,6 +228,24 @@ test('applyWebUpsert updates under the caller transaction, increments version, a
   assert.equal(reminder.claimed_at, '2026-08-22 11:00:00')
   assert.equal(connection.countSQL(/^SELECT .* FROM birthdays b .* FOR UPDATE$/), 1)
   assert.equal(connection.countSQL(/^INSERT INTO mobile_sync_changes/), 1)
+  assert.deepEqual(connection.state().changes[0].record_json, {
+    id: DEFAULT_BIRTHDAY_ID,
+    name: '妈妈',
+    lunarMonth: 8,
+    lunarDay: 15,
+    isLeapMonth: false,
+    reminderTimeMinutes: 540,
+    notifyDayBefore: true,
+    notifySameDay: true,
+    emailEnabled: true,
+    emailAddress: 'new@example.com',
+    emailMessage: '生日快乐',
+    nextSolarDate: '2026-09-25T01:00:00.000Z',
+    version: '3',
+    createdAt: '2025-12-31T16:00:00.000Z',
+    updatedAt: '2026-08-22T04:00:00.000Z',
+    deletedAt: null,
+  })
   assert.deepEqual(connection.lifecycle, ['begin'])
 })
 
@@ -272,6 +290,50 @@ test('applyWebUpsert disables email by deleting its reminder while still produci
   assert.equal(record.userEmail, '')
   assert.equal(connection.countSQL(/^DELETE FROM email_reminders WHERE birthday_id = \?$/), 1)
   assert.equal(connection.countSQL(/^INSERT INTO mobile_sync_changes/), 1)
+  const upsertChange = connection.state().changes[0]
+  assert.equal(upsertChange.operation, 'upsert')
+  assert.equal(upsertChange.entity_version, '5')
+  assert.equal(upsertChange.record_json.emailEnabled, false)
+  assert.equal(upsertChange.record_json.deletedAt, null)
+})
+
+test('web upsert, delete, and restore retain three immutable event snapshots', async () => {
+  const database = new FakeDatabase()
+
+  const createConnection = database.createConnection()
+  await createConnection.beginTransaction()
+  await applyWebUpsert(createConnection, {
+    id: DEFAULT_BIRTHDAY_ID,
+    payload: validPayload({ name: '初始' }),
+    dateOptions: { nowInput: FIXED_NOW },
+  })
+  await createConnection.commit()
+
+  const deleteConnection = database.createConnection()
+  await deleteConnection.beginTransaction()
+  await applyWebDelete(deleteConnection, { id: DEFAULT_BIRTHDAY_ID })
+  await deleteConnection.commit()
+
+  const restoreConnection = database.createConnection()
+  await restoreConnection.beginTransaction()
+  await applyWebUpsert(restoreConnection, {
+    id: DEFAULT_BIRTHDAY_ID,
+    payload: validPayload({ name: '恢复' }),
+    dateOptions: { nowInput: FIXED_NOW },
+  })
+  await restoreConnection.commit()
+
+  assert.deepEqual(database.state.changes.map(change => ({
+    operation: change.operation,
+    entityVersion: change.entity_version,
+    recordVersion: change.record_json.version,
+    name: change.record_json.name,
+    deleted: change.record_json.deletedAt !== null,
+  })), [
+    { operation: 'upsert', entityVersion: '1', recordVersion: '1', name: '初始', deleted: false },
+    { operation: 'delete', entityVersion: '2', recordVersion: '2', name: '初始', deleted: true },
+    { operation: 'upsert', entityVersion: '3', recordVersion: '3', name: '恢复', deleted: false },
+  ])
 })
 
 test('applyWebDelete writes a versioned tombstone and removes the reminder without hard-deleting birthday', async () => {
@@ -290,6 +352,12 @@ test('applyWebDelete writes a versioned tombstone and removes the reminder witho
   assert.equal(connection.countSQL(/^UPDATE birthdays SET deleted_at/), 1)
   assert.equal(connection.countSQL(/^DELETE FROM email_reminders WHERE birthday_id = \?$/), 1)
   assert.equal(connection.countSQL(/^INSERT INTO mobile_sync_changes/), 1)
+  const deleteChange = connection.state().changes[0]
+  assert.equal(deleteChange.operation, 'delete')
+  assert.equal(deleteChange.entity_version, '3')
+  assert.equal(deleteChange.record_json.id, DEFAULT_BIRTHDAY_ID)
+  assert.equal(deleteChange.record_json.version, '3')
+  assert.equal(deleteChange.record_json.deletedAt, '2026-08-22T04:00:00.000Z')
 })
 
 test('birthday router keeps auth, list filtering, response shape, and routes all writes through versioned transactions', async () => {

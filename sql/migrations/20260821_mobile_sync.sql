@@ -1,7 +1,7 @@
 -- One-shot migration: deployment must verify these birthday columns are absent
 -- before execution and present afterward.
 ALTER TABLE birthdays
-  ADD COLUMN version BIGINT UNSIGNED NOT NULL DEFAULT 1,
+  ADD COLUMN version BIGINT NOT NULL DEFAULT 1,
   ADD COLUMN deleted_at DATETIME NULL,
   ADD COLUMN notify_day_before TINYINT(1) NOT NULL DEFAULT 1,
   ADD COLUMN notify_same_day TINYINT(1) NOT NULL DEFAULT 1,
@@ -39,11 +39,12 @@ ALTER TABLE email_reminders
   MODIFY COLUMN generation CHAR(36) NOT NULL;
 
 CREATE TABLE IF NOT EXISTS mobile_sync_changes (
-  seq BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  seq BIGINT NOT NULL AUTO_INCREMENT,
   entity_type VARCHAR(32) NOT NULL,
   entity_id VARCHAR(36) NOT NULL,
   operation ENUM('upsert','delete') NOT NULL,
-  version BIGINT UNSIGNED NOT NULL,
+  entity_version BIGINT NOT NULL,
+  record_json JSON NOT NULL,
   changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (seq),
   KEY idx_mobile_changes_entity (entity_type, entity_id, seq)
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS mobile_sync_changes (
 CREATE TABLE IF NOT EXISTS mobile_sync_operations (
   operation_id VARCHAR(36) NOT NULL,
   device_id VARCHAR(36) NOT NULL,
+  base_version BIGINT NOT NULL,
   response_json JSON NOT NULL,
   processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_mobile_operation_id (operation_id),

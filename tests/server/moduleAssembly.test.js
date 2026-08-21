@@ -31,6 +31,7 @@ test('requiring server router, repository, reminder, and birthday-job factories 
   const birthdayJob = require('../../jobs/updateBirthdays')
   const mobileRoutes = require('../../routes/mobile')
   const apiRoutes = require('../../routes')
+  const apiSurface = require('../../middleware/apiSurface')
   await new Promise(resolve => setImmediate(resolve))
 
   assert.equal(typeof reminders.createEmailRemindersRouter, 'function')
@@ -40,6 +41,7 @@ test('requiring server router, repository, reminder, and birthday-job factories 
   assert.equal(typeof mobileRoutes.createMobileRouter, 'function')
   assert.equal(typeof mobileRoutes.createProductionMobileRouter, 'function')
   assert.equal(typeof apiRoutes.createApiRouter, 'function')
+  assert.equal(typeof apiSurface.installApiSurface, 'function')
   assert.equal(scheduleCalls, 0)
   assert.equal(queryCalls, 0)
   assert.equal(connectionCalls, 0)
@@ -72,9 +74,9 @@ test('API router assembly creates and registers email reminders exactly once', (
   assert.equal(registerCalls, 1)
 })
 
-test('production entrypoint explicitly creates API routes and schedules the birthday job once', () => {
+test('production entrypoint creates API routes and installs the tested API surface once', () => {
   const source = fs.readFileSync(path.join(__dirname, '../../app.js'), 'utf8')
   assert.equal((source.match(/\bcreateApiRouter\(\)/g) || []).length, 1)
-  assert.equal((source.match(/\bcreateApiErrorHandler\(\)/g) || []).length, 1)
+  assert.equal((source.match(/\binstallApiSurface\(/g) || []).length, 1)
   assert.equal((source.match(/\bscheduleUpdateBirthdaysJob\(\)/g) || []).length, 1)
 })

@@ -1,13 +1,13 @@
 const { generateUUID } = require('../utils/helpers')
 const {
+  INT64_MAX_DECIMAL,
+  decimalString,
   invalidBirthdayPayload,
   isNormalizedPushOperation,
   normalizeBirthdayPayload,
   normalizePushRequest,
   serializeBirthdayRow,
 } = require('../utils/mobileSyncContract')
-
-const UINT64_MAX = 18446744073709551615n
 
 const BIRTHDAY_BY_ID_SELECT = `SELECT
   b.id,
@@ -56,6 +56,7 @@ async function readStoredOperation(connection, { deviceId, operation }) {
   const [rows] = await connection.query(
     `SELECT operation_id,
             device_id,
+            CAST(base_version AS CHAR) AS base_version,
             COALESCE(
               JSON_UNQUOTE(JSON_EXTRACT(response_json, '$.record.id')),
               JSON_UNQUOTE(JSON_EXTRACT(response_json, '$.remote.id'))
@@ -73,6 +74,7 @@ async function readStoredOperation(connection, { deviceId, operation }) {
   if (
     stored.device_id !== deviceId
     || storedEntityId !== operation.entityId
+    || decimalString(stored.base_version, 'stored base version') !== operation.baseVersion
     || response.operationId !== operation.operationId
   ) {
     throw invalidBirthdayPayload()
@@ -89,21 +91,21 @@ async function readBirthday(connection, entityId, { forUpdate = false } = {}) {
 }
 
 function nextVersion(currentVersion) {
-  const next = BigInt(currentVersion) + 1n
-  if (next > UINT64_MAX) {
+  const normalizedCurrent = decimalString(currentVersion, 'birthday version')
+  if (normalizedCurrent === INT64_MAX_DECIMAL) {
     const error = new RangeError('mobile sync birthday version overflow')
     error.code = 'mobile_sync_version_overflow'
     throw error
   }
-  return next.toString(10)
+  return (BigInt(normalizedCurrent) + 1n).toString(10)
 }
 
 async function storeOperationResponse(connection, { deviceId, operation, response }) {
   try {
     await connection.query(
-      `INSERT INTO mobile_sync_operations (operation_id, device_id, response_json)
-       VALUES (?, ?, ?)`,
-      [operation.operationId, deviceId, JSON.stringify(response)],
+      `INSERT INTO mobile_sync_operations (operation_id, device_id, base_version, response_json)
+       VALUES (?, ?, ?, ?)`,
+      [operation.operationId, deviceId, operation.baseVersion, JSON.stringify(response)],
     )
   } catch (error) {
     if (error && error.code === 'ER_DUP_ENTRY') {
@@ -219,11 +221,12 @@ async function softDeleteBirthday(connection, operation, version) {
   )
 }
 
-async function appendChange(connection, operation, version) {
+async function appendChange(connection, operation, record) {
   await connection.query(
-    `INSERT INTO mobile_sync_changes (entity_type, entity_id, operation, version)
-     VALUES (?, ?, ?, ?)`,
-    ['birthday', operation.entityId, operation.type, version],
+    `INSERT INTO mobile_sync_changes
+      (entity_type, entity_id, operation, entity_version, record_json)
+     VALUES (?, ?, ?, ?, ?)`,
+    ['birthday', operation.entityId, operation.type, record.version, JSON.stringify(record)],
   )
 }
 
@@ -279,8 +282,9 @@ async function applyWebUpsert(connection, {
   const version = nextVersion(currentRow ? String(currentRow.version) : '0')
 
   await upsertBirthday(connection, operation, currentRow, version, { generateUUIDFn })
-  await appendChange(connection, operation, version)
-  return serializeWebBirthdayRow(await requireStoredBirthday(connection, operation.entityId))
+  const storedRow = await requireStoredBirthday(connection, operation.entityId)
+  await appendChange(connection, operation, serializeBirthdayRow(storedRow))
+  return serializeWebBirthdayRow(storedRow)
 }
 
 async function applyWebDelete(connection, { id }) {
@@ -293,8 +297,9 @@ async function applyWebDelete(connection, { id }) {
   const version = nextVersion(String(currentRow.version))
   const operation = { entityId, type: 'delete' }
   await softDeleteBirthday(connection, operation, version)
-  await appendChange(connection, operation, version)
-  return serializeWebBirthdayRow(await requireStoredBirthday(connection, entityId))
+  const storedRow = await requireStoredBirthday(connection, entityId)
+  await appendChange(connection, operation, serializeBirthdayRow(storedRow))
+  return serializeWebBirthdayRow(storedRow)
 }
 
 async function applyWebReminderUpsert(connection, {
@@ -319,8 +324,9 @@ async function applyWebReminderUpsert(connection, {
     message: reminder.message,
     scheduleMode: 'exact',
   })
-  await appendChange(connection, { entityId, type: 'upsert' }, version)
-  return serializeWebBirthdayRow(await requireStoredBirthday(connection, entityId))
+  const storedRow = await requireStoredBirthday(connection, entityId)
+  await appendChange(connection, { entityId, type: 'upsert' }, serializeBirthdayRow(storedRow))
+  return serializeWebBirthdayRow(storedRow)
 }
 
 async function applyMobileOperation(connection, context) {
@@ -348,18 +354,18 @@ async function applyMobileOperation(connection, context) {
   } else {
     await softDeleteBirthday(connection, operation, version)
   }
-  await appendChange(connection, operation, version)
-
   const storedRow = await readBirthday(connection, operation.entityId)
   if (!storedRow) {
     const error = new Error('birthday missing after mobile mutation')
     error.code = 'mobile_sync_inconsistent_state'
     throw error
   }
+  const record = serializeBirthdayRow(storedRow)
+  await appendChange(connection, operation, record)
   const response = {
     operationId: operation.operationId,
     status: 'applied',
-    record: serializeBirthdayRow(storedRow),
+    record,
   }
   await storeOperationResponse(connection, { ...normalizedContext, response })
   return response

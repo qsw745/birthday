@@ -174,16 +174,48 @@ test('API router mounts the injectable production mobile factory outside cookie 
   assert.equal(pool.calls.length, 1)
 })
 
-test('mobile contract documents every exported endpoint and stable public code', () => {
+test('mobile docs structurally match exported routes, limits, DTO fields, and stable errors', () => {
   const fs = require('node:fs')
   const path = require('node:path')
   const docs = fs.readFileSync(path.join(__dirname, '../../docs/mobile-sync-api.md'), 'utf8')
 
-  for (const endpoint of Object.values(MOBILE_API_CONTRACT.endpoints)) {
-    assert.match(docs, new RegExp(`${MOBILE_API_CONTRACT.basePath}${endpoint.replaceAll('/', '\\/')}`))
-  }
-  for (const code of MOBILE_API_CONTRACT.errorCodes) {
-    assert.match(docs, new RegExp(`\\b${code}\\b`))
-  }
-  assert.match(docs, /conflict/)
+  const routeRows = [...docs.matchAll(/^\| `(login|refresh|revoke|devices|snapshot|push|pull)` \| `(GET|POST)` \| `([^`]+)` \| `(none|bearer)` \|$/gm)]
+  assert.deepEqual(Object.fromEntries(routeRows.map(([, name, method, fullPath, auth]) => [name, {
+    method,
+    path: fullPath.slice(MOBILE_API_CONTRACT.basePath.length),
+    auth,
+  }])), MOBILE_API_CONTRACT.routes)
+
+  const limitRows = [...docs.matchAll(/^\| `(\w+)` \| `(\d+|64kb)` \|$/gm)]
+  const documentedLimits = Object.fromEntries(limitRows.map(([, name, value]) => [
+    name,
+    /^\d+$/.test(value) && name !== 'signedInt64Maximum' ? Number(value) : value,
+  ]))
+  assert.deepEqual(documentedLimits, MOBILE_API_CONTRACT.limits)
+
+  const jsonExamples = [...docs.matchAll(/```json\n([\s\S]*?)\n```/g)]
+    .map(match => JSON.parse(match[1]))
+  const [birthdayExample] = jsonExamples
+  assert.ok(birthdayExample)
+  assert.deepEqual(Object.keys(birthdayExample), MOBILE_API_CONTRACT.dtoFields.birthday)
+  const loginRequest = jsonExamples.find(example => Object.hasOwn(example, 'password'))
+  const tokenResponse = jsonExamples.find(example => Object.hasOwn(example, 'accessToken'))
+  const deviceList = jsonExamples.find(example => Array.isArray(example.devices))
+  const pushRequest = jsonExamples.find(example => example.operations?.[0]?.type === 'upsert')
+  const pullResponse = jsonExamples.find(example => Array.isArray(example.changes))
+  assert.deepEqual(Object.keys(loginRequest), MOBILE_API_CONTRACT.dtoFields.loginRequest)
+  assert.deepEqual(Object.keys(tokenResponse), MOBILE_API_CONTRACT.dtoFields.tokenResponse)
+  assert.deepEqual(Object.keys(deviceList.devices[0]), MOBILE_API_CONTRACT.dtoFields.device)
+  assert.deepEqual(Object.keys(pushRequest.operations[0]), MOBILE_API_CONTRACT.dtoFields.pushOperation)
+  assert.deepEqual(Object.keys(pushRequest.operations[0].payload), MOBILE_API_CONTRACT.dtoFields.birthdayMutation)
+  assert.deepEqual(Object.keys(pullResponse.changes[0]), MOBILE_API_CONTRACT.dtoFields.pullChange)
+  assert.deepEqual(Object.keys(pullResponse.changes[0].record), MOBILE_API_CONTRACT.dtoFields.birthday)
+
+  const errorRows = [...docs.matchAll(/^\| (\d{3}) \| `([a-z0-9_]+)` \|/gm)]
+  const documentedErrors = Object.fromEntries(errorRows.map(([, status, code]) => [code, Number(status)]))
+  assert.deepEqual(documentedErrors, Object.fromEntries(
+    Object.entries(MOBILE_API_CONTRACT.errors).map(([code, definition]) => [code, definition.status]),
+  ))
+  assert.match(docs, /`conflict` 是[^\n]+HTTP 200/)
+  assert.doesNotMatch(docs, /UInt64/)
 })

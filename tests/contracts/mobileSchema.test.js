@@ -38,7 +38,7 @@ test('mobile birthday migration remains an explicitly one-shot ALTER', () => {
 
 test('mobile birthday fields preserve durable types and defaults', () => {
   for (const sql of [readSchema(migrationPath), readSchema(tablesPath)]) {
-    assert.match(sql, /version\s+BIGINT UNSIGNED NOT NULL DEFAULT 1/i)
+    assert.match(sql, /version\s+BIGINT NOT NULL DEFAULT 1/i)
     assert.match(sql, /deleted_at\s+DATETIME\s+(?:NULL|DEFAULT NULL)/i)
     assert.match(sql, /notify_day_before\s+TINYINT\(1\) NOT NULL DEFAULT 1/i)
     assert.match(sql, /notify_same_day\s+TINYINT\(1\) NOT NULL DEFAULT 1/i)
@@ -46,15 +46,19 @@ test('mobile birthday fields preserve durable types and defaults', () => {
   }
 })
 
-test('mobile sync tables keep cursor and versions unsigned BIGINTs', () => {
+test('mobile sync tables keep every cursor and version inside signed Int64 storage', () => {
   for (const sql of [readSchema(migrationPath), readSchema(tablesPath)]) {
-    assert.match(sql, /seq BIGINT UNSIGNED NOT NULL AUTO_INCREMENT/i)
-    assert.match(sql, /version BIGINT UNSIGNED NOT NULL/i)
+    assert.match(sql, /version\s+BIGINT NOT NULL DEFAULT 1/i)
+    assert.match(sql, /seq BIGINT NOT NULL AUTO_INCREMENT/i)
+    assert.match(sql, /entity_version BIGINT NOT NULL/i)
+    assert.match(sql, /base_version BIGINT NOT NULL/i)
+    assert.doesNotMatch(sql, /(?:version|seq|entity_version|base_version)\s+BIGINT\s+UNSIGNED/i)
   }
 })
 
-test('mobile operations store replay responses as JSON', () => {
+test('mobile changes store exact record snapshots and operations store replay responses as JSON', () => {
   for (const sql of [readSchema(migrationPath), readSchema(tablesPath)]) {
+    assert.match(sql, /record_json JSON NOT NULL/i)
     assert.match(sql, /response_json JSON NOT NULL/i)
     assert.match(sql, /UNIQUE KEY uk_mobile_operation_id \(operation_id\)/i)
   }

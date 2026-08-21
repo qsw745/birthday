@@ -1,17 +1,17 @@
 const moment = require('moment-timezone')
 const { calculateNextSolarDate, TZ } = require('./helpers')
-const { MOBILE_ERROR_CODES } = require('./mobileApiContract')
+const { MOBILE_API_CONTRACT, MOBILE_ERROR_CODES } = require('./mobileApiContract')
 
-const DECIMAL_PATTERN = /^\d+$/
+const DECIMAL_INT64_PATTERN = /^(?:0|[1-9]\d*)$/
 const LIMIT_PATTERN = /^[1-9]\d*$/
 const TIME_PATTERN = /^(\d{2}):(\d{2})(?::(\d{2}))?$/
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const UINT64_PATTERN = /^(?:0|[1-9]\d*)$/
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const EDGE_WHITE_SPACE_PATTERN = /^(?:\p{White_Space})+|(?:\p{White_Space})+$/gu
 const STORAGE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
-const UINT64_MAX = 18446744073709551615n
-const MAX_ENABLED_EMAIL_STORAGE_BYTES = 8192
-const MAX_PUSH_REQUEST_BYTES = 60 * 1024
+const INT64_MAX = BigInt(MOBILE_API_CONTRACT.limits.signedInt64Maximum)
+const INT64_MAX_DECIMAL = INT64_MAX.toString(10)
+const MAX_ENABLED_EMAIL_STORAGE_BYTES = MOBILE_API_CONTRACT.limits.enabledEmailStorageBytes
+const MAX_PUSH_REQUEST_BYTES = MOBILE_API_CONTRACT.limits.pushCompactJSONBytes
 const MAX_LUNAR_YEAR_PROBES = 20
 const NORMALIZED_PUSH_OPERATION = Symbol('normalizedPushOperation')
 const DEFAULT_GRAPHEME_SEGMENTER = (
@@ -25,6 +25,14 @@ class MobileSyncValidationError extends Error {
     super(message)
     this.name = 'MobileSyncValidationError'
     this.code = code
+  }
+}
+
+class MobileSyncDataConsistencyError extends Error {
+  constructor(message = 'invalid mobile sync database state') {
+    super(message)
+    this.name = 'MobileSyncDataConsistencyError'
+    this.code = 'mobile_sync_inconsistent_state'
   }
 }
 
@@ -45,11 +53,11 @@ function normalizeUUID(value) {
   return value.toLowerCase()
 }
 
-function normalizeUInt64String(value) {
+function normalizeInt64String(value) {
   if (
     typeof value !== 'string'
-    || !UINT64_PATTERN.test(value)
-    || BigInt(value) > UINT64_MAX
+    || !DECIMAL_INT64_PATTERN.test(value)
+    || BigInt(value) > INT64_MAX
   ) {
     throw invalidBirthdayPayload()
   }
@@ -215,7 +223,7 @@ function normalizePushRequest(body, dateOptions) {
   if (!Array.isArray(body.operations)) {
     throw invalidBirthdayPayload()
   }
-  if (body.operations.length > 50) {
+  if (body.operations.length > MOBILE_API_CONTRACT.limits.pushOperations) {
     throw new MobileSyncValidationError(MOBILE_ERROR_CODES.tooManyOperations)
   }
   if (body.operations.length === 0) throw invalidBirthdayPayload()
@@ -227,7 +235,7 @@ function normalizePushRequest(body, dateOptions) {
     const normalizedEntityId = normalizeUUID(operation.entityId)
     const { type } = operation
     if (type !== 'upsert' && type !== 'delete') throw invalidBirthdayPayload()
-    const baseVersion = normalizeUInt64String(operation.baseVersion)
+    const baseVersion = normalizeInt64String(operation.baseVersion)
 
     const priorEntityId = entityByOperationId.get(normalizedOperationId)
     if (priorEntityId && priorEntityId !== normalizedEntityId) throw invalidBirthdayPayload()
@@ -263,31 +271,35 @@ function normalizePushRequest(body, dateOptions) {
 function normalizeCursor(value) {
   if (
     typeof value !== 'string'
-    || !DECIMAL_PATTERN.test(value)
-    || BigInt(value) > UINT64_MAX
+    || !DECIMAL_INT64_PATTERN.test(value)
+    || BigInt(value) > INT64_MAX
   ) {
     throw new MobileSyncValidationError(MOBILE_ERROR_CODES.invalidCursor)
   }
   return value
 }
 
-function normalizeLimit(value = 200) {
+function normalizeLimit(value = MOBILE_API_CONTRACT.limits.pullDefault) {
   let parsed = value
   if (typeof value === 'string') {
     if (!LIMIT_PATTERN.test(value)) throw new MobileSyncValidationError(MOBILE_ERROR_CODES.invalidLimit)
     parsed = Number(value)
   }
-  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 200) {
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MOBILE_API_CONTRACT.limits.pullMaximum) {
     throw new MobileSyncValidationError(MOBILE_ERROR_CODES.invalidLimit)
   }
   return parsed
 }
 
 function decimalString(value, fieldName) {
-  if (typeof value === 'string' && DECIMAL_PATTERN.test(value)) return value
-  if (typeof value === 'bigint' && value >= 0n) return value.toString(10)
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value)
-  throw new TypeError(`${fieldName} must be a lossless nonnegative decimal`)
+  let normalized = null
+  if (typeof value === 'string' && DECIMAL_INT64_PATTERN.test(value)) normalized = value
+  if (typeof value === 'bigint' && value >= 0n) normalized = value.toString(10)
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) normalized = String(value)
+  if (normalized === null || BigInt(normalized) > INT64_MAX) {
+    throw new MobileSyncDataConsistencyError(`${fieldName} is outside signed Int64`)
+  }
+  return normalized
 }
 
 function timeToMinutes(value) {
@@ -358,7 +370,9 @@ function serializeBirthdayRow(row) {
 }
 
 module.exports = {
+  INT64_MAX_DECIMAL,
   MAX_PUSH_REQUEST_BYTES,
+  MobileSyncDataConsistencyError,
   MobileSyncValidationError,
   decimalString,
   graphemeLength,

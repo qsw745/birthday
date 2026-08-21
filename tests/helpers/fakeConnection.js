@@ -202,12 +202,14 @@ class FakeConnection {
   static withProcessedOperation(operationId, response, {
     deviceId = DEFAULT_DEVICE_ID,
     entityId = operationEntityId(response),
+    baseVersion = '0',
   } = {}) {
     const database = new FakeDatabase({
       operations: [{
         operation_id: operationId,
         device_id: deviceId,
         entity_id: entityId,
+        base_version: baseVersion,
         response_json: clone(response),
       }],
     })
@@ -468,23 +470,25 @@ class FakeConnection {
       return [{ affectedRows: deleted ? 1 : 0 }]
     }
 
-    if (/^INSERT INTO mobile_sync_changes \(entity_type, entity_id, operation, version\) VALUES \(\?, \?, \?, \?\)$/i.test(sql)) {
+    if (/^INSERT INTO mobile_sync_changes \(entity_type, entity_id, operation, entity_version, record_json\) VALUES \(\?, \?, \?, \?, \?\)$/i.test(sql)) {
       this.requireTransaction(sql)
       assert.deepEqual(params.slice(0, 1), ['birthday'])
+      const record = JSON.parse(params[4])
       this.state().changes.push({
         seq: String(this.state().changes.length + 1),
         entity_type: params[0],
         entity_id: params[1],
         operation: params[2],
-        version: String(params[3]),
+        entity_version: String(params[3]),
+        record_json: record,
       })
       return [{ affectedRows: 1, insertId: this.state().changes.length }]
     }
 
-    if (/^INSERT INTO mobile_sync_operations \(operation_id, device_id, response_json\) VALUES \(\?, \?, \?\)$/i.test(sql)) {
+    if (/^INSERT INTO mobile_sync_operations \(operation_id, device_id, base_version, response_json\) VALUES \(\?, \?, \?, \?\)$/i.test(sql)) {
       this.requireTransaction(sql)
-      assert.equal(params.length, 3)
-      const [operationId, deviceId, responseJSON] = params
+      assert.equal(params.length, 4)
+      const [operationId, deviceId, baseVersion, responseJSON] = params
       if (this.database.operationInsertRace) {
         const race = this.database.operationInsertRace
         this.database.operationInsertRace = null
@@ -500,6 +504,7 @@ class FakeConnection {
         operation_id: operationId,
         device_id: deviceId,
         entity_id: operationEntityId(response),
+        base_version: String(baseVersion),
         response_json: response,
       })
       return [{ affectedRows: 1 }]
