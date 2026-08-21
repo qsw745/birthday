@@ -1,7 +1,7 @@
+import BirthdayCore
 import SwiftData
 import SwiftUI
-
-import BirthdayCore
+@preconcurrency import UserNotifications
 
 @main
 struct BirthdayMobileApp: App {
@@ -14,6 +14,7 @@ struct BirthdayMobileApp: App {
 
 @MainActor
 private struct BirthdayAppBootstrapView: View {
+  @Environment(\.scenePhase) private var scenePhase
   @State private var container: ModelContainer?
   @State private var model: AppModel?
   @State private var initializationError: String?
@@ -22,9 +23,21 @@ private struct BirthdayAppBootstrapView: View {
   var body: some View {
     Group {
       if let container, let model {
-        RootTabView(model: model)
+        AppFlowView(model: model)
           .modelContainer(container)
           .task { await model.reload() }
+          .onChange(of: scenePhase) { _, newPhase in
+            switch newPhase {
+            case .active:
+              Task { await model.reload() }
+            case .background:
+              model.lockForBackground()
+            case .inactive:
+              break
+            @unknown default:
+              break
+            }
+          }
       } else if let initializationError {
         LocalDatabaseFailureView(message: initializationError) {
           initializationAttempt += 1
@@ -49,12 +62,39 @@ private struct BirthdayAppBootstrapView: View {
         for: BirthdayEntity.self,
         SyncOperationEntity.self
       )
+      let notificationCenter = UNUserNotificationCenter.current()
       self.container = container
-      model = AppModel(store: BirthdayStore(modelContainer: container))
+      model = AppModel(
+        store: BirthdayStore(modelContainer: container),
+        preferences: .standard,
+        authenticator: LocalAuthenticationService(),
+        notificationScheduler: UserNotificationScheduler(
+          center: SystemNotificationCenterClient(center: notificationCenter)
+        ),
+        reminderPlanner: ReminderPlanner(),
+        requestNotificationAuthorization: {
+          try await notificationCenter.requestAuthorization(options: [.alert, .sound, .badge])
+        }
+      )
     } catch {
       container = nil
       model = nil
       initializationError = "无法打开本地生日资料。请确认设备有可用存储空间后重新尝试；若问题持续，请重新打开应用。"
+    }
+  }
+}
+
+private struct AppFlowView: View {
+  @Bindable var model: AppModel
+
+  var body: some View {
+    switch model.launchState {
+    case .onboarding:
+      OnboardingView(model: model)
+    case .locked:
+      AppLockView(model: model)
+    case .ready:
+      RootTabView(model: model)
     }
   }
 }
