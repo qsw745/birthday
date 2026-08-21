@@ -181,7 +181,7 @@ test('refresh rotates both raw tokens and never echoes the old refresh token', a
   const sessions = {
     rotateByRefreshToken: async (...args) => {
       rotated = args
-      return { rotated: true }
+      return { rotated: true, deviceId: DEVICE_ID }
     },
   }
   const oldRefreshToken = 'old-refresh-token'
@@ -193,9 +193,11 @@ test('refresh rotates both raw tokens and never echoes the old refresh token', a
   assert.deepEqual(Object.keys(response.body).sort(), [
     'accessExpiresAt',
     'accessToken',
+    'deviceId',
     'refreshExpiresAt',
     'refreshToken',
   ])
+  assert.equal(response.body.deviceId, DEVICE_ID)
   assert.equal(rotated[0], oldRefreshToken)
   assert.equal(rotated[2], NOW)
   assert.equal(response.body.accessToken, rotated[1].accessToken)
@@ -284,6 +286,7 @@ test('devices lists only the authenticated username and strips all token materia
         last_used_at: null,
         access_expires_at: new Date('2026-08-21T00:15:00.000Z'),
         refresh_expires_at: new Date('2027-02-17T00:00:00.000Z'),
+        revoked_at: null,
         access_token_hash: 'must-not-leak',
         refresh_token_hash: 'must-not-leak',
       }]
@@ -300,8 +303,7 @@ test('devices lists only the authenticated username and strips all token materia
       deviceName: 'iPhone',
       createdAt: '2026-08-20T00:00:00.000Z',
       lastUsedAt: null,
-      accessExpiresAt: '2026-08-21T00:15:00.000Z',
-      refreshExpiresAt: '2027-02-17T00:00:00.000Z',
+      revokedAt: null,
     }],
   })
   assert.doesNotMatch(JSON.stringify(response.body), /token|hash/i)
@@ -319,7 +321,7 @@ test('each router has its own login rate-limit state and its short test window r
 
   assert.equal(first.status, 200)
   assert.equal(limited.status, 429)
-  assert.deepEqual(limited.body, { error: '登录尝试过多，请稍后再试' })
+  assert.deepEqual(limited.body, { error: 'mobile_login_rate_limited' })
   assert.equal(isolated.status, 200)
 
   await new Promise(resolve => setTimeout(resolve, 35))

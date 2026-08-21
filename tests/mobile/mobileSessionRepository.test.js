@@ -22,14 +22,26 @@ function createRefreshPool(session) {
     calls,
     async execute(sql, params) {
       calls.push({ sql, params })
+      if (/SELECT device_id/i.test(sql)) {
+        const suppliedRefreshHash = params[0]
+        const currentTime = params[1]
+        const tokenMatches = suppliedRefreshHash === session.refreshTokenHash
+        const isUnrevoked = session.revokedAt === null
+        const isUnexpired = session.refreshExpiresAt > currentTime
+        return [[tokenMatches && isUnrevoked && isUnexpired
+          ? { device_id: session.deviceId }
+          : null].filter(Boolean)]
+      }
       const suppliedRefreshHash = params[5]
-      const currentTime = params[6]
+      const suppliedDeviceId = params[6]
+      const currentTime = params[7]
       const checksRevocation = /revoked_at\s+IS\s+NULL/i.test(sql)
       const checksStrictExpiry = /refresh_expires_at\s*>\s*\?/i.test(sql)
       const tokenMatches = suppliedRefreshHash === session.refreshTokenHash
+      const deviceMatches = suppliedDeviceId === session.deviceId
       const isUnrevoked = !checksRevocation || session.revokedAt === null
       const isUnexpired = !checksStrictExpiry || session.refreshExpiresAt > currentTime
-      return [{ affectedRows: tokenMatches && isUnrevoked && isUnexpired ? 1 : 0 }]
+      return [{ affectedRows: tokenMatches && deviceMatches && isUnrevoked && isUnexpired ? 1 : 0 }]
     },
   }
 }
@@ -83,7 +95,7 @@ test('findByAccessToken hashes before querying and requires an unrevoked unexpir
   assert.notEqual(params[0], originalPair.accessToken)
 })
 
-test('rotateByRefreshToken atomically replaces both hashes and both expiry timestamps', async () => {
+test('rotateByRefreshToken atomically replaces both hashes and both expiry timestamps and returns the device ID', async () => {
   const now = new Date('2026-08-21T00:10:00Z')
   const nextPair = {
     accessToken: 'replacement-access-token',
@@ -91,19 +103,23 @@ test('rotateByRefreshToken atomically replaces both hashes and both expiry times
     accessExpiresAt: new Date('2026-08-21T00:25:00Z'),
     refreshExpiresAt: new Date('2027-02-17T00:10:00Z'),
   }
-  const pool = createPool([{ affectedRows: 1 }])
+  const pool = createPool([[{ device_id: 'device-1' }], { affectedRows: 1 }])
   const sessions = createMobileSessionRepository({ pool })
 
   const result = await sessions.rotateByRefreshToken(originalPair.refreshToken, nextPair, now)
 
-  const [{ sql, params }] = pool.calls
-  assert.notEqual(result, null)
+  const [{ sql: selectSQL, params: selectParams }, { sql, params }] = pool.calls
+  assert.deepEqual(result, { rotated: true, deviceId: 'device-1' })
+  assert.match(selectSQL, /SELECT device_id/i)
+  assert.match(selectSQL, /WHERE refresh_token_hash\s*=\s*\?/i)
+  assert.deepEqual(selectParams, [digest(originalPair.refreshToken), now])
   assert.match(sql, /UPDATE mobile_device_sessions/i)
   assert.match(sql, /access_token_hash\s*=\s*\?/i)
   assert.match(sql, /refresh_token_hash\s*=\s*\?/i)
   assert.match(sql, /access_expires_at\s*=\s*\?/i)
   assert.match(sql, /refresh_expires_at\s*=\s*\?/i)
   assert.match(sql, /WHERE refresh_token_hash\s*=\s*\?/i)
+  assert.match(sql, /device_id\s*=\s*\?/i)
   assert.match(sql, /revoked_at\s+IS\s+NULL/i)
   assert.match(sql, /refresh_expires_at\s*>\s*\?/i)
   assert.deepEqual(params, [
@@ -113,6 +129,7 @@ test('rotateByRefreshToken atomically replaces both hashes and both expiry times
     nextPair.refreshExpiresAt,
     now,
     digest(originalPair.refreshToken),
+    'device-1',
     now,
   ])
   assert.ok(params.every(value => value !== originalPair.refreshToken && value !== nextPair.accessToken && value !== nextPair.refreshToken))
@@ -120,6 +137,7 @@ test('rotateByRefreshToken atomically replaces both hashes and both expiry times
 
 const refreshNow = new Date('2026-08-21T00:10:00Z')
 const validRefreshSession = {
+  deviceId: 'device-1',
   refreshTokenHash: digest(originalPair.refreshToken),
   revokedAt: null,
   refreshExpiresAt: new Date('2026-08-21T00:10:01Z'),

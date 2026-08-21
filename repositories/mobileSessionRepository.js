@@ -33,11 +33,24 @@ function createMobileSessionRepository({ pool, now = () => new Date() }) {
   }
 
   async function rotateByRefreshToken(refreshToken, nextPair, currentTime = now()) {
+    const refreshTokenHash = hashToken(refreshToken)
+    const [rows] = await pool.execute(
+      `SELECT device_id
+       FROM mobile_device_sessions
+       WHERE refresh_token_hash = ?
+         AND revoked_at IS NULL
+         AND refresh_expires_at > ?`,
+      [refreshTokenHash, currentTime],
+    )
+    const session = rows[0]
+    if (!session) return null
+
     const [result] = await pool.execute(
       `UPDATE mobile_device_sessions
        SET access_token_hash = ?, refresh_token_hash = ?, access_expires_at = ?,
            refresh_expires_at = ?, last_used_at = ?
        WHERE refresh_token_hash = ?
+         AND device_id = ?
          AND revoked_at IS NULL
          AND refresh_expires_at > ?`,
       [
@@ -46,11 +59,14 @@ function createMobileSessionRepository({ pool, now = () => new Date() }) {
         nextPair.accessExpiresAt,
         nextPair.refreshExpiresAt,
         currentTime,
-        hashToken(refreshToken),
+        refreshTokenHash,
+        session.device_id,
         currentTime,
       ],
     )
-    return result.affectedRows > 0 ? { rotated: true } : null
+    return result.affectedRows > 0
+      ? { rotated: true, deviceId: session.device_id }
+      : null
   }
 
   async function revoke(deviceId, username) {
@@ -68,7 +84,7 @@ function createMobileSessionRepository({ pool, now = () => new Date() }) {
   async function list(username) {
     const [rows] = await pool.execute(
       `SELECT device_id, username, device_name, created_at, last_used_at,
-              access_expires_at, refresh_expires_at
+              revoked_at
        FROM mobile_device_sessions
        WHERE username = ?
          AND revoked_at IS NULL

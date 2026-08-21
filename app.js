@@ -16,6 +16,7 @@ const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { createApiRouter } = require('./routes')
+const { createApiErrorHandler } = require('./middleware/apiError')
 const { attachAuth, requirePageAuth } = require('./utils/auth')
 
 // ===== 数据库（用于优雅关闭）=====
@@ -119,6 +120,7 @@ app.get(['/index.html', `${appBasePath}/index.html`], requirePageAuth, (req, res
 app.use(`${appBasePath}/vendor`, express.static(path.join(publicDir, 'vendor'), { index: false }))
 app.use(express.static(publicDir, { index: false }))
 app.use('/api', routes)
+app.use('/api', createApiErrorHandler())
 
 // ===== 启动 HTTPS Server（保存 server 引用）=====
 const PORT = process.env.PORT || 3300

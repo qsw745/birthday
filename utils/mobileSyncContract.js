@@ -1,5 +1,6 @@
 const moment = require('moment-timezone')
 const { calculateNextSolarDate, TZ } = require('./helpers')
+const { MOBILE_ERROR_CODES } = require('./mobileApiContract')
 
 const DECIMAL_PATTERN = /^\d+$/
 const LIMIT_PATTERN = /^[1-9]\d*$/
@@ -28,7 +29,7 @@ class MobileSyncValidationError extends Error {
 }
 
 function invalidBirthdayPayload() {
-  return new MobileSyncValidationError('invalid_birthday_payload', 'invalid birthday payload')
+  return new MobileSyncValidationError(MOBILE_ERROR_CODES.invalidBirthdayPayload, 'invalid birthday payload')
 }
 
 function isPlainObject(value) {
@@ -215,7 +216,7 @@ function normalizePushRequest(body, dateOptions) {
     throw invalidBirthdayPayload()
   }
   if (body.operations.length > 50) {
-    throw new MobileSyncValidationError('too_many_operations')
+    throw new MobileSyncValidationError(MOBILE_ERROR_CODES.tooManyOperations)
   }
   if (body.operations.length === 0) throw invalidBirthdayPayload()
 
@@ -265,7 +266,7 @@ function normalizeCursor(value) {
     || !DECIMAL_PATTERN.test(value)
     || BigInt(value) > UINT64_MAX
   ) {
-    throw new MobileSyncValidationError('invalid_cursor')
+    throw new MobileSyncValidationError(MOBILE_ERROR_CODES.invalidCursor)
   }
   return value
 }
@@ -273,11 +274,11 @@ function normalizeCursor(value) {
 function normalizeLimit(value = 200) {
   let parsed = value
   if (typeof value === 'string') {
-    if (!LIMIT_PATTERN.test(value)) throw new MobileSyncValidationError('invalid_limit')
+    if (!LIMIT_PATTERN.test(value)) throw new MobileSyncValidationError(MOBILE_ERROR_CODES.invalidLimit)
     parsed = Number(value)
   }
   if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 200) {
-    throw new MobileSyncValidationError('invalid_limit')
+    throw new MobileSyncValidationError(MOBILE_ERROR_CODES.invalidLimit)
   }
   return parsed
 }

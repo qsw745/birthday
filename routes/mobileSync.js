@@ -6,6 +6,7 @@ const {
   normalizeLimit,
   normalizePushRequest,
 } = require('../utils/mobileSyncContract')
+const { SYNC_ROUTE_PATHS } = require('../utils/mobileApiContract')
 
 function createMobileSyncRouter({
   syncRepository,
@@ -19,12 +20,12 @@ function createMobileSyncRouter({
 
   router.use(requireMobileAuth)
 
-  router.get('/snapshot', async (req, res) => {
+  router.get(SYNC_ROUTE_PATHS.snapshot, async (req, res) => {
     const result = await syncRepository.snapshot(req.mobileSession.username)
     return res.json(result)
   })
 
-  router.get('/pull', async (req, res) => {
+  router.get(SYNC_ROUTE_PATHS.pull, async (req, res) => {
     let cursor
     let limit
     try {
@@ -41,7 +42,7 @@ function createMobileSyncRouter({
     return res.json(result)
   })
 
-  router.post('/push', async (req, res) => {
+  router.post(SYNC_ROUTE_PATHS.push, async (req, res) => {
     try {
       const { operations } = normalizePushRequest(req.body, {
         calculateNextSolarDateFn,
