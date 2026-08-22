@@ -262,11 +262,6 @@ public actor BirthdayStore: ModelActor {
     timeZone: TimeZone
   ) throws {
     do {
-      let activeRecords = (results.compactMap(\.record) + results.compactMap(\.remote)).filter {
-        $0.deletedAt == nil && $0.nextSolarDate == nil
-      }
-      let calculatedSolarDates = try calculateMissingSolarDates(
-        activeRecords, now: now, timeZone: timeZone)
       let expected = Set(expectedOperationIDs)
       let actual = Set(results.map(\.operationId))
       guard expected.count == expectedOperationIDs.count, actual.count == results.count,
@@ -282,18 +277,65 @@ public actor BirthdayStore: ModelActor {
 
       let operations = try modelContext.fetch(FetchDescriptor<SyncOperationEntity>())
       let byOperationID = Dictionary(uniqueKeysWithValues: operations.map { ($0.operationId, $0) })
-      guard expected.allSatisfy({ byOperationID[$0] != nil }) else {
-        throw BirthdayStoreError.pushResultsDoNotMatchBatch
-      }
-
       let birthdays = try modelContext.fetch(FetchDescriptor<BirthdayEntity>())
       let byEntityID = Dictionary(uniqueKeysWithValues: birthdays.map { ($0.id, $0) })
+      let missingInitialDeletes = try missingInitialDeletes(
+        expectedOperationIDs: expected,
+        sent: sentByOperationID,
+        operations: byOperationID,
+        birthdays: byEntityID
+      )
+      guard
+        expected.allSatisfy({
+          byOperationID[$0] != nil || missingInitialDeletes[$0] != nil
+        })
+      else {
+        throw BirthdayStoreError.pushResultsDoNotMatchBatch
+      }
       try validatePushResults(
         results,
         operations: byOperationID,
-        sent: sentByOperationID
+        sent: sentByOperationID,
+        missingInitialDeletes: missingInitialDeletes
       )
+      let missingInitialDeleteEntityIDs = Set(missingInitialDeletes.values)
+      let activeRecords = (results.compactMap(\.record) + results.compactMap(\.remote)).filter {
+        !missingInitialDeleteEntityIDs.contains($0.id)
+          && $0.deletedAt == nil
+          && $0.nextSolarDate == nil
+      }
+      let calculatedSolarDates = try calculateMissingSolarDates(
+        activeRecords, now: now, timeZone: timeZone)
       for result in results {
+        if let entityID = missingInitialDeletes[result.operationId] {
+          guard let local = byEntityID[entityID] else {
+            throw BirthdayStoreError.pushResultsDoNotMatchBatch
+          }
+          switch result.status {
+          case .applied:
+            guard let record = result.record else {
+              throw BirthdayStoreError.pushResultEntityMismatch
+            }
+            local.version = record.version
+            _ = try insertDeleteOperation(record: map(local), createdAt: now)
+          case .conflict:
+            guard let remote = result.remote else {
+              throw BirthdayStoreError.pushResultEntityMismatch
+            }
+            let replacement = try insertDeleteOperation(record: map(local), createdAt: now)
+            try saveConflict(
+              entityID: entityID,
+              operationID: replacement.operationId,
+              local: apiBirthday(from: local),
+              remote: remote,
+              now: now
+            )
+            local.syncStateRaw = SyncState.conflict.rawValue
+            replacement.lastErrorCategory = "conflict_blocked"
+            replacement.nextRetryAt = nil
+          }
+          continue
+        }
         guard let operation = byOperationID[result.operationId] else {
           throw BirthdayStoreError.pushResultsDoNotMatchBatch
         }
@@ -701,9 +743,35 @@ public actor BirthdayStore: ModelActor {
   private func validatePushResults(
     _ results: [PushResult],
     operations: [UUID: SyncOperationEntity],
-    sent: [UUID: PushOperationDTO]
+    sent: [UUID: PushOperationDTO],
+    missingInitialDeletes: [UUID: UUID]
   ) throws {
     for result in results {
+      if let entityID = missingInitialDeletes[result.operationId] {
+        guard let sentOperation = sent[result.operationId],
+          sentOperation.type == .upsert,
+          sentOperation.entityId == entityID,
+          sentOperation.baseVersion == 0,
+          sentOperation.payload?.id == entityID
+        else {
+          throw BirthdayStoreError.pushResultsDoNotMatchBatch
+        }
+        let remote: APIBirthday
+        switch result.status {
+        case .applied:
+          guard let record = result.record, record.id == entityID, record.deletedAt == nil else {
+            throw BirthdayStoreError.pushResultEntityMismatch
+          }
+          remote = record
+        case .conflict:
+          guard let record = result.remote, record.id == entityID else {
+            throw BirthdayStoreError.pushResultEntityMismatch
+          }
+          remote = record
+        }
+        try validateRemoteBirthday(remote)
+        continue
+      }
       guard let operation = operations[result.operationId] else {
         throw BirthdayStoreError.pushResultsDoNotMatchBatch
       }
@@ -751,7 +819,11 @@ public actor BirthdayStore: ModelActor {
       case .delete:
         guard change.record.deletedAt != nil else { throw BirthdayStoreError.invalidPullPage }
       }
-      try validateRemoteBirthday(change.record)
+      do {
+        try validateRemoteBirthday(change.record)
+      } catch {
+        throw BirthdayStoreError.invalidPullPage
+      }
     }
 
     if page.changes.isEmpty {
@@ -775,6 +847,65 @@ public actor BirthdayStore: ModelActor {
         ),
         reminder: remote.reminder
       ))
+    guard
+      remote.reminder.emailEnabled
+        || (remote.reminder.emailAddress.isEmpty && remote.reminder.emailMessage.isEmpty)
+    else {
+      throw BirthdayStoreError.pushResultEntityMismatch
+    }
+    if remote.deletedAt != nil {
+      guard
+        !remote.reminder.emailEnabled,
+        remote.reminder.emailAddress.isEmpty,
+        remote.reminder.emailMessage.isEmpty
+      else {
+        throw BirthdayStoreError.pushResultEntityMismatch
+      }
+    }
+  }
+
+  private func missingInitialDeletes(
+    expectedOperationIDs: Set<UUID>,
+    sent: [UUID: PushOperationDTO],
+    operations: [UUID: SyncOperationEntity],
+    birthdays: [UUID: BirthdayEntity]
+  ) throws -> [UUID: UUID] {
+    var recovered: [UUID: UUID] = [:]
+    for operationID in expectedOperationIDs where operations[operationID] == nil {
+      guard let sentOperation = sent[operationID],
+        sentOperation.type == .upsert,
+        sentOperation.baseVersion == 0,
+        let payload = sentOperation.payload,
+        payload.id == sentOperation.entityId,
+        let birthday = birthdays[sentOperation.entityId],
+        birthday.version == 0,
+        birthday.deletedAt != nil,
+        try requireKnownSyncState(birthday.syncStateRaw) == .pendingDelete,
+        !operations.values.contains(where: { $0.entityId == sentOperation.entityId })
+      else {
+        throw BirthdayStoreError.pushResultsDoNotMatchBatch
+      }
+      recovered[operationID] = sentOperation.entityId
+    }
+    return recovered
+  }
+
+  private func insertDeleteOperation(record: BirthdayRecord, createdAt: Date) throws
+    -> SyncOperationEntity
+  {
+    let operation = SyncOperationEntity(
+      operationId: UUID(),
+      entityId: record.id,
+      operationType: "delete",
+      baseVersion: record.version,
+      payloadJSON: try JSONEncoder().encode(BirthdayOutboxPayload(record: record)),
+      createdAt: createdAt,
+      attemptCount: 0,
+      nextRetryAt: nil,
+      lastErrorCategory: nil
+    )
+    modelContext.insert(operation)
+    return operation
   }
 
   private func saveConflict(

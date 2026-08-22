@@ -17,13 +17,22 @@ func makeSyncStore() throws -> BirthdayStore {
   BirthdayStore(modelContainer: try makeSyncContainer())
 }
 
+let canonicalRemoteReminder = ReminderConfig(
+  timeMinutes: 540,
+  notifyDayBefore: true,
+  notifySameDay: true,
+  emailEnabled: false,
+  emailAddress: "",
+  emailMessage: ""
+)
+
 func makeAPIBirthday(
   id: UUID = UUID(),
   name: String = "妈妈",
   month: Int = 8,
   day: Int = 15,
   isLeapMonth: Bool = false,
-  reminder: ReminderConfig = .defaults,
+  reminder: ReminderConfig = canonicalRemoteReminder,
   nextSolarDate: Date? = nil,
   version: Int64 = 1,
   createdAt: Date = Date(timeIntervalSince1970: 1_700_000_000),

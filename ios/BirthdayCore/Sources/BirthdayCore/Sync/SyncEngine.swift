@@ -82,6 +82,12 @@ public enum PushBatcher {
           emailMessage: payload.emailMessage
         )
       ))
+    guard
+      payload.emailEnabled
+        || (payload.emailAddress.isEmpty && payload.emailMessage.isEmpty)
+    else {
+      throw PushBatcherError.invalidOperation(operation.operationId)
+    }
   }
 }
 

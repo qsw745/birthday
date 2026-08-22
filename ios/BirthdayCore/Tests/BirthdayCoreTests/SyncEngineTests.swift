@@ -414,6 +414,236 @@ import Testing
     #expect(await api.events().last == .pull)
   }
 
+  @Test func disabledEmailPersistedPoisonIsTerminalWhileTheNextGoodOperationStillUploads()
+    async throws
+  {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let container = try makeSyncContainer()
+    let context = ModelContext(container)
+    let poisonID = UUID()
+    let poisonOperationID = UUID()
+    let noncanonicalPayloadJSON = Data(
+      """
+      {"id":"\(poisonID.uuidString.lowercased())","name":"遗留坏数据","lunarMonth":8,"lunarDay":15,"isLeapMonth":false,"reminderTimeMinutes":540,"notifyDayBefore":true,"notifySameDay":true,"emailEnabled":false,"emailAddress":"left@example.com","emailMessage":"不应在线上传"}
+      """.utf8)
+    context.insert(
+      SyncOperationEntity(
+        operationId: poisonOperationID, entityId: poisonID, operationType: "upsert", baseVersion: 0,
+        payloadJSON: noncanonicalPayloadJSON,
+        createdAt: now.addingTimeInterval(-1), attemptCount: 0, nextRetryAt: nil,
+        lastErrorCategory: nil
+      ))
+    try context.save()
+    let store = BirthdayStore(modelContainer: container)
+    _ = try await store.save(
+      BirthdayDraft(
+        name: "好操作", lunarBirthday: LunarBirthday(month: 8, day: 15, isLeapMonth: false),
+        reminder: .defaults
+      ), id: UUID(), now: now, timeZone: TimeZone(secondsFromGMT: 0)!
+    )
+    let credentials = try makeCredentials(now: now)
+    let api = DrainingFakeAPI(deviceID: try #require(try credentials.load()?.deviceId))
+
+    let summary = try await SyncEngine(
+      api: api, store: store, credentials: credentials, now: { now }
+    ).syncNow()
+
+    let poison = try #require(
+      try await store.pendingOperations().first { $0.operationId == poisonOperationID })
+    #expect(poison.lastErrorCategory == "local_contract")
+    #expect(summary.uploaded == 1)
+    #expect(await api.events().last == .pull)
+  }
+
+  @Test func noncanonicalPushRecordsRejectTheWholeBatchBeforeAnyMutation() async throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let badReminders = [
+      ReminderConfig(
+        timeMinutes: 540, notifyDayBefore: true, notifySameDay: true, emailEnabled: false,
+        emailAddress: "disabled@example.com", emailMessage: "遗留正文"),
+      ReminderConfig(
+        timeMinutes: 540, notifyDayBefore: true, notifySameDay: true, emailEnabled: false,
+        emailAddress: "", emailMessage: "墓碑正文"),
+    ]
+
+    for (index, reminder) in badReminders.enumerated() {
+      let store = try makeSyncStore()
+      let first = try await store.save(
+        BirthdayDraft(
+          name: "第一项", lunarBirthday: LunarBirthday(month: 8, day: 15, isLeapMonth: false),
+          reminder: .defaults
+        ), id: UUID(), now: now, timeZone: TimeZone(secondsFromGMT: 0)!
+      )
+      let second = try await store.save(
+        BirthdayDraft(
+          name: "第二项", lunarBirthday: LunarBirthday(month: 8, day: 15, isLeapMonth: false),
+          reminder: .defaults
+        ), id: UUID(), now: now.addingTimeInterval(1), timeZone: TimeZone(secondsFromGMT: 0)!
+      )
+      let operations = try await store.readyOperations(limit: 2, now: now.addingTimeInterval(1))
+      let firstOperation = try #require(operations.first { $0.entityId == first.id })
+      let secondOperation = try #require(operations.first { $0.entityId == second.id })
+      let invalidResult: PushResult
+      if index == 0 {
+        invalidResult = PushResult(
+          operationId: secondOperation.operationId, status: .applied,
+          record: makeAPIBirthday(
+            id: second.id, name: "服务端坏 active", reminder: reminder, version: 2), remote: nil)
+      } else {
+        invalidResult = PushResult(
+          operationId: secondOperation.operationId, status: .conflict, record: nil,
+          remote: makeAPIBirthday(
+            id: second.id, name: "服务端坏 tombstone", reminder: reminder, version: 2,
+            deletedAt: now.addingTimeInterval(2)))
+      }
+
+      await #expect(throws: BirthdayStoreError.pushResultEntityMismatch) {
+        try await store.applyPushResults(
+          [
+            PushResult(
+              operationId: firstOperation.operationId, status: .applied,
+              record: makeAPIBirthday(id: first.id, name: "本应不写", version: 2), remote: nil),
+            invalidResult,
+          ], expectedOperationIDs: [firstOperation.operationId, secondOperation.operationId],
+          expectedOperations: [
+            try PushOperationDTO(firstOperation), try PushOperationDTO(secondOperation),
+          ],
+          now: now, timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+      }
+      #expect(try await store.activeBirthdays().first { $0.id == first.id }?.name == "第一项")
+      #expect(try await store.readyOperations(limit: 2, now: now).count == 2)
+      #expect(try await store.syncConflicts().isEmpty)
+    }
+  }
+
+  @Test func noncanonicalPullRecordsRejectTheWholePageBeforeCursorOrRowsMutate() async throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let badChanges = [
+      PullChange(
+        seq: 2, operation: .upsert,
+        record: makeAPIBirthday(
+          id: UUID(), name: "坏 active",
+          reminder: ReminderConfig(
+            timeMinutes: 540, notifyDayBefore: true, notifySameDay: true, emailEnabled: false,
+            emailAddress: "disabled@example.com", emailMessage: "遗留正文"), version: 1)),
+      PullChange(
+        seq: 2, operation: .delete,
+        record: makeAPIBirthday(
+          id: UUID(), name: "坏 tombstone",
+          reminder: ReminderConfig(
+            timeMinutes: 540, notifyDayBefore: true, notifySameDay: true, emailEnabled: false,
+            emailAddress: "", emailMessage: "墓碑正文"), version: 1,
+          deletedAt: now.addingTimeInterval(1))),
+    ]
+
+    for badChange in badChanges {
+      let store = try makeSyncStore()
+      let valid = makeAPIBirthday(id: UUID(), name: "本应不写", version: 1)
+      await #expect(throws: BirthdayStoreError.invalidPullPage) {
+        try await store.applyPull(
+          PullResponse(
+            changes: [PullChange(seq: 1, operation: .upsert, record: valid), badChange],
+            nextCursor: 2, hasMore: false), now: now, timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+      }
+      #expect(try await store.syncCursor() == 0)
+      #expect(try await store.activeBirthdays().isEmpty)
+      #expect(try await store.syncConflicts().isEmpty)
+    }
+  }
+
+  @Test func firstCreateDeletedInFlightAppliedAckRestoresAFreshDeleteOperation() async throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let store = try makeSyncStore()
+    let record = try await store.save(
+      BirthdayDraft(
+        name: "首次创建", lunarBirthday: LunarBirthday(month: 8, day: 15, isLeapMonth: false),
+        reminder: .defaults
+      ), id: UUID(), now: now, timeZone: TimeZone(secondsFromGMT: 0)!
+    )
+    let sent = try #require(try await store.readyOperations(limit: 1, now: now).first)
+    let sentDTO = try PushOperationDTO(sent)
+    try await store.softDelete(id: record.id, now: now.addingTimeInterval(1))
+    #expect(try await store.pendingOperations().isEmpty)
+
+    try await store.applyPushResults(
+      [
+        PushResult(
+          operationId: sent.operationId, status: .applied,
+          record: makeAPIBirthday(id: record.id, name: "首次创建", version: 6), remote: nil)
+      ], expectedOperationIDs: [sent.operationId], expectedOperations: [sentDTO], now: now,
+      timeZone: TimeZone(secondsFromGMT: 0)!
+    )
+
+    let replacement = try #require(try await store.readyOperations(limit: 1, now: now).first)
+    #expect(replacement.operationId != sent.operationId)
+    #expect(replacement.operationType == "delete")
+    #expect(replacement.baseVersion == 6)
+    #expect(try PushOperationDTO(replacement).payload == nil)
+    #expect(try await store.activeBirthdays().isEmpty)
+  }
+
+  @Test func firstCreateDeletedInFlightConflictPersistsSnapshotsAndBlocksFreshDelete() async throws
+  {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let store = try makeSyncStore()
+    let record = try await store.save(
+      BirthdayDraft(
+        name: "首次冲突", lunarBirthday: LunarBirthday(month: 8, day: 15, isLeapMonth: false),
+        reminder: .defaults
+      ), id: UUID(), now: now, timeZone: TimeZone(secondsFromGMT: 0)!
+    )
+    let sent = try #require(try await store.readyOperations(limit: 1, now: now).first)
+    let sentDTO = try PushOperationDTO(sent)
+    try await store.softDelete(id: record.id, now: now.addingTimeInterval(1))
+    let remote = makeAPIBirthday(id: record.id, name: "远端冲突", version: 6)
+
+    try await store.applyPushResults(
+      [PushResult(operationId: sent.operationId, status: .conflict, record: nil, remote: remote)],
+      expectedOperationIDs: [sent.operationId], expectedOperations: [sentDTO], now: now,
+      timeZone: TimeZone(secondsFromGMT: 0)!
+    )
+
+    let conflict = try #require(try await store.syncConflicts().first)
+    let local = try MobileJSON.decoder.decode(APIBirthday.self, from: conflict.localSnapshotJSON)
+    #expect(local.deletedAt != nil)
+    #expect(
+      try MobileJSON.decoder.decode(APIBirthday.self, from: conflict.remoteSnapshotJSON) == remote)
+    let blocked = try #require(try await store.pendingOperations().first)
+    #expect(blocked.operationId == conflict.operationId)
+    #expect(blocked.operationType == "delete")
+    #expect(blocked.baseVersion == 0)
+    #expect(try await store.readyOperations(limit: 1, now: now).isEmpty)
+  }
+
+  @Test func missingPushOperationWithoutAMatchingDeletedFirstCreateStillFailsWithoutWrites()
+    async throws
+  {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let store = try makeSyncStore()
+    let sent = PushOperationDTO(
+      operationId: UUID(), entityId: UUID(), type: .upsert, baseVersion: 0,
+      payload: BirthdayPayloadDTO(
+        id: UUID(), name: "错 ID", lunarMonth: 8, lunarDay: 15, isLeapMonth: false,
+        reminderTimeMinutes: 540, notifyDayBefore: true, notifySameDay: true, emailEnabled: false,
+        emailAddress: "", emailMessage: ""))
+
+    await #expect(throws: BirthdayStoreError.pushResultsDoNotMatchBatch) {
+      try await store.applyPushResults(
+        [
+          PushResult(
+            operationId: sent.operationId, status: .applied,
+            record: makeAPIBirthday(id: sent.entityId, name: "错误 ACK", version: 1), remote: nil)
+        ], expectedOperationIDs: [sent.operationId], expectedOperations: [sent], now: now,
+        timeZone: TimeZone(secondsFromGMT: 0)!
+      )
+    }
+    #expect(try await store.activeBirthdays().isEmpty)
+    #expect(try await store.pendingOperations().isEmpty)
+    #expect(try await store.syncConflicts().isEmpty)
+  }
+
   @Test func readyReadFailureStopsBeforeAnyPull() async throws {
     let now = Date(timeIntervalSince1970: 1_700_000_000)
     let api = PagedPullAPI(pages: [])
