@@ -24,12 +24,13 @@ public actor BirthdayStore: ModelActor {
 
   init(
     modelContainer: ModelContainer,
+    calculator: any LunarBirthdayCalculating = ChineseCalendarBirthdayCalculator(),
     transactionCommitter: @escaping @Sendable (ModelContext) throws -> Void
   ) {
     let context = ModelContext(modelContainer)
     self.modelContainer = modelContainer
     modelExecutor = DefaultSerialModelExecutor(modelContext: context)
-    calculator = ChineseCalendarBirthdayCalculator()
+    self.calculator = calculator
     self.transactionCommitter = transactionCommitter
   }
 
@@ -189,7 +190,9 @@ public actor BirthdayStore: ModelActor {
 
   public func applySnapshot(
     _ snapshot: SnapshotResponse,
-    decisions: [DuplicateCandidate.ID: DuplicateDecision]
+    decisions: [DuplicateCandidate.ID: DuplicateDecision],
+    now: Date,
+    timeZone: TimeZone
   ) throws {
     do {
       try validateSnapshot(snapshot)
@@ -200,6 +203,12 @@ public actor BirthdayStore: ModelActor {
       guard preview.duplicates.allSatisfy({ decisions[$0.id] != nil }) else {
         throw SnapshotImportError.missingDuplicateDecision
       }
+      try validateDuplicateDecisions(preview.duplicates, decisions: decisions)
+      let calculatedSolarDates = try calculateMissingSolarDates(
+        snapshot.birthdays,
+        now: now,
+        timeZone: timeZone
+      )
 
       let pendingIDs = try pendingEntityIDs(
         birthdays: birthdayEntities,
@@ -227,11 +236,12 @@ public actor BirthdayStore: ModelActor {
 
       for remote in snapshot.birthdays {
         guard !pendingIDs.contains(remote.id) else { continue }
+        let resolvedSolarDate = remote.nextSolarDate ?? calculatedSolarDates[remote.id]
 
         if let existing = birthdayEntities.first(where: { $0.id == remote.id }) {
-          apply(remote, to: existing)
+          apply(remote, nextSolarDate: resolvedSolarDate, to: existing)
         } else {
-          modelContext.insert(makeEntity(remote))
+          modelContext.insert(makeEntity(remote, nextSolarDate: resolvedSolarDate))
         }
       }
 
@@ -250,6 +260,40 @@ public actor BirthdayStore: ModelActor {
       modelContext.rollback()
       throw error
     }
+  }
+
+  private func validateDuplicateDecisions(
+    _ candidates: [DuplicateCandidate],
+    decisions: [DuplicateCandidate.ID: DuplicateDecision]
+  ) throws {
+    let groups = Dictionary(grouping: candidates, by: { $0.local.id })
+    for (localID, group) in groups {
+      guard let firstDecision = group.first.flatMap({ decisions[$0.id] }) else { continue }
+      if group.contains(where: { decisions[$0.id] != firstDecision }) {
+        throw SnapshotImportError.conflictingDuplicateDecisions(localID)
+      }
+    }
+  }
+
+  private func calculateMissingSolarDates(
+    _ remoteRecords: [APIBirthday],
+    now: Date,
+    timeZone: TimeZone
+  ) throws -> [UUID: Date] {
+    var calculated: [UUID: Date] = [:]
+    for remote in remoteRecords where remote.deletedAt == nil && remote.nextSolarDate == nil {
+      calculated[remote.id] = try calculator.nextOccurrence(
+        of: LunarBirthday(
+          month: remote.lunarMonth,
+          day: remote.lunarDay,
+          isLeapMonth: remote.isLeapMonth
+        ),
+        reminderMinutes: remote.reminder.timeMinutes,
+        after: now,
+        in: timeZone
+      )
+    }
+    return calculated
   }
 
   private func validateSnapshot(_ snapshot: SnapshotResponse) throws {
@@ -286,7 +330,7 @@ public actor BirthdayStore: ModelActor {
     return pending
   }
 
-  private func makeEntity(_ remote: APIBirthday) -> BirthdayEntity {
+  private func makeEntity(_ remote: APIBirthday, nextSolarDate: Date?) -> BirthdayEntity {
     let entity = BirthdayEntity(
       id: remote.id,
       draft: BirthdayDraft(
@@ -298,14 +342,14 @@ public actor BirthdayStore: ModelActor {
         ),
         reminder: remote.reminder
       ),
-      nextSolarDate: remote.nextSolarDate ?? remote.updatedAt,
+      nextSolarDate: nextSolarDate ?? remote.updatedAt,
       now: remote.createdAt
     )
-    apply(remote, to: entity)
+    apply(remote, nextSolarDate: nextSolarDate, to: entity)
     return entity
   }
 
-  private func apply(_ remote: APIBirthday, to entity: BirthdayEntity) {
+  private func apply(_ remote: APIBirthday, nextSolarDate: Date?, to entity: BirthdayEntity) {
     entity.name = remote.name.trimmingCharacters(in: .whitespacesAndNewlines)
     entity.lunarMonth = remote.lunarMonth
     entity.lunarDay = remote.lunarDay
@@ -316,7 +360,7 @@ public actor BirthdayStore: ModelActor {
     entity.emailEnabled = remote.reminder.emailEnabled
     entity.emailAddress = remote.reminder.emailAddress
     entity.emailMessage = remote.reminder.emailMessage
-    entity.nextSolarDate = remote.nextSolarDate
+    entity.nextSolarDate = nextSolarDate
     entity.version = remote.version
     entity.createdAt = remote.createdAt
     entity.updatedAt = remote.updatedAt

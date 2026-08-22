@@ -8,6 +8,21 @@ private enum SnapshotCommitFailure: Error, Equatable {
   case failed
 }
 
+private enum SnapshotCalculationFailure: Error, Equatable {
+  case failed
+}
+
+private struct FailingSnapshotCalculator: LunarBirthdayCalculating {
+  func nextOccurrence(
+    of birthday: LunarBirthday,
+    reminderMinutes: Int,
+    after now: Date,
+    in timeZone: TimeZone
+  ) throws -> Date {
+    throw SnapshotCalculationFailure.failed
+  }
+}
+
 private final class SnapshotCommitRecorder: @unchecked Sendable {
   private let lock = NSLock()
   private var countStorage = 0
@@ -87,12 +102,48 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
     await #expect(throws: SnapshotImportError.missingDuplicateDecision) {
       try await store.applySnapshot(
         SnapshotResponse(cursor: 41, birthdays: [remote]),
-        decisions: [:]
+        decisions: [:],
+        now: snapshotNow,
+        timeZone: snapshotTimeZone
       )
     }
 
     #expect(try await store.activeBirthdays() == [local])
     #expect(try await store.pendingOperations().map(\.entityId) == [local.id])
+    #expect(try await store.syncCursor() == 0)
+  }
+
+  @Test func mixedDecisionsForOneLocalAndMultipleRemoteRecordsWriteNothing() async throws {
+    let store = try makeSyncStore()
+    let local = try await store.save(
+      localDraft(name: "妈妈"),
+      id: UUID(),
+      now: snapshotNow,
+      timeZone: snapshotTimeZone
+    )
+    let operation = try #require(try await store.pendingOperations().first)
+    let firstRemote = makeAPIBirthday(id: UUID(), name: "妈妈")
+    let secondRemote = makeAPIBirthday(id: UUID(), name: " 妈妈 ")
+    let preview = SnapshotImporter.preview(
+      local: [local],
+      remote: [firstRemote, secondRemote]
+    )
+    #expect(preview.duplicates.count == 2)
+
+    await #expect(throws: SnapshotImportError.conflictingDuplicateDecisions(local.id)) {
+      try await store.applySnapshot(
+        SnapshotResponse(cursor: 42, birthdays: [firstRemote, secondRemote]),
+        decisions: [
+          preview.duplicates[0].id: .keepBoth,
+          preview.duplicates[1].id: .useRemote,
+        ],
+        now: snapshotNow,
+        timeZone: snapshotTimeZone
+      )
+    }
+
+    #expect(try await store.activeBirthdays() == [local])
+    #expect(try await store.pendingOperations() == [operation])
     #expect(try await store.syncCursor() == 0)
   }
 
@@ -104,7 +155,9 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
     await #expect(throws: BirthdayValidationError.emptyName) {
       try await store.applySnapshot(
         SnapshotResponse(cursor: 41, birthdays: [valid, invalid]),
-        decisions: [:]
+        decisions: [:],
+        now: snapshotNow,
+        timeZone: snapshotTimeZone
       )
     }
 
@@ -126,7 +179,9 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
             makeAPIBirthday(id: id, name: "爸爸"),
           ]
         ),
-        decisions: [:]
+        decisions: [:],
+        now: snapshotNow,
+        timeZone: snapshotTimeZone
       )
     }
 
@@ -151,7 +206,9 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
 
     try await store.applySnapshot(
       SnapshotResponse(cursor: 41, birthdays: [active, tombstone]),
-      decisions: [:]
+      decisions: [:],
+      now: snapshotNow,
+      timeZone: snapshotTimeZone
     )
 
     #expect(try await store.activeBirthdays().map(\.id) == [active.id])
@@ -163,6 +220,64 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
     let all = try context.fetch(FetchDescriptor<BirthdayEntity>())
     #expect(all.count == 2)
     #expect(all.first(where: { $0.id == tombstone.id })?.deletedAt == snapshotNow)
+  }
+
+  @Test func missingRemoteSolarDateIsCalculatedBeforeCommitAndVisibleInCalendar() async throws {
+    let store = try makeSyncStore()
+    let now = Date(timeIntervalSince1970: 1_795_000_000)
+    let remote = makeAPIBirthday(
+      id: UUID(),
+      name: "妈妈",
+      month: 8,
+      day: 15,
+      nextSolarDate: nil
+    )
+    let expected = try ChineseCalendarBirthdayCalculator().nextOccurrence(
+      of: LunarBirthday(month: 8, day: 15, isLeapMonth: false),
+      reminderMinutes: remote.reminder.timeMinutes,
+      after: now,
+      in: snapshotTimeZone
+    )
+
+    try await store.applySnapshot(
+      SnapshotResponse(cursor: 43, birthdays: [remote]),
+      decisions: [:],
+      now: now,
+      timeZone: snapshotTimeZone
+    )
+
+    let imported = try #require(try await store.activeBirthdays().first)
+    #expect(imported.nextSolarDate == expected)
+    let projection = CalendarProjection.make(
+      records: [imported],
+      monthContaining: expected,
+      timeZone: snapshotTimeZone
+    )
+    #expect(projection.daysWithBirthdays.count == 1)
+    #expect(projection.recordsByDay.values.flatMap { $0 }.map(\.id) == [remote.id])
+  }
+
+  @Test func solarDateCalculationFailurePrevalidatesBeforeAnyWrite() async throws {
+    let container = try makeSyncContainer()
+    let store = BirthdayStore(
+      modelContainer: container,
+      calculator: FailingSnapshotCalculator(),
+      transactionCommitter: { context in try context.save() }
+    )
+    let remote = makeAPIBirthday(nextSolarDate: nil)
+
+    await #expect(throws: SnapshotCalculationFailure.failed) {
+      try await store.applySnapshot(
+        SnapshotResponse(cursor: 44, birthdays: [remote]),
+        decisions: [:],
+        now: snapshotNow,
+        timeZone: snapshotTimeZone
+      )
+    }
+
+    #expect(try await store.activeBirthdays().isEmpty)
+    #expect(try await store.pendingOperations().isEmpty)
+    #expect(try await store.syncCursor() == 0)
   }
 
   @Test func matchingUUIDUpdatesSyncedLocalWithoutBecomingDuplicate() async throws {
@@ -177,7 +292,9 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
 
     try await store.applySnapshot(
       SnapshotResponse(cursor: 9, birthdays: [remote]),
-      decisions: [:]
+      decisions: [:],
+      now: snapshotNow,
+      timeZone: snapshotTimeZone
     )
 
     let imported = try #require(try await store.activeBirthdays().first)
@@ -205,7 +322,9 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
         cursor: 12,
         birthdays: [makeAPIBirthday(id: id, name: "服务器旧值", version: 4)]
       ),
-      decisions: [:]
+      decisions: [:],
+      now: snapshotNow,
+      timeZone: snapshotTimeZone
     )
 
     #expect(try await store.activeBirthdays() == [local])
@@ -226,7 +345,9 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
         cursor: 13,
         birthdays: [makeAPIBirthday(id: id, name: "服务器仍存在", version: 4)]
       ),
-      decisions: [:]
+      decisions: [:],
+      now: snapshotNow,
+      timeZone: snapshotTimeZone
     )
 
     #expect(try await store.activeBirthdays().isEmpty)
@@ -249,7 +370,9 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
 
     try await store.applySnapshot(
       SnapshotResponse(cursor: 14, birthdays: [remote]),
-      decisions: [candidate.id: .keepBoth]
+      decisions: [candidate.id: .keepBoth],
+      now: snapshotNow,
+      timeZone: snapshotTimeZone
     )
 
     let records = try await store.activeBirthdays()
@@ -281,7 +404,9 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
 
     try await store.applySnapshot(
       SnapshotResponse(cursor: 15, birthdays: [remote]),
-      decisions: [candidate.id: .useRemote]
+      decisions: [candidate.id: .useRemote],
+      now: snapshotNow,
+      timeZone: snapshotTimeZone
     )
 
     #expect(try await store.activeBirthdays().map(\.id) == [remote.id])
@@ -295,6 +420,52 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
     #expect(discarded.syncStateRaw == SyncState.synced.rawValue)
   }
 
+  @Test func useRemoteCommitFailureRestoresLocalRecordOutboxAndCursor() async throws {
+    let container = try makeSyncContainer()
+    let initialStore = BirthdayStore(modelContainer: container)
+    let local = try await initialStore.save(
+      localDraft(name: "妈妈"),
+      id: UUID(),
+      now: snapshotNow,
+      timeZone: snapshotTimeZone
+    )
+    let operation = try #require(try await initialStore.pendingOperations().first)
+    let remote = makeAPIBirthday(
+      id: UUID(),
+      name: "妈妈",
+      updatedAt: snapshotNow.addingTimeInterval(60)
+    )
+    let candidate = try #require(
+      SnapshotImporter.preview(local: [local], remote: [remote]).duplicates.first
+    )
+    let failingStore = BirthdayStore(
+      modelContainer: container,
+      transactionCommitter: SnapshotCommitRecorder(shouldFail: true).commit
+    )
+
+    await #expect(throws: SnapshotCommitFailure.failed) {
+      try await failingStore.applySnapshot(
+        SnapshotResponse(cursor: 98, birthdays: [remote]),
+        decisions: [candidate.id: .useRemote],
+        now: snapshotNow,
+        timeZone: snapshotTimeZone
+      )
+    }
+
+    let verificationStore = BirthdayStore(modelContainer: container)
+    #expect(try await verificationStore.activeBirthdays() == [local])
+    #expect(try await verificationStore.pendingOperations() == [operation])
+    #expect(try await verificationStore.syncCursor() == 0)
+
+    let context = ModelContext(container)
+    let persisted = try #require(
+      try context.fetch(FetchDescriptor<BirthdayEntity>()).first(where: { $0.id == local.id })
+    )
+    #expect(persisted.deletedAt == local.deletedAt)
+    #expect(persisted.updatedAt == local.updatedAt)
+    #expect(persisted.syncStateRaw == local.syncState.rawValue)
+  }
+
   @Test func commitFailureRollsBackBirthdaysAndCursor() async throws {
     let container = try makeSyncContainer()
     let recorder = SnapshotCommitRecorder(shouldFail: true)
@@ -306,7 +477,9 @@ private func localDraft(name: String, month: Int = 8, day: Int = 15) -> Birthday
     await #expect(throws: SnapshotCommitFailure.failed) {
       try await store.applySnapshot(
         SnapshotResponse(cursor: 99, birthdays: [makeAPIBirthday()]),
-        decisions: [:]
+        decisions: [:],
+        now: snapshotNow,
+        timeZone: snapshotTimeZone
       )
     }
 

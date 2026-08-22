@@ -24,18 +24,24 @@ final class OfflineFlowUITests: XCTestCase {
       app.staticTexts["首次导入预览"].waitForExistence(timeout: 5),
       "凭据保存后应独立读取快照并进入预览"
     )
-    XCTAssertTrue(app.staticTexts["服务器中有 2 条生日"].exists)
-    XCTAssertTrue(app.staticTexts["发现 1 组可能重复"].exists)
+    XCTAssertTrue(app.staticTexts["服务器中有 3 条生日"].exists)
+    XCTAssertTrue(app.staticTexts["发现 2 组可能重复"].exists)
 
     let importButton = app.buttons["importSnapshotButton"]
     XCTAssertTrue(importButton.exists)
-    XCTAssertEqual(importButton.label, "导入 2 条生日")
+    XCTAssertEqual(importButton.label, "导入 3 条生日")
     XCTAssertFalse(importButton.isEnabled, "所有重复项未决策前禁止写入")
 
     let keepBoth = app.buttons["keepBothDuplicateButton"].firstMatch
     XCTAssertTrue(keepBoth.exists)
     XCTAssertTrue(app.buttons["useRemoteDuplicateButton"].firstMatch.exists)
     keepBoth.tap()
+    XCTAssertEqual(
+      app.buttons.matching(identifier: "keepBothDuplicateButton")
+        .matching(NSPredicate(format: "value == %@", "已选择")).count,
+      2,
+      "同一本地 UUID 的所有远端候选必须共享一个组级决定"
+    )
     XCTAssertTrue(importButton.isEnabled)
     importButton.tap()
 
@@ -46,6 +52,11 @@ final class OfflineFlowUITests: XCTestCase {
     XCTAssertTrue(
       app.buttons["addBirthdayButton"].waitForExistence(timeout: 5),
       "原子导入成功后应完成引导并打开月历"
+    )
+    XCTAssertTrue(
+      app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "爸爸")).firstMatch
+        .waitForExistence(timeout: 3),
+      "服务器未提供公历日期时，也应本地计算并显示在首屏月历"
     )
     app.tabBars.buttons["全部"].tap()
     XCTAssertTrue(app.staticTexts["妈妈"].waitForExistence(timeout: 3))
@@ -79,8 +90,45 @@ final class OfflineFlowUITests: XCTestCase {
     app.buttons["retrySnapshotPreviewButton"].tap()
 
     XCTAssertTrue(app.staticTexts["首次导入预览"].waitForExistence(timeout: 5))
-    XCTAssertTrue(app.staticTexts["发现 1 组可能重复"].exists)
+    XCTAssertTrue(app.staticTexts["发现 2 组可能重复"].exists)
     XCTAssertFalse(app.buttons["importSnapshotButton"].isEnabled)
+  }
+
+  func testCommittedSnapshotRefreshFailureReloadsWithoutReimporting() {
+    let app = XCUIApplication()
+    app.launchArguments = [
+      "-ui-testing",
+      "-network-disabled",
+      "-snapshot-import-preview",
+      "-snapshot-first-refresh-fails",
+    ]
+    app.launch()
+
+    XCTAssertTrue(app.staticTexts["离线也能完整使用"].waitForExistence(timeout: 5))
+    app.buttons["继续"].tap()
+    app.buttons["暂不开启"].tap()
+    app.textFields["serverUsernameField"].tap()
+    app.textFields["serverUsernameField"].typeText("admin")
+    app.secureTextFields["serverPasswordField"].tap()
+    app.secureTextFields["serverPasswordField"].typeText("ui-test-secret")
+    app.buttons["bindServerButton"].tap()
+
+    XCTAssertTrue(app.staticTexts["首次导入预览"].waitForExistence(timeout: 5))
+    app.buttons["keepBothDuplicateButton"].firstMatch.tap()
+    app.buttons["importSnapshotButton"].tap()
+
+    XCTAssertTrue(
+      app.staticTexts["导入已完成，但界面刷新失败。请重新载入已导入资料。"]
+        .waitForExistence(timeout: 5)
+    )
+    XCTAssertFalse(app.buttons["importSnapshotButton"].exists)
+    app.buttons["retryImportedSnapshotRefreshButton"].tap()
+
+    let unlockButton = app.buttons["unlockButton"]
+    if unlockButton.waitForExistence(timeout: 2) {
+      unlockButton.tap()
+    }
+    XCTAssertTrue(app.buttons["addBirthdayButton"].waitForExistence(timeout: 5))
   }
 
   func testCreateSearchEditAndDeleteWithoutNetwork() {

@@ -7,12 +7,18 @@ struct UITestBootstrap: Equatable, Sendable {
   let networkDisabled: Bool
   let snapshotImportPreviewEnabled: Bool
   let snapshotFirstLoadFails: Bool
+  let snapshotFirstRefreshFails: Bool
 
   init(arguments: [String] = ProcessInfo.processInfo.arguments) {
     isEnabled = arguments.contains("-ui-testing")
     networkDisabled = arguments.contains("-network-disabled")
     snapshotImportPreviewEnabled = arguments.contains("-snapshot-import-preview")
     snapshotFirstLoadFails = arguments.contains("-snapshot-first-load-fails")
+    snapshotFirstRefreshFails = arguments.contains("-snapshot-first-refresh-fails")
+  }
+
+  var isSnapshotImportFixtureEnabled: Bool {
+    isEnabled && networkDisabled && snapshotImportPreviewEnabled
   }
 }
 
@@ -151,6 +157,7 @@ final class AppModel {
     case ready
     case importing
     case failed
+    case refreshFailed
     case completed
   }
 
@@ -195,6 +202,7 @@ final class AppModel {
   private let authenticator: any AppLockAuthenticating
   private let serverDeviceBinder: any ServerDeviceBinding
   private let requestNotificationAuthorization: @MainActor () async throws -> Bool
+  private let snapshotRecordLoader: @Sendable (BirthdayStore) async throws -> [BirthdayRecord]
   private let now: @Sendable () -> Date
   private let timeZone: @Sendable () -> TimeZone
   private let reminderRebuildCoordinator: ReminderRebuildCoordinator
@@ -250,6 +258,9 @@ final class AppModel {
     ),
     reminderPlanner: ReminderPlanner = ReminderPlanner(),
     requestNotificationAuthorization: @escaping @MainActor () async throws -> Bool = { false },
+    snapshotRecordLoader: @escaping @Sendable (BirthdayStore) async throws -> [BirthdayRecord] = {
+      try $0.activeBirthdays()
+    },
     now: @escaping @Sendable () -> Date = Date.init,
     timeZone: @escaping @Sendable () -> TimeZone = { .current }
   ) {
@@ -262,6 +273,7 @@ final class AppModel {
     self.serverDeviceBinder = serverDeviceBinder
     self.oneShotNotificationScheduler = oneShotNotificationScheduler
     self.requestNotificationAuthorization = requestNotificationAuthorization
+    self.snapshotRecordLoader = snapshotRecordLoader
     self.now = now
     self.timeZone = timeZone
     reminderRebuildCoordinator = ReminderRebuildCoordinator(
@@ -396,6 +408,7 @@ final class AppModel {
       serverBindingState == .credentialsSavedAwaitingSnapshotPreview,
       snapshotImportState != .loading,
       snapshotImportState != .importing,
+      snapshotImportState != .refreshFailed,
       snapshotImportState != .completed
     else { return }
 
@@ -427,9 +440,12 @@ final class AppModel {
   ) {
     guard
       snapshotImportState == .ready,
-      snapshotImportPreview?.duplicates.contains(where: { $0.id == candidateID }) == true
+      let preview = snapshotImportPreview,
+      let selectedCandidate = preview.duplicates.first(where: { $0.id == candidateID })
     else { return }
-    snapshotDuplicateDecisions[candidateID] = decision
+    for candidate in preview.duplicates where candidate.local.id == selectedCandidate.local.id {
+      snapshotDuplicateDecisions[candidate.id] = decision
+    }
     snapshotImportErrorMessage = nil
   }
 
@@ -454,23 +470,52 @@ final class AppModel {
     snapshotImportState = .importing
     snapshotImportErrorMessage = nil
     do {
-      try await store.applySnapshot(snapshot, decisions: snapshotDuplicateDecisions)
-      let importedRecords = try await store.activeBirthdays()
-      records = importedRecords
-      loadState = .loaded
-      selectedTab = .calendar
-      pendingInitialSnapshot = nil
-      snapshotImportState = .completed
-      completeOnboardingState()
-
-      let generation = nextReminderGeneration()
-      await rebuildKnownSnapshot(importedRecords, generation: generation)
-      return true
+      try await store.applySnapshot(
+        snapshot,
+        decisions: snapshotDuplicateDecisions,
+        now: now(),
+        timeZone: timeZone()
+      )
     } catch {
       snapshotImportState = .ready
       snapshotImportErrorMessage = "未能导入服务器快照，本机资料未改变，请重试。"
       return false
     }
+
+    pendingInitialSnapshot = nil
+    return await reloadImportedSnapshot()
+  }
+
+  @discardableResult
+  func reloadImportedSnapshot() async -> Bool {
+    guard snapshotImportState == .importing || snapshotImportState == .refreshFailed else {
+      return false
+    }
+
+    snapshotImportState = .importing
+    snapshotImportErrorMessage = nil
+    let importedRecords: [BirthdayRecord]
+    do {
+      importedRecords = try await snapshotRecordLoader(store)
+    } catch {
+      snapshotImportState = .refreshFailed
+      snapshotImportErrorMessage = "导入已完成，但界面刷新失败。请重新载入已导入资料。"
+      return false
+    }
+
+    records = importedRecords
+    loadState = .loaded
+    selectedTab = .calendar
+    if let nearestOccurrence = importedRecords.compactMap(\.nextSolarDate).min() {
+      selectedMonth = nearestOccurrence
+      selectedDay = nil
+    }
+    snapshotImportState = .completed
+    completeOnboardingState()
+
+    let generation = nextReminderGeneration()
+    await rebuildKnownSnapshot(importedRecords, generation: generation)
+    return true
   }
 
   func requestNotificationAuthorizationFromSettings() async {

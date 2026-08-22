@@ -210,6 +210,8 @@ struct SnapshotImportPreviewView: View {
           .modernAirSurface(radius: 24)
       case .failed:
         failureContent
+      case .refreshFailed:
+        refreshFailureContent
       case .ready, .importing:
         if let preview = model.snapshotImportPreview {
           previewContent(preview)
@@ -274,6 +276,32 @@ struct SnapshotImportPreviewView: View {
         .buttonStyle(.bordered)
         .controlSize(.large)
         .tint(ModernAirTheme.tide)
+    }
+  }
+
+  private var refreshFailureContent: some View {
+    VStack(spacing: 16) {
+      Label(
+        model.snapshotImportErrorMessage
+          ?? "导入已完成，但界面刷新失败。请重新载入已导入资料。",
+        systemImage: "arrow.clockwise.icloud.fill"
+      )
+      .font(.subheadline)
+      .foregroundStyle(ModernAirTheme.ink)
+      .fixedSize(horizontal: false, vertical: true)
+      .padding(18)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(ModernAirTheme.glacier, in: RoundedRectangle(cornerRadius: 20))
+
+      Button("重新载入已导入资料") {
+        Task { await model.reloadImportedSnapshot() }
+      }
+      .buttonStyle(.borderedProminent)
+      .controlSize(.large)
+      .tint(ModernAirTheme.tide)
+      .frame(maxWidth: .infinity, minHeight: 44)
+      .accessibilityIdentifier("retryImportedSnapshotRefreshButton")
+      .accessibilityHint("只重新读取本机资料，不会再次导入服务器快照")
     }
   }
 

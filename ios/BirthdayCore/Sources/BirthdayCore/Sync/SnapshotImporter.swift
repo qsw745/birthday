@@ -32,6 +32,7 @@ public struct SnapshotImportPreview: Equatable, Sendable {
 public enum SnapshotImportError: Error, Equatable, Sendable {
   case duplicateRemoteID(UUID)
   case missingDuplicateDecision
+  case conflictingDuplicateDecisions(UUID)
 }
 
 public enum SnapshotImporter {

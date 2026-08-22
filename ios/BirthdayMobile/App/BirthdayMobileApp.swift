@@ -91,7 +91,7 @@ private struct BirthdayAppBootstrapView: View {
         SyncMetadataEntity.self,
         configurations: configuration
       )
-      if uiTestBootstrap.snapshotImportPreviewEnabled {
+      if uiTestBootstrap.isSnapshotImportFixtureEnabled {
         try seedSnapshotImportPreview(in: container)
       }
       self.container = container
@@ -116,22 +116,46 @@ private struct BirthdayAppBootstrapView: View {
         "UI tests must opt into the no-network composition"
       )
 
+      let snapshotFixtureEnabled = uiTestBootstrap.isSnapshotImportFixtureEnabled
       let serverDeviceBinder: any ServerDeviceBinding =
-        uiTestBootstrap.snapshotImportPreviewEnabled
+        snapshotFixtureEnabled
         ? UITestSnapshotServerDeviceBinder(
           firstLoadFails: uiTestBootstrap.snapshotFirstLoadFails
         )
         : OfflineServerDeviceBinder()
+      let refreshScenario = UITestSnapshotRefreshScenario(
+        firstLoadFails: snapshotFixtureEnabled && uiTestBootstrap.snapshotFirstRefreshFails
+      )
+      let fixtureNow = Date(timeIntervalSince1970: 1_789_876_800)
+      let fixtureTimeZone = TimeZone(identifier: "Asia/Shanghai")!
+      let selectedMonth: Date
+      let now: @Sendable () -> Date
+      let timeZone: @Sendable () -> TimeZone
+      if snapshotFixtureEnabled {
+        selectedMonth = fixtureNow
+        now = { fixtureNow }
+        timeZone = { fixtureTimeZone }
+      } else {
+        selectedMonth = Date()
+        now = Date.init
+        timeZone = { .current }
+      }
 
       return AppModel(
         store: BirthdayStore(modelContainer: container),
+        selectedMonth: selectedMonth,
         preferences: preferences,
         authenticator: UITestAppLockAuthenticator(),
         serverDeviceBinder: serverDeviceBinder,
         notificationScheduler: UITestNotificationScheduler(),
         oneShotNotificationScheduler: UITestOneShotNotificationScheduler(),
         reminderPlanner: ReminderPlanner(),
-        requestNotificationAuthorization: { true }
+        requestNotificationAuthorization: { true },
+        snapshotRecordLoader: { store in
+          try await refreshScenario.loadRecords(from: store)
+        },
+        now: now,
+        timeZone: timeZone
       )
     }
 
@@ -170,6 +194,7 @@ private struct BirthdayAppBootstrapView: View {
       nextSolarDate: date,
       now: date
     )
+    entity.nextSolarDate = nil
     entity.syncStateRaw = SyncState.synced.rawValue
     context.insert(entity)
     try context.save()
@@ -233,8 +258,8 @@ private actor UITestSnapshotLoadScenario {
         APIBirthday(
           id: UUID(uuidString: "33333333-3333-4333-8333-333333333333")!,
           name: "爸爸",
-          lunarMonth: 2,
-          lunarDay: 2,
+          lunarMonth: 8,
+          lunarDay: 16,
           isLeapMonth: false,
           reminder: .defaults,
           nextSolarDate: nil,
@@ -243,8 +268,37 @@ private actor UITestSnapshotLoadScenario {
           updatedAt: date,
           deletedAt: nil
         ),
+        APIBirthday(
+          id: UUID(uuidString: "44444444-4444-4444-8444-444444444444")!,
+          name: " 妈妈 ",
+          lunarMonth: 8,
+          lunarDay: 15,
+          isLeapMonth: false,
+          reminder: .defaults,
+          nextSolarDate: nil,
+          version: 1,
+          createdAt: date,
+          updatedAt: date,
+          deletedAt: nil
+        ),
       ]
     )
+  }
+}
+
+private actor UITestSnapshotRefreshScenario {
+  private var firstLoadFails: Bool
+
+  init(firstLoadFails: Bool) {
+    self.firstLoadFails = firstLoadFails
+  }
+
+  func loadRecords(from store: BirthdayStore) async throws -> [BirthdayRecord] {
+    if firstLoadFails {
+      firstLoadFails = false
+      throw MobileAPIError.transport("ui_test_snapshot_refresh_failure")
+    }
+    return try await store.activeBirthdays()
   }
 }
 
