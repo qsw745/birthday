@@ -49,6 +49,9 @@ targets:
   BirthdayMobileUITests:
     type: bundle.ui-testing
     platform: iOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
     sources:
       - BirthdayMobileUITests
     dependencies:
@@ -56,6 +59,9 @@ targets:
   BirthdayMobileTests:
     type: bundle.unit-test
     platform: iOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
     sources:
       - BirthdayMobileTests
     dependencies:

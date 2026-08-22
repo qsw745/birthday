@@ -6,6 +6,8 @@ ios/.build/
 ios/BirthdayCore/.build/
 ios/DerivedData/
 ios/Config/Signing.xcconfig
+*.store-shm
+*.store-wal
 node_modules/
 uploads/
 .env
