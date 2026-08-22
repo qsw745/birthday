@@ -76,8 +76,12 @@ function toSharedPayload(id, body) {
     lunarDay: body.lunarDay,
     isLeapMonth: body.isLeapMonth === true,
     reminderTimeMinutes: timeToMinutes(body.remindTime),
-    notifyDayBefore: true,
-    notifySameDay: true,
+    notifyDayBefore: typeof body.notifyDayBefore === 'boolean'
+      ? body.notifyDayBefore
+      : undefined,
+    notifySameDay: typeof body.notifySameDay === 'boolean'
+      ? body.notifySameDay
+      : undefined,
     emailEnabled: Boolean(body.userEmail),
     emailAddress: body.userEmail || '',
     emailMessage: body.message == null ? '' : String(body.message),

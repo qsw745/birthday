@@ -564,7 +564,7 @@ git commit -m "feat(ios): 原子导入服务器生日快照"
 
 ---
 
-### Task 5: Implement Upload, Pull, Retry, and Token Refresh
+### Task 5: Implement Byte-Bounded Upload, Pull, Retry, and Token Refresh
 
 **Files:**
 - Create: `ios/BirthdayCore/Sources/BirthdayCore/Sync/SyncEngine.swift`
@@ -574,9 +574,9 @@ git commit -m "feat(ios): 原子导入服务器生日快照"
 
 **Interfaces:**
 - Consumes: `MobileAPI`, `BirthdayStore`, `DeviceCredentialStore`
-- Produces: `SyncEngine.syncNow() -> SyncSummary`, `RetryPolicy.delay(attempt:)`
+- Produces: `SyncEngine.syncNow() -> SyncSummary`, `PushBatcher`, `RetryPolicy.delay(attempt:)`
 
-- [ ] **Step 1: Write failing retry and one-refresh-only tests**
+- [ ] **Step 1: Write failing batching, retry, and one-refresh-only tests**
 
 ```swift
 import Foundation
@@ -620,7 +620,40 @@ private actor RefreshingFakeAPI: MobileAPI {
     #expect(summary.cursor == 4)
     #expect(await api.refreshCount() == 1)
 }
+
+@Test func pushBatcherMeasuresTheActualCompactRequestIncludingJSONEscapes() throws {
+    let operations = try makeOperationsWithQuotedBackslashAndControlText()
+    let batches = try PushBatcher.makeBatches(operations)
+    for batch in batches {
+        let data = try MobileJSON.encoder.encode(PushRequest(operations: batch))
+        #expect(batch.count <= 50)
+        #expect(data.count <= 61_440)
+    }
+}
+
+@Test func pushBatcherKeepsAnExact61440ByteRequestAndSplitsTheNextByte() throws {
+    let exact = try makePushOperationsWhoseEncodedRequestIsExactly(61_440)
+    #expect(try PushBatcher.makeBatches(exact).count == 1)
+
+    let over = try makePushOperationsWhoseEncodedRequestIsExactly(61_441)
+    let batches = try PushBatcher.makeBatches(over)
+    #expect(batches.count == 2)
+    #expect(try batches.allSatisfy {
+        try MobileJSON.encoder.encode(PushRequest(operations: $0)).count <= 61_440
+    })
+}
+
+@Test func syncPushesEveryCountAndByteBatchBeforeStartingPull() async throws {
+    let fixture = try makeSyncFixture(readyOperationCount: 121, escapedPayloads: true)
+    _ = try await fixture.engine.syncNow()
+    let events = await fixture.api.events()
+    #expect(events.filter { $0 == .push }.count >= 3)
+    #expect(events.lastIndex(of: .push)! < events.firstIndex(of: .pull)!)
+    #expect(await fixture.store.readyOperations(limit: 500, now: .now).isEmpty)
+}
 ```
+
+The batching test fixtures must also cover: more than 50 individually small operations, a single largest legal operation using the shared 8192-byte `name + emailMessage` storage contract, JSON quote/backslash/control-character expansion, an encoded request exactly at 61,440 bytes, and the first byte above the boundary. Expected byte counts must be checked against the complete compact `PushRequest`, not by summing payload strings or per-operation estimates.
 
 - [ ] **Step 2: Implement deterministic retry policy**
 
@@ -632,7 +665,13 @@ public enum RetryPolicy {
 }
 ```
 
-- [ ] **Step 3: Implement the sync cycle in exact order**
+- [ ] **Step 3: Implement greedy count-and-byte batching**
+
+`PushBatcher` converts ready `SyncOperation` values to `PushOperationDTO` first, then greedily appends each operation only when `MobileJSON.encoder.encode(PushRequest(operations: candidate)).count <= 61_440` and the candidate count is at most 50. `MobileJSON.encoder` is the same compact production encoder later used by `MobileAPIClient.push`; do not use a second estimator, pretty-printed JSON, payload-only byte counts, or a nominal character limit.
+
+When the next operation would cross either limit, emit the current non-empty batch and retry that operation as the first item of a new batch. A single valid operation must fit because the shared server/client storage contract caps `name + emailMessage` at 8192 UTF-8 bytes even under JSON escaping. If a persisted operation still cannot fit by itself, classify it as a terminal local contract error instead of repeatedly fetching the same poison item forever.
+
+- [ ] **Step 4: Implement the sync cycle in exact order and drain uploads before pull**
 
 ```swift
 public struct SyncSummary: Sendable {
@@ -644,11 +683,23 @@ public struct SyncSummary: Sendable {
 
 public actor SyncEngine {
     public func syncNow() async throws -> SyncSummary {
-        let operations = await store.readyOperations(limit: 50, now: .now)
-        let push = operations.isEmpty ? PushResponse(results: []) : try await authorized { access in
-            try await api.push(PushRequest(operations: try operations.map(PushOperationDTO.init)), accessToken: access)
+        var uploaded = 0
+        var conflicts = 0
+        while true {
+            let ready = await store.readyOperations(limit: 200, now: .now)
+            if ready.isEmpty { break }
+            let batches = try PushBatcher.makeBatches(ready)
+            guard !batches.isEmpty else { throw SyncError.invalidReadyOperation }
+            for batch in batches {
+                let push = try await authorized { access in
+                    try await api.push(PushRequest(operations: batch), accessToken: access)
+                }
+                try await store.applyPushResults(push.results)
+                uploaded += push.results.filter { $0.status == .applied }.count
+                conflicts += push.results.filter { $0.status == .conflict }.count
+            }
         }
-        try await store.applyPushResults(push.results)
+
         var cursor = await store.syncCursor()
         var downloaded = 0
         repeat {
@@ -658,22 +709,24 @@ public actor SyncEngine {
             cursor = page.nextCursor
             if !page.hasMore { break }
         } while true
-        return SyncSummary(uploaded: push.results.filter { $0.status == .applied }.count, downloaded: downloaded, conflicts: push.results.filter { $0.status == .conflict }.count, cursor: cursor)
+        return SyncSummary(uploaded: uploaded, downloaded: downloaded, conflicts: conflicts, cursor: cursor)
     }
 }
 ```
+
+The store must exclude conflict-blocked and terminally invalid operations from subsequent `readyOperations` calls. `syncNow()` may refetch finite windows, but it must continue until all currently ready operations have either received a push result or a terminal local classification; only then may the first pull begin. This ordering prevents a count/byte split from uploading only its first batch and prevents an unencodable head item from causing an infinite loop.
 
 `authorized` loads credentials, refreshes and persists a rotated pair exactly once on `.accessExpired`, replays the original closure once, and maps a second 401 or `.refreshInvalid` to `SyncError.rebindRequired`. `validAccessToken` refreshes proactively when fewer than 60 seconds remain.
 
 `BirthdayStore.applyPushResults` removes applied outbox rows, writes returned versions, and creates conflict records for conflict results. `applyPull` applies remote changes only when the entity has no pending local operation; otherwise it creates a conflict. Advance cursor only after the page save succeeds.
 
-- [ ] **Step 4: Run sync tests**
+- [ ] **Step 5: Run sync tests**
 
 Run: `cd ios/BirthdayCore && swift test --filter SyncEngineTests`
 
-Expected: empty outbox, applied upload, conflict, retry metadata, multi-page pull, pull rollback, proactive refresh, one replay, and rebind-required cases PASS.
+Expected: empty outbox, actual encoded-byte boundaries, JSON escaping, more than 50 operations, complete multi-batch drain before pull, applied upload, conflict, retry metadata, multi-page pull, pull rollback, proactive refresh, one replay, and rebind-required cases PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add ios/BirthdayCore/Sources/BirthdayCore/Sync/SyncEngine.swift ios/BirthdayCore/Sources/BirthdayCore/Data/BirthdayStore.swift ios/BirthdayCore/Sources/BirthdayCore/Sync/DeviceCredentialStore.swift ios/BirthdayCore/Tests/BirthdayCoreTests/SyncEngineTests.swift
@@ -703,11 +756,19 @@ import Foundation
 import Testing
 @testable import BirthdayCore
 
-@Test func keepLocalRebasesOperationOnRemoteVersion() async throws {
+@Test func keepLocalCreatesFreshOperationOnRemoteVersion() async throws {
     let fixture = try makeConflictFixture(localVersion: 3, remoteVersion: 5)
     try await ConflictResolver(store: fixture.store).keepLocal(id: fixture.birthdayId)
-    let operation = await fixture.store.pendingOperations().last
-    #expect(operation?.baseVersion == 5)
+    let operations = await fixture.store.pendingOperations()
+    let operation = try #require(operations.last)
+    #expect(operation.operationId != fixture.operationId)
+    #expect(!operations.contains { $0.operationId == fixture.operationId })
+    #expect(operation.entityId == fixture.birthdayId)
+    #expect(operation.baseVersion == 5)
+    #expect(operation.operationType == "upsert")
+    let payload = try MobileJSON.decoder.decode(BirthdayPayloadDTO.self, from: operation.payloadJSON)
+    let currentLocal = try #require((await fixture.store.activeBirthdays()).first)
+    #expect(payload == BirthdayPayloadDTO(record: currentLocal))
     #expect(await fixture.store.conflicts().isEmpty)
 }
 
@@ -747,6 +808,7 @@ Add this deterministic helper to `SyncTestFixtures.swift`. It creates a four-ent
 struct ConflictFixture {
     let store: BirthdayStore
     let birthdayId: UUID
+    let operationId: UUID
 }
 
 func makeConflictFixture(localVersion: Int64, remoteVersion: Int64) throws -> ConflictFixture {
@@ -771,7 +833,7 @@ func makeConflictFixture(localVersion: Int64, remoteVersion: Int64) throws -> Co
     let conflict = SyncConflictEntity(id: UUID(), birthdayId: id, localJSON: try MobileJSON.encoder.encode(local), remoteJSON: try MobileJSON.encoder.encode(remote), operationId: operationId, createdAt: now, kindRaw: "editEdit")
     context.insert(entity); context.insert(operation); context.insert(conflict)
     try context.save()
-    return ConflictFixture(store: BirthdayStore(modelContainer: container), birthdayId: id)
+    return ConflictFixture(store: BirthdayStore(modelContainer: container), birthdayId: id, operationId: operationId)
 }
 ```
 
@@ -779,7 +841,9 @@ Update the app composition root so `SyncConflictEntity` joins the production and
 
 - [ ] **Step 3: Implement the two explicit resolutions**
 
-`keepLocal` decodes both snapshots, sets the existing outbox operation's `baseVersion` to the remote version, clears its retry error, marks the birthday pending, and deletes the conflict in one save. `useRemote` replaces all local fields with the remote record, removes the blocked outbox operation, marks synced or removes from active list if remote is a tombstone, and deletes the conflict in one save.
+`keepLocal` decodes both snapshots, removes (or terminally marks so it is never submitted again) the old conflict-producing outbox operation, and creates a brand-new operation in the same save. The new operation uses a new `operationId`, the same birthday `entityId`, the remote record's version as `baseVersion`, and an `upsert` payload freshly encoded from the complete current local record. It then marks the birthday pending and deletes the conflict. Reusing the old operation ID is forbidden: the server has already persisted that ID's conflict response and its replay-isolation contract would return the stored result instead of applying a rebased edit. For delete/edit “恢复并保留编辑”, the fresh full local payload is likewise an `upsert` against the remote tombstone version.
+
+The keep-local tests must assert the old ID is absent or terminal, the new ID differs, the new base equals the remote version, the full payload equals the current local record, and the new operation can be submitted under the server contract's `(deviceId, operationId, entityId, baseVersion)` replay isolation. `useRemote` replaces all local fields with the remote record, removes the blocked outbox operation, marks synced or removes from active list if remote is a tombstone, and deletes the conflict in one save.
 
 - [ ] **Step 4: Implement conflict UI**
 

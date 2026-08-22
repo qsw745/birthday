@@ -1,12 +1,25 @@
 const { hashToken } = require('../utils/mobileTokens')
 
 function createMobileSessionRepository({ pool, now = () => new Date() }) {
-  async function createSession({ deviceId, username, deviceName, pair }) {
+  async function bindSession({ deviceId, username, deviceName, pair }) {
     await pool.execute(
       `INSERT INTO mobile_device_sessions (
         device_id, username, device_name, access_token_hash, refresh_token_hash,
         access_expires_at, refresh_expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        device_id = IF(
+          device_id = VALUES(device_id) AND username = VALUES(username),
+          device_id,
+          NULL
+        ),
+        device_name = VALUES(device_name),
+        access_token_hash = VALUES(access_token_hash),
+        refresh_token_hash = VALUES(refresh_token_hash),
+        access_expires_at = VALUES(access_expires_at),
+        refresh_expires_at = VALUES(refresh_expires_at),
+        revoked_at = NULL,
+        last_used_at = NULL`,
       [
         deviceId,
         username,
@@ -18,6 +31,8 @@ function createMobileSessionRepository({ pool, now = () => new Date() }) {
       ],
     )
   }
+
+  const createSession = bindSession
 
   async function findByAccessToken(accessToken, currentTime = now()) {
     const [rows] = await pool.execute(
@@ -94,7 +109,7 @@ function createMobileSessionRepository({ pool, now = () => new Date() }) {
     return rows
   }
 
-  return { createSession, findByAccessToken, rotateByRefreshToken, revoke, list }
+  return { bindSession, createSession, findByAccessToken, rotateByRefreshToken, revoke, list }
 }
 
 module.exports = { createMobileSessionRepository }

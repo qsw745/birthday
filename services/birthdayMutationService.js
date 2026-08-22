@@ -243,6 +243,10 @@ function birthdayNotFound(message = '没有找到对应的生日记录') {
   return error
 }
 
+function databaseBoolean(value) {
+  return value === true || value === 1 || value === '1'
+}
+
 function serializeWebBirthdayRow(row) {
   return {
     id: row.id,
@@ -279,13 +283,27 @@ async function applyWebUpsert(connection, {
   dateOptions,
   generateUUIDFn = generateUUID,
 }) {
-  const normalizedPayload = normalizeBirthdayPayload({ ...payload, id }, dateOptions)
+  const entityId = String(id || '').toLowerCase()
+  const currentRow = await readBirthday(connection, entityId, { forUpdate: true })
+  const normalizedPayload = normalizeBirthdayPayload({
+    ...payload,
+    id: entityId,
+    notifyDayBefore: typeof payload.notifyDayBefore === 'boolean'
+      ? payload.notifyDayBefore
+      : currentRow
+        ? databaseBoolean(currentRow.notify_day_before)
+        : true,
+    notifySameDay: typeof payload.notifySameDay === 'boolean'
+      ? payload.notifySameDay
+      : currentRow
+        ? databaseBoolean(currentRow.notify_same_day)
+        : true,
+  }, dateOptions)
   const operation = {
     entityId: normalizedPayload.id,
     type: 'upsert',
     payload: normalizedPayload,
   }
-  const currentRow = await readBirthday(connection, operation.entityId, { forUpdate: true })
   const version = nextVersion(currentRow ? String(currentRow.version) : '0')
 
   await upsertBirthday(connection, operation, currentRow, version, { generateUUIDFn })

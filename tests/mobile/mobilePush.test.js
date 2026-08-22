@@ -1080,6 +1080,37 @@ test('duplicate operation IDs in one batch preserve order and replay the first i
   assert.equal(database.connections[1].queries.length, 1)
 })
 
+test('a batch rejects operation ID reuse with another entity or base version before opening a connection', async () => {
+  const cases = [
+    {
+      name: 'different entity',
+      duplicate: operation({
+        entityId: SECOND_BIRTHDAY_ID,
+        payload: validPayload({ id: SECOND_BIRTHDAY_ID }),
+      }),
+    },
+    {
+      name: 'different base version',
+      duplicate: operation({ baseVersion: '1' }),
+    },
+  ]
+
+  for (const item of cases) {
+    const database = new FakeDatabase()
+    const pool = new FakePool(database)
+    const app = createPushApp({ repository: createMobileSyncRepository({ pool }) })
+    const response = await request(app)
+      .post('/api/mobile/sync/push')
+      .send({ operations: [operation(), item.duplicate] })
+
+    assert.equal(response.status, 400, item.name)
+    assert.deepEqual(response.body, { error: 'invalid_birthday_payload' }, item.name)
+    assert.equal(pool.getConnectionCalls, 0, item.name)
+    assert.equal(database.state.birthdays.size, 0, item.name)
+    assert.equal(database.state.changes.length, 0, item.name)
+  }
+})
+
 test('51 operations returns the exact too_many_operations error without opening a connection', async () => {
   const database = new FakeDatabase()
   const pool = new FakePool(database)

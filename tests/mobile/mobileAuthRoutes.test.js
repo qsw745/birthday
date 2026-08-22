@@ -75,6 +75,51 @@ test('login binds the trimmed device name and returns the original opaque token 
   assert.notEqual(response.body.accessToken, response.body.refreshToken)
 })
 
+test('same-device login retry uses the rebind boundary and returns a fresh usable pair both times', async () => {
+  const bindings = []
+  const sessions = {
+    bindSession: async input => { bindings.push(input) },
+    createSession: async () => assert.fail('login must prefer atomic bindSession'),
+  }
+  const app = createApp(createRouter({ sessions }))
+
+  const first = await request(app)
+    .post('/api/mobile/auth/login')
+    .send(loginPayload({ deviceName: 'Old Name' }))
+  const retry = await request(app)
+    .post('/api/mobile/auth/login')
+    .send(loginPayload({ deviceName: 'New Name' }))
+
+  assert.equal(first.status, 200)
+  assert.equal(retry.status, 200)
+  assert.equal(first.body.deviceId, DEVICE_ID)
+  assert.equal(retry.body.deviceId, DEVICE_ID)
+  assert.notEqual(first.body.accessToken, retry.body.accessToken)
+  assert.notEqual(first.body.refreshToken, retry.body.refreshToken)
+  assert.deepEqual(bindings.map(binding => ({
+    deviceId: binding.deviceId,
+    username: binding.username,
+    deviceName: binding.deviceName,
+    accessToken: binding.pair.accessToken,
+    refreshToken: binding.pair.refreshToken,
+  })), [
+    {
+      deviceId: DEVICE_ID,
+      username: 'admin',
+      deviceName: 'Old Name',
+      accessToken: first.body.accessToken,
+      refreshToken: first.body.refreshToken,
+    },
+    {
+      deviceId: DEVICE_ID,
+      username: 'admin',
+      deviceName: 'New Name',
+      accessToken: retry.body.accessToken,
+      refreshToken: retry.body.refreshToken,
+    },
+  ])
+})
+
 test('login returns one generic credential error and never creates a session for an unknown username or bad password', async () => {
   const created = []
   const checked = []

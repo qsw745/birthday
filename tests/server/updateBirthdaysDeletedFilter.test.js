@@ -312,6 +312,75 @@ test('job blocks claimed and failed occurrences, then advances only an explicitl
   }
 })
 
+test('reminder write failure rolls back the preceding birthday advancement instead of committing half state', async () => {
+  const { runUpdateBirthdaysJob } = loadBirthdayJob()
+  const OLD_NEXT = '2026-08-20 09:00:00'
+  const NEW_NEXT = '2027-09-15 09:00:00'
+  const lifecycle = []
+  let persistedNext = OLD_NEXT
+  let transactionNext = OLD_NEXT
+  const connection = {
+    async beginTransaction() {
+      lifecycle.push('begin')
+      transactionNext = persistedNext
+    },
+    async commit() {
+      lifecycle.push('commit')
+      persistedNext = transactionNext
+    },
+    async rollback() {
+      lifecycle.push('rollback')
+      transactionNext = persistedNext
+    },
+    release() { lifecycle.push('release') },
+    async query(sqlInput) {
+      const sql = sqlInput.replace(/\s+/g, ' ').trim()
+      if (/^UPDATE email_reminders r JOIN birthdays b/.test(sql) && /remind_time > NOW/.test(sql)) {
+        return [{ affectedRows: 0 }]
+      }
+      if (/^SELECT \* FROM birthdays/.test(sql)) {
+        return [[{
+          id: '11111111-1111-4111-8111-111111111111',
+          version: '4',
+          lunarMonth: 8,
+          lunarDay: 15,
+          isLeapMonth: 0,
+          remindTime: '09:00:00',
+          nextSolarDate: OLD_NEXT,
+        }]]
+      }
+      if (/^SELECT r\.id FROM email_reminders/.test(sql)) return [[]]
+      if (/^UPDATE birthdays SET nextSolarDate/.test(sql)) {
+        transactionNext = NEW_NEXT
+        return [{ affectedRows: 1 }]
+      }
+      if (/^UPDATE email_reminders r JOIN birthdays b/.test(sql)) {
+        const error = new Error('reminder update failed with private payload')
+        error.code = 'ER_REMINDER_WRITE'
+        throw error
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    },
+  }
+  const logged = []
+
+  await runUpdateBirthdaysJob({
+    poolRef: { getConnection: async () => connection },
+    calculateNextSolarDateFn: () => NEW_NEXT,
+    toMomentFn: () => ({ isSameOrBefore: () => true }),
+    logger: {
+      log() {},
+      warn() {},
+      error(...args) { logged.push(args) },
+    },
+  })
+
+  assert.equal(persistedNext, OLD_NEXT)
+  assert.deepEqual(lifecycle, ['begin', 'rollback', 'release'])
+  assert.match(JSON.stringify(logged), /ER_REMINDER_WRITE/)
+  assert.doesNotMatch(JSON.stringify(logged), /private payload/)
+})
+
 test('update job destroys on rollback failure and logs only safe error metadata', async () => {
   const { runUpdateBirthdaysJob } = loadBirthdayJob()
   const lifecycle = []

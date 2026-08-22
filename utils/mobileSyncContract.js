@@ -365,7 +365,7 @@ function normalizePushRequest(body, dateOptions) {
   }
   if (body.operations.length === 0) throw invalidBirthdayPayload()
 
-  const entityByOperationId = new Map()
+  const replayScopeByOperationId = new Map()
   const operations = body.operations.map(operation => {
     if (!isPlainObject(operation)) throw invalidBirthdayPayload()
     const normalizedOperationId = normalizeUUID(operation.operationId)
@@ -374,9 +374,20 @@ function normalizePushRequest(body, dateOptions) {
     if (type !== 'upsert' && type !== 'delete') throw invalidBirthdayPayload()
     const baseVersion = normalizeInt64String(operation.baseVersion)
 
-    const priorEntityId = entityByOperationId.get(normalizedOperationId)
-    if (priorEntityId && priorEntityId !== normalizedEntityId) throw invalidBirthdayPayload()
-    entityByOperationId.set(normalizedOperationId, normalizedEntityId)
+    const priorScope = replayScopeByOperationId.get(normalizedOperationId)
+    if (
+      priorScope
+      && (
+        priorScope.entityId !== normalizedEntityId
+        || priorScope.baseVersion !== baseVersion
+      )
+    ) {
+      throw invalidBirthdayPayload()
+    }
+    replayScopeByOperationId.set(normalizedOperationId, {
+      entityId: normalizedEntityId,
+      baseVersion,
+    })
 
     if (type === 'delete') {
       if (operation.payload !== undefined && operation.payload !== null) {

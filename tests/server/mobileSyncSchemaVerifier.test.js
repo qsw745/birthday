@@ -299,6 +299,22 @@ test('rejects non-InnoDB tables and missing required indexes', async t => {
     await verifyMobileSyncSchema({ query: fake.query })
   })
 
+  await t.test('a full-length unique composite left prefix satisfies a query-index contract', async () => {
+    const metadata = validMetadata()
+    const indexes = [
+      ...metadata.indexes.filter(row => row.index_name !== 'idx_status_time'),
+      ...indexRows(
+        'email_reminders',
+        'uk_status_time_id',
+        ['status', 'remind_time', 'id'],
+        true,
+      ),
+    ]
+    const fake = validQuery({ indexes })
+
+    await verifyMobileSyncSchema({ query: fake.query })
+  })
+
   await t.test('prefix on a required query-index column is incompatible', async () => {
     const metadata = validMetadata()
     const indexes = metadata.indexes.map(row => (

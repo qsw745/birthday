@@ -78,6 +78,39 @@ test('createSession persists hashes and expiry timestamps, never presented token
   assert.ok(params.every(value => value !== originalPair.accessToken && value !== originalPair.refreshToken))
 })
 
+test('bindSession atomically rebinds the same username and device while rejecting unique-hash cross-device collisions', async () => {
+  const pool = createPool([{ affectedRows: 2 }])
+  const sessions = createMobileSessionRepository({ pool })
+
+  await sessions.bindSession({
+    deviceId: 'device-1',
+    username: 'admin',
+    deviceName: 'Renamed iPhone',
+    pair: originalPair,
+  })
+
+  const [{ sql, params }] = pool.calls
+  assert.match(sql, /INSERT INTO mobile_device_sessions/i)
+  assert.match(sql, /ON DUPLICATE KEY UPDATE/i)
+  assert.match(sql, /device_id\s*=\s*IF\(\s*device_id\s*=\s*VALUES\(device_id\)\s+AND\s+username\s*=\s*VALUES\(username\),\s*device_id,\s*NULL\s*\)/i)
+  assert.match(sql, /device_name\s*=\s*VALUES\(device_name\)/i)
+  assert.match(sql, /access_token_hash\s*=\s*VALUES\(access_token_hash\)/i)
+  assert.match(sql, /refresh_token_hash\s*=\s*VALUES\(refresh_token_hash\)/i)
+  assert.match(sql, /access_expires_at\s*=\s*VALUES\(access_expires_at\)/i)
+  assert.match(sql, /refresh_expires_at\s*=\s*VALUES\(refresh_expires_at\)/i)
+  assert.match(sql, /revoked_at\s*=\s*NULL/i)
+  assert.match(sql, /last_used_at\s*=\s*NULL/i)
+  assert.deepEqual(params, [
+    'device-1',
+    'admin',
+    'Renamed iPhone',
+    digest(originalPair.accessToken),
+    digest(originalPair.refreshToken),
+    originalPair.accessExpiresAt,
+    originalPair.refreshExpiresAt,
+  ])
+})
+
 test('findByAccessToken hashes before querying and requires an unrevoked unexpired access session', async () => {
   const now = new Date('2026-08-21T00:10:00Z')
   const storedSession = { device_id: 'device-1', username: 'admin' }

@@ -250,7 +250,6 @@ function hasCompatibleIndex(indexes, contract) {
     if (index.type !== 'btree') return false
     if (contract.primary && index.name !== 'primary') return false
     if (contract.unique && !index.unique) return false
-    if (!contract.unique && index.unique) return false
     const requiredPrefixMatches = contract.columns.every((column, offset) => (
       index.columns[offset] === column && index.fullLengths[offset]
     ))

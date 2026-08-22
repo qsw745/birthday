@@ -483,6 +483,41 @@ test('birthday PUT keeps the web email-required contract instead of treating an 
   assert.equal(database.state.changes.length, 0)
 })
 
+test('birthday PUT preserves mobile notification preferences when the web payload omits them', async () => {
+  const { createBirthdaysRouter } = require('../../routes/birthdays')
+  const database = new FakeDatabase({
+    birthdays: [birthdayRow({
+      version: '7',
+      notify_day_before: '0',
+      notify_same_day: '1',
+    })],
+    reminders: [reminderRow()],
+  })
+  const pool = new FakePool(database)
+  const router = createBirthdaysRouter({
+    poolRef: pool,
+    queryFn: async () => [],
+    requireAuthMiddleware: auth,
+    now: () => FIXED_NOW,
+  })
+
+  const response = await request(appAt('/api/birthdays', router))
+    .put(`/api/birthdays/${DEFAULT_BIRTHDAY_ID}`)
+    .set('x-test-auth', 'yes')
+    .send(webPayload({ name: '母亲' }))
+
+  assert.equal(response.status, 200)
+  assert.equal(database.birthday(DEFAULT_BIRTHDAY_ID).notify_day_before, 0)
+  assert.equal(database.birthday(DEFAULT_BIRTHDAY_ID).notify_same_day, 1)
+  assert.equal(database.state.changes.length, 1)
+  assert.equal(database.state.changes[0].record_json.notifyDayBefore, false)
+  assert.equal(database.state.changes[0].record_json.notifySameDay, true)
+  assert.equal(
+    pool.database.connections[0].countSQL(/^SELECT .* FROM birthdays b .* FOR UPDATE$/),
+    1,
+  )
+})
+
 test('legacy reminder POST keeps exact schedule and response shape while versioning the birthday DTO', async () => {
   const createEmailRemindersRouter = loadEmailReminderFactory()
   const database = new FakeDatabase({ birthdays: [birthdayRow({ version: '9' })] })

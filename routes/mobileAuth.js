@@ -103,7 +103,8 @@ function createMobileAuthRouter({
 
     const currentTime = now()
     const pair = issueTokenPair(currentTime)
-    await sessions.createSession({
+    const bindSession = sessions.bindSession || sessions.createSession
+    await bindSession.call(sessions, {
       deviceId: body.deviceId,
       username: expectedUsername,
       deviceName: body.deviceName.trim(),
