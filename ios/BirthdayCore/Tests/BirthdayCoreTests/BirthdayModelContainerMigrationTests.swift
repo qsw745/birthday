@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SwiftData
 import Testing
@@ -23,19 +24,34 @@ import Testing
 @Test func previouslyUnversionedThreeModelDiskStoreIsAcceptedByV2MigrationPlan() throws {
   try withTemporaryStore { storeURL in
     let fixture = MigrationFixture()
-    let legacy = try ModelContainer(
-      for: BirthdaySchemaV1.BirthdayEntity.self,
-      BirthdaySchemaV1.SyncOperationEntity.self,
-      BirthdaySchemaV1.SyncMetadataEntity.self,
-      configurations: ModelConfiguration(url: storeURL)
-    )
-    try fixture.seedLegacy(in: legacy)
+    try copyHistoricalUnversionedFixture(to: storeURL)
 
     let upgraded = try BirthdayModelContainer.make(
       configuration: ModelConfiguration(url: storeURL)
     )
     try fixture.assertPreservedAndConflictWritable(in: upgraded)
   }
+}
+
+@Test func historicalUnversionedFixtureMatchesReviewedSHA256() throws {
+  let digest = SHA256.hash(data: try Data(contentsOf: historicalUnversionedFixtureURL()))
+  let hexDigest = digest.map { String(format: "%02x", $0) }.joined()
+
+  #expect(hexDigest == "eb16f77c40cc12eb91715b75f975cb51a013d2a38149f4b496c359c10bedb769")
+}
+
+private func copyHistoricalUnversionedFixture(to storeURL: URL) throws {
+  try FileManager.default.copyItem(at: historicalUnversionedFixtureURL(), to: storeURL)
+}
+
+private func historicalUnversionedFixtureURL() throws -> URL {
+  try #require(
+    Bundle.module.url(
+      forResource: "d457260-unversioned",
+      withExtension: "store",
+      subdirectory: "Fixtures"
+    )
+  )
 }
 
 private struct MigrationFixture {
