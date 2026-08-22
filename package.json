@@ -1,7 +1,8 @@
 {
   "scripts": {
-    "test": "node --test",
-    "test:mobile": "node --test tests/mobile/*.test.js tests/contracts/*.test.js"
+    "test": "node --test tests/contracts/*.test.js tests/mobile/*.test.js tests/server/*.test.js tests/smoke/*.test.js",
+    "test:mobile": "node --test tests/mobile/*.test.js tests/contracts/*.test.js",
+    "test:integration:mobile": "MOBILE_SYNC_TEST_DB_REQUIRED=1 node --test tests/integration/mobileSyncE2E.test.js"
   },
   "dependencies": {
     "@simplewebauthn/server": "^13.3.2",
