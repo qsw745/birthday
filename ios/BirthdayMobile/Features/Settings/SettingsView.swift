@@ -92,6 +92,20 @@ struct SettingsView: View {
       }
 
       SyncSettingsView(model: model)
+
+      Section("关于与支持") {
+        Link(destination: Self.privacyPolicyURL) {
+          Label("隐私政策", systemImage: "hand.raised")
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        }
+        .accessibilityIdentifier("privacyPolicyLink")
+
+        Link(destination: Self.supportURL) {
+          Label("使用支持", systemImage: "questionmark.circle")
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        }
+        .accessibilityIdentifier("supportLink")
+      }
     }
     .listStyle(.insetGrouped)
     .scrollContentBackground(.hidden)
@@ -105,6 +119,14 @@ struct SettingsView: View {
       set: { model.setLockEnabled($0) }
     )
   }
+
+  private static let privacyPolicyURL = URL(
+    string: "https://qisw.top/birthday/privacy.html"
+  )!
+
+  private static let supportURL = URL(
+    string: "https://qisw.top/birthday/support.html"
+  )!
 
   private var lockAccessibilityHint: String {
     guard model.lockCapability != .unavailable else {

@@ -25,4 +25,4 @@
 
 - 支持网址：`https://qisw.top/birthday/support.html`
 - 隐私政策：`https://qisw.top/birthday/privacy.html`
-- 支持邮箱：`support@qisw.top`（部署前必须确认可正常收件）
+- 支持邮箱：`support@qisw.top`（已确认可正常收件）

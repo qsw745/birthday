@@ -11,9 +11,9 @@
 
 ## 发布前阻断项
 
-- 确认 `support@qisw.top` 可收件，或替换为用户指定的公开支持邮箱。
+- `support@qisw.top` 已由用户确认可收件。
 - 将 `public/privacy.html`、`public/support.html` 与 `public/legal.css` 部署到生产站点并逐页读回验证。
-- 确认首发版本是“可选服务器同步”还是“纯本地模式”；未执行 `docs/deploy-mobile-sync.md` 前，不得宣称生产同步可用。
+- 完成并读回验证 `docs/deploy-mobile-sync.md` 后，才能宣称生产同步可用；若不提供隔离的审核账号，首发构建应隐藏同步入口并删除同步宣传。
 - 创建或选择 Apple Distribution 证书和 App Store provisioning profile。
 - 在 App Store Connect 完成 App 记录、年龄分级、价格与销售范围、隐私问卷和出口合规。
 - 上传构建后等待处理完成；“已上传”不等于“已提交审核”。

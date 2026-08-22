@@ -54,6 +54,7 @@ test('App Store zh-Hans metadata stays inside field limits and points to prepare
   assert.equal(metadata.supportURL, 'https://qisw.top/birthday/support.html')
   assert.equal(metadata.privacyPolicyURL, 'https://qisw.top/birthday/privacy.html')
   assert.equal(metadata.requiresDemoAccount, false)
+  assert.equal(Object.hasOwn(metadata, 'whatsNew'), false)
 })
 
 test('public privacy and support pages expose matching navigation and support contact', () => {
@@ -67,8 +68,25 @@ test('public privacy and support pages expose matching navigation and support co
   assert.match(support, /mailto:support@qisw\.top/)
   assert.match(privacy, /不用于跨应用跟踪/)
   assert.match(privacy, /不集成第三方广告或分析 SDK/)
+  assert.match(privacy, /不低于本政策的隐私保护义务/)
+  assert.match(privacy, /设置 → 同步 → 停止同步/)
+  assert.match(privacy, /支持邮件会保留到问题解决或数据请求完成后最多 12 个月/)
+  assert.match(support, /发件邮箱仅用于答复与排查/)
   assert.match(stylesheet, /prefers-reduced-motion/)
   assert.doesNotMatch(`${privacy}\n${support}\n${stylesheet}`, /__[A-Z0-9_]+__/)
+})
+
+test('iOS settings exposes the public privacy and support pages', () => {
+  const settings = readFileSync(
+    path.join(repositoryRoot, 'ios/BirthdayMobile/Features/Settings/SettingsView.swift'),
+    'utf8',
+  )
+
+  assert.match(settings, /Section\("关于与支持"\)/)
+  assert.match(settings, /https:\/\/qisw\.top\/birthday\/privacy\.html/)
+  assert.match(settings, /https:\/\/qisw\.top\/birthday\/support\.html/)
+  assert.match(settings, /accessibilityIdentifier\("privacyPolicyLink"\)/)
+  assert.match(settings, /accessibilityIdentifier\("supportLink"\)/)
 })
 
 test('App Store upload screenshot set is complete 6.9-inch JPEG output', () => {
