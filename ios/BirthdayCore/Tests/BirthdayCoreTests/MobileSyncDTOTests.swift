@@ -209,6 +209,54 @@ private struct DateBox: Codable, Equatable {
     #expect(device.revokedAt == nil)
   }
 
+  @Test func apiBirthdayRequiresNullableKeysAndAlwaysEncodesExplicitNulls() throws {
+    for missingKey in ["nextSolarDate", "deletedAt"] {
+      #expect(throws: DecodingError.self) {
+        try MobileJSON.decoder.decode(
+          APIBirthday.self,
+          from: try removingKey(missingKey, from: activeBirthdayJSON)
+        )
+      }
+    }
+
+    let decoded = try MobileJSON.decoder.decode(
+      APIBirthday.self,
+      from: Data(
+        activeBirthdayJSON.replacingOccurrences(
+          of: #""nextSolarDate":"2026-09-25T01:00:00.000Z""#,
+          with: #""nextSolarDate":null"#
+        ).utf8)
+    )
+    let encoded = try jsonObject(decoded)
+
+    #expect(decoded.nextSolarDate == nil)
+    #expect(decoded.deletedAt == nil)
+    #expect(encoded["nextSolarDate"] is NSNull)
+    #expect(encoded["deletedAt"] is NSNull)
+  }
+
+  @Test func mobileDeviceRequiresNullableKeysAndAlwaysEncodesExplicitNulls() throws {
+    let json =
+      #"{"deviceId":"11111111-1111-4111-8111-111111111111","deviceName":"QSW 的 iPhone","createdAt":"2026-08-22T00:00:00.000Z","lastUsedAt":null,"revokedAt":null}"#
+
+    for missingKey in ["lastUsedAt", "revokedAt"] {
+      #expect(throws: DecodingError.self) {
+        try MobileJSON.decoder.decode(
+          MobileDevice.self,
+          from: try removingKey(missingKey, from: json)
+        )
+      }
+    }
+
+    let decoded = try MobileJSON.decoder.decode(MobileDevice.self, from: Data(json.utf8))
+    let encoded = try jsonObject(decoded)
+
+    #expect(decoded.lastUsedAt == nil)
+    #expect(decoded.revokedAt == nil)
+    #expect(encoded["lastUsedAt"] is NSNull)
+    #expect(encoded["revokedAt"] is NSNull)
+  }
+
   @Test func requestDTOsEncodeExactProductionFieldNames() throws {
     let login = LoginRequest(
       username: "admin",
@@ -245,6 +293,63 @@ private struct DateBox: Codable, Equatable {
     #expect(response.results[1].status == .conflict)
     #expect(response.results[1].record == nil)
     #expect(response.results[1].remote?.deletedAt != nil)
+  }
+
+  @Test func pushResultRoundTripsOnlyItsActivePayloadAndAcceptsUnknownOuterFields() throws {
+    let appliedJSON =
+      #"{"operationId":"33333333-3333-4333-8333-333333333333","status":"applied","record":"#
+      + activeBirthdayJSON
+      + #", "futureField":true}"#
+    let conflictJSON =
+      #"{"operationId":"44444444-4444-4444-8444-444444444444","status":"conflict","remote":"#
+      + tombstoneBirthdayJSON
+      + "}"
+
+    let applied = try MobileJSON.decoder.decode(PushResult.self, from: Data(appliedJSON.utf8))
+    let conflict = try MobileJSON.decoder.decode(PushResult.self, from: Data(conflictJSON.utf8))
+    let appliedObject = try jsonObject(applied)
+    let conflictObject = try jsonObject(conflict)
+
+    #expect(applied.status == .applied)
+    #expect(applied.record != nil)
+    #expect(applied.remote == nil)
+    #expect(Set(appliedObject.keys) == ["operationId", "status", "record"])
+    #expect(conflict.status == .conflict)
+    #expect(conflict.record == nil)
+    #expect(conflict.remote != nil)
+    #expect(Set(conflictObject.keys) == ["operationId", "status", "remote"])
+  }
+
+  @Test func pushResultRejectsMissingNullBothAndWrongSidePayloads() throws {
+    let active = try #require(
+      JSONSerialization.jsonObject(with: Data(activeBirthdayJSON.utf8)) as? [String: Any]
+    )
+    let tombstone = try #require(
+      JSONSerialization.jsonObject(with: Data(tombstoneBirthdayJSON.utf8)) as? [String: Any]
+    )
+    let base: [String: Any] = [
+      "operationId": operationID.uuidString.lowercased()
+    ]
+    let invalid: [[String: Any]] = [
+      base.merging(["status": "applied"]) { _, new in new },
+      base.merging(["status": "applied", "record": NSNull()]) { _, new in new },
+      base.merging(["status": "applied", "record": active, "remote": NSNull()]) { _, new in new },
+      base.merging(["status": "applied", "record": active, "remote": tombstone]) { _, new in new },
+      base.merging(["status": "applied", "remote": tombstone]) { _, new in new },
+      base.merging(["status": "conflict"]) { _, new in new },
+      base.merging(["status": "conflict", "remote": NSNull()]) { _, new in new },
+      base.merging(["status": "conflict", "remote": tombstone, "record": NSNull()]) { _, new in new
+      },
+      base.merging(["status": "conflict", "remote": tombstone, "record": active]) { _, new in new },
+      base.merging(["status": "conflict", "record": active]) { _, new in new },
+    ]
+
+    for object in invalid {
+      let data = try JSONSerialization.data(withJSONObject: object)
+      #expect(throws: DecodingError.self) {
+        try MobileJSON.decoder.decode(PushResult.self, from: data)
+      }
+    }
   }
 
   @Test func decodesPullPageWithCompleteTombstoneSnapshot() throws {
@@ -473,4 +578,12 @@ private func jsonObject<Value: Encodable>(_ value: Value) throws -> [String: Any
   try #require(
     JSONSerialization.jsonObject(with: MobileJSON.encoder.encode(value)) as? [String: Any]
   )
+}
+
+private func removingKey(_ key: String, from json: String) throws -> Data {
+  var object = try #require(
+    JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+  )
+  object.removeValue(forKey: key)
+  return try JSONSerialization.data(withJSONObject: object)
 }

@@ -255,6 +255,34 @@ private enum StrictRFC3339 {
   }
 }
 
+extension KeyedDecodingContainer {
+  fileprivate func decodeRequiredNullable<Value: Decodable>(
+    _ type: Value.Type,
+    forKey key: Key
+  ) throws -> Value? {
+    guard contains(key) else {
+      throw DecodingError.keyNotFound(
+        key,
+        .init(codingPath: codingPath, debugDescription: "required nullable key is missing")
+      )
+    }
+    return try decodeIfPresent(type, forKey: key)
+  }
+}
+
+extension KeyedEncodingContainer {
+  fileprivate mutating func encodeRequiredNullable<Value: Encodable>(
+    _ value: Value?,
+    forKey key: Key
+  ) throws {
+    if let value {
+      try encode(value, forKey: key)
+    } else {
+      try encodeNil(forKey: key)
+    }
+  }
+}
+
 public struct APIBirthday: Codable, Equatable, Sendable {
   private let idValue: MobileUUID
   public let name: String
@@ -324,6 +352,46 @@ public struct APIBirthday: Codable, Equatable, Sendable {
     self.createdAt = createdAt
     self.updatedAt = updatedAt
     self.deletedAt = deletedAt
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    idValue = try container.decode(MobileUUID.self, forKey: .idValue)
+    name = try container.decode(String.self, forKey: .name)
+    lunarMonth = try container.decode(Int.self, forKey: .lunarMonth)
+    lunarDay = try container.decode(Int.self, forKey: .lunarDay)
+    isLeapMonth = try container.decode(Bool.self, forKey: .isLeapMonth)
+    reminderTimeMinutes = try container.decode(Int.self, forKey: .reminderTimeMinutes)
+    notifyDayBefore = try container.decode(Bool.self, forKey: .notifyDayBefore)
+    notifySameDay = try container.decode(Bool.self, forKey: .notifySameDay)
+    emailEnabled = try container.decode(Bool.self, forKey: .emailEnabled)
+    emailAddress = try container.decode(String.self, forKey: .emailAddress)
+    emailMessage = try container.decode(String.self, forKey: .emailMessage)
+    nextSolarDate = try container.decodeRequiredNullable(Date.self, forKey: .nextSolarDate)
+    versionValue = try container.decode(DecimalInt64.self, forKey: .versionValue)
+    createdAt = try container.decode(Date.self, forKey: .createdAt)
+    updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    deletedAt = try container.decodeRequiredNullable(Date.self, forKey: .deletedAt)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(idValue, forKey: .idValue)
+    try container.encode(name, forKey: .name)
+    try container.encode(lunarMonth, forKey: .lunarMonth)
+    try container.encode(lunarDay, forKey: .lunarDay)
+    try container.encode(isLeapMonth, forKey: .isLeapMonth)
+    try container.encode(reminderTimeMinutes, forKey: .reminderTimeMinutes)
+    try container.encode(notifyDayBefore, forKey: .notifyDayBefore)
+    try container.encode(notifySameDay, forKey: .notifySameDay)
+    try container.encode(emailEnabled, forKey: .emailEnabled)
+    try container.encode(emailAddress, forKey: .emailAddress)
+    try container.encode(emailMessage, forKey: .emailMessage)
+    try container.encodeRequiredNullable(nextSolarDate, forKey: .nextSolarDate)
+    try container.encode(versionValue, forKey: .versionValue)
+    try container.encode(createdAt, forKey: .createdAt)
+    try container.encode(updatedAt, forKey: .updatedAt)
+    try container.encodeRequiredNullable(deletedAt, forKey: .deletedAt)
   }
 
   public func asRecord(syncState: SyncState) -> BirthdayRecord {
@@ -593,10 +661,80 @@ public struct PushResult: Codable, Equatable, Sendable {
     record: APIBirthday?,
     remote: APIBirthday?
   ) {
+    precondition(
+      (status == .applied && record != nil && remote == nil)
+        || (status == .conflict && record == nil && remote != nil),
+      "push result must contain only the payload selected by its status"
+    )
     operationIdValue = MobileUUID(operationId)
     self.status = status
     self.record = record
     self.remote = remote
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    operationIdValue = try container.decode(MobileUUID.self, forKey: .operationIdValue)
+    status = try container.decode(PushResultStatus.self, forKey: .status)
+
+    switch status {
+    case .applied:
+      guard container.contains(.record), !container.contains(.remote),
+        try !container.decodeNil(forKey: .record)
+      else {
+        throw Self.invalidPayload(codingPath: container.codingPath)
+      }
+      record = try container.decode(APIBirthday.self, forKey: .record)
+      remote = nil
+    case .conflict:
+      guard container.contains(.remote), !container.contains(.record),
+        try !container.decodeNil(forKey: .remote)
+      else {
+        throw Self.invalidPayload(codingPath: container.codingPath)
+      }
+      record = nil
+      remote = try container.decode(APIBirthday.self, forKey: .remote)
+    }
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(operationIdValue, forKey: .operationIdValue)
+    try container.encode(status, forKey: .status)
+
+    switch status {
+    case .applied:
+      guard let record, remote == nil else {
+        throw EncodingError.invalidValue(
+          self,
+          .init(
+            codingPath: encoder.codingPath,
+            debugDescription: "applied push result requires only record"
+          )
+        )
+      }
+      try container.encode(record, forKey: .record)
+    case .conflict:
+      guard record == nil, let remote else {
+        throw EncodingError.invalidValue(
+          self,
+          .init(
+            codingPath: encoder.codingPath,
+            debugDescription: "conflict push result requires only remote"
+          )
+        )
+      }
+      try container.encode(remote, forKey: .remote)
+    }
+  }
+
+  private static func invalidPayload(codingPath: [any CodingKey]) -> DecodingError {
+    .dataCorrupted(
+      .init(
+        codingPath: codingPath,
+        debugDescription: "push result payload does not match its status"
+      )
+    )
   }
 }
 
@@ -678,5 +816,23 @@ public struct MobileDevice: Codable, Equatable, Sendable {
     self.createdAt = createdAt
     self.lastUsedAt = lastUsedAt
     self.revokedAt = revokedAt
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    deviceIdValue = try container.decode(MobileUUID.self, forKey: .deviceIdValue)
+    deviceName = try container.decode(String.self, forKey: .deviceName)
+    createdAt = try container.decode(Date.self, forKey: .createdAt)
+    lastUsedAt = try container.decodeRequiredNullable(Date.self, forKey: .lastUsedAt)
+    revokedAt = try container.decodeRequiredNullable(Date.self, forKey: .revokedAt)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(deviceIdValue, forKey: .deviceIdValue)
+    try container.encode(deviceName, forKey: .deviceName)
+    try container.encode(createdAt, forKey: .createdAt)
+    try container.encodeRequiredNullable(lastUsedAt, forKey: .lastUsedAt)
+    try container.encodeRequiredNullable(revokedAt, forKey: .revokedAt)
   }
 }
