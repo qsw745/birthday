@@ -17,6 +17,7 @@ public actor BirthdayStore: ModelActor {
 
   private let calculator: any LunarBirthdayCalculating
   private let transactionCommitter: @Sendable (ModelContext) throws -> Void
+  private let operationReader: @Sendable (ModelContext) throws -> [SyncOperationEntity]
 
   public init(modelContainer: ModelContainer) {
     let context = ModelContext(modelContainer)
@@ -24,18 +25,23 @@ public actor BirthdayStore: ModelActor {
     modelExecutor = DefaultSerialModelExecutor(modelContext: context)
     calculator = ChineseCalendarBirthdayCalculator()
     transactionCommitter = { context in try context.save() }
+    operationReader = { context in try context.fetch(FetchDescriptor<SyncOperationEntity>()) }
   }
 
   init(
     modelContainer: ModelContainer,
     calculator: any LunarBirthdayCalculating = ChineseCalendarBirthdayCalculator(),
-    transactionCommitter: @escaping @Sendable (ModelContext) throws -> Void
+    transactionCommitter: @escaping @Sendable (ModelContext) throws -> Void,
+    operationReader: @escaping @Sendable (ModelContext) throws -> [SyncOperationEntity] = {
+      context in try context.fetch(FetchDescriptor<SyncOperationEntity>())
+    }
   ) {
     let context = ModelContext(modelContainer)
     self.modelContainer = modelContainer
     modelExecutor = DefaultSerialModelExecutor(modelContext: context)
     self.calculator = calculator
     self.transactionCommitter = transactionCommitter
+    self.operationReader = operationReader
   }
 
   public func save(
@@ -186,13 +192,7 @@ public actor BirthdayStore: ModelActor {
 
   public func readyOperations(limit: Int, now: Date) throws -> [SyncOperation] {
     guard limit > 0 else { return [] }
-    let descriptor = FetchDescriptor<SyncOperationEntity>(
-      sortBy: [
-        SortDescriptor(\.createdAt),
-        SortDescriptor(\.operationId),
-      ]
-    )
-    let operations = try modelContext.fetch(descriptor)
+    let operations = try operationReader(modelContext)
     return
       operations
       .filter { operation in

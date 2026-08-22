@@ -372,6 +372,22 @@ import Testing
     #expect(await api.events().last == .pull)
   }
 
+  @Test func readyReadFailureStopsBeforeAnyPull() async throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let api = PagedPullAPI(pages: [])
+    let store = BirthdayStore(
+      modelContainer: try makeSyncContainer(),
+      transactionCommitter: { context in try context.save() },
+      operationReader: { _ in throw CommitFailure.expected }
+    )
+    await #expect(throws: CommitFailure.expected) {
+      try await SyncEngine(
+        api: api, store: store, credentials: try makeCredentials(now: now), now: { now }
+      ).syncNow()
+    }
+    #expect(await api.pulledCursors().isEmpty)
+  }
+
   private func makeOperationsForExactRequestSize(_ target: Int) throws -> [SyncOperation] {
     let fixed = try (0..<7).map { _ in
       try makeOperation(message: String(repeating: "m", count: 8_000))
