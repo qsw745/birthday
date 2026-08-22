@@ -6,6 +6,7 @@ public enum BirthdayStoreError: Error, Equatable, Sendable {
   case unknownOperation
   case pushResultsDoNotMatchBatch
   case pushResultEntityMismatch
+  case invalidPullPage
 }
 
 public actor BirthdayStore: ModelActor {
@@ -183,7 +184,7 @@ public actor BirthdayStore: ModelActor {
     return try modelContext.fetch(descriptor).map(map)
   }
 
-  public func readyOperations(limit: Int, now: Date) -> [SyncOperation] {
+  public func readyOperations(limit: Int, now: Date) throws -> [SyncOperation] {
     guard limit > 0 else { return [] }
     let descriptor = FetchDescriptor<SyncOperationEntity>(
       sortBy: [
@@ -191,11 +192,12 @@ public actor BirthdayStore: ModelActor {
         SortDescriptor(\.operationId),
       ]
     )
-    guard let operations = try? modelContext.fetch(descriptor) else { return [] }
+    let operations = try modelContext.fetch(descriptor)
     return
       operations
       .filter { operation in
         operation.lastErrorCategory != "local_contract"
+          && operation.lastErrorCategory != "conflict_blocked"
           && (operation.nextRetryAt == nil || operation.nextRetryAt! <= now)
       }
       .prefix(limit)
@@ -260,7 +262,7 @@ public actor BirthdayStore: ModelActor {
     timeZone: TimeZone
   ) throws {
     do {
-      let activeRecords = results.compactMap(\.record).filter {
+      let activeRecords = (results.compactMap(\.record) + results.compactMap(\.remote)).filter {
         $0.deletedAt == nil && $0.nextSolarDate == nil
       }
       let calculatedSolarDates = try calculateMissingSolarDates(
@@ -286,6 +288,11 @@ public actor BirthdayStore: ModelActor {
 
       let birthdays = try modelContext.fetch(FetchDescriptor<BirthdayEntity>())
       let byEntityID = Dictionary(uniqueKeysWithValues: birthdays.map { ($0.id, $0) })
+      try validatePushResults(
+        results,
+        operations: byOperationID,
+        sent: sentByOperationID
+      )
       for result in results {
         guard let operation = byOperationID[result.operationId] else {
           throw BirthdayStoreError.pushResultsDoNotMatchBatch
@@ -303,11 +310,29 @@ public actor BirthdayStore: ModelActor {
           guard let serverRecord, serverRecord.id == operation.entityId else {
             throw BirthdayStoreError.pushResultEntityMismatch
           }
-          operation.operationId = UUID()
-          operation.baseVersion = serverRecord.version
-          operation.attemptCount = 0
-          operation.nextRetryAt = nil
-          operation.lastErrorCategory = nil
+          guard let local = byEntityID[operation.entityId] else {
+            throw BirthdayStoreError.pushResultEntityMismatch
+          }
+          switch result.status {
+          case .applied:
+            local.version = serverRecord.version
+            operation.operationId = UUID()
+            operation.baseVersion = serverRecord.version
+            operation.attemptCount = 0
+            operation.nextRetryAt = nil
+            operation.lastErrorCategory = nil
+          case .conflict:
+            try saveConflict(
+              entityID: operation.entityId,
+              operationID: operation.operationId,
+              local: apiBirthday(from: local),
+              remote: serverRecord,
+              now: now
+            )
+            local.syncStateRaw = SyncState.conflict.rawValue
+            operation.lastErrorCategory = "conflict_blocked"
+            operation.nextRetryAt = nil
+          }
           continue
         }
         switch result.status {
@@ -316,6 +341,7 @@ public actor BirthdayStore: ModelActor {
             throw BirthdayStoreError.pushResultEntityMismatch
           }
           if let existing = byEntityID[operation.entityId] {
+            existing.version = record.version
             apply(
               record, nextSolarDate: record.nextSolarDate ?? calculatedSolarDates[record.id],
               to: existing)
@@ -339,7 +365,8 @@ public actor BirthdayStore: ModelActor {
             now: now
           )
           local.syncStateRaw = SyncState.conflict.rawValue
-          modelContext.delete(operation)
+          operation.lastErrorCategory = "conflict_blocked"
+          operation.nextRetryAt = nil
         }
       }
       try transactionCommitter(modelContext)
@@ -351,17 +378,14 @@ public actor BirthdayStore: ModelActor {
 
   public func applyPull(_ page: PullResponse, now: Date, timeZone: TimeZone) throws {
     do {
+      try validatePullPage(page, currentCursor: try syncCursor())
       let activeRecords = page.changes.map(\.record).filter {
         $0.deletedAt == nil && $0.nextSolarDate == nil
       }
       let calculatedSolarDates = try calculateMissingSolarDates(
         activeRecords, now: now, timeZone: timeZone)
-      let currentCursor = try syncCursor()
-      guard page.nextCursor >= currentCursor else {
-        throw BirthdayStoreError.pushResultsDoNotMatchBatch
-      }
       let birthdays = try modelContext.fetch(FetchDescriptor<BirthdayEntity>())
-      let byEntityID = Dictionary(uniqueKeysWithValues: birthdays.map { ($0.id, $0) })
+      var byEntityID = Dictionary(uniqueKeysWithValues: birthdays.map { ($0.id, $0) })
       let operations = try modelContext.fetch(FetchDescriptor<SyncOperationEntity>())
       let pendingIDs = Set(operations.map(\.entityId))
 
@@ -379,6 +403,11 @@ public actor BirthdayStore: ModelActor {
             remote: remote,
             now: now
           )
+          local.syncStateRaw = SyncState.conflict.rawValue
+          if let operation = operations.first(where: { $0.entityId == remote.id }) {
+            operation.lastErrorCategory = "conflict_blocked"
+            operation.nextRetryAt = nil
+          }
           continue
         }
 
@@ -387,9 +416,10 @@ public actor BirthdayStore: ModelActor {
             remote, nextSolarDate: remote.nextSolarDate ?? calculatedSolarDates[remote.id],
             to: existing)
         } else {
-          modelContext.insert(
-            makeEntity(
-              remote, nextSolarDate: remote.nextSolarDate ?? calculatedSolarDates[remote.id]))
+          let entity = makeEntity(
+            remote, nextSolarDate: remote.nextSolarDate ?? calculatedSolarDates[remote.id])
+          modelContext.insert(entity)
+          byEntityID[remote.id] = entity
         }
       }
 
@@ -666,6 +696,85 @@ public actor BirthdayStore: ModelActor {
     } else {
       modelContext.insert(SyncMetadataEntity(key: key, cursor: cursor))
     }
+  }
+
+  private func validatePushResults(
+    _ results: [PushResult],
+    operations: [UUID: SyncOperationEntity],
+    sent: [UUID: PushOperationDTO]
+  ) throws {
+    for result in results {
+      guard let operation = operations[result.operationId] else {
+        throw BirthdayStoreError.pushResultsDoNotMatchBatch
+      }
+      guard let operationType = PushOperationKind(rawValue: operation.operationType) else {
+        throw BirthdayStoreError.pushResultEntityMismatch
+      }
+      if let sentOperation = sent[result.operationId] {
+        guard sentOperation.entityId == operation.entityId, sentOperation.type == operationType
+        else {
+          throw BirthdayStoreError.pushResultEntityMismatch
+        }
+      }
+
+      let serverRecord: APIBirthday
+      switch result.status {
+      case .applied:
+        guard let record = result.record, record.id == operation.entityId else {
+          throw BirthdayStoreError.pushResultEntityMismatch
+        }
+        if operationType == .upsert,
+          record.deletedAt != nil
+            || operationType == .delete, record.deletedAt == nil
+        {
+          throw BirthdayStoreError.pushResultEntityMismatch
+        }
+        serverRecord = record
+      case .conflict:
+        guard let remote = result.remote, remote.id == operation.entityId else {
+          throw BirthdayStoreError.pushResultEntityMismatch
+        }
+        serverRecord = remote
+      }
+      try validateRemoteBirthday(serverRecord)
+    }
+  }
+
+  private func validatePullPage(_ page: PullResponse, currentCursor: Int64) throws {
+    var previousSequence = currentCursor
+    for change in page.changes {
+      guard change.seq > previousSequence else { throw BirthdayStoreError.invalidPullPage }
+      previousSequence = change.seq
+      switch change.operation {
+      case .upsert:
+        guard change.record.deletedAt == nil else { throw BirthdayStoreError.invalidPullPage }
+      case .delete:
+        guard change.record.deletedAt != nil else { throw BirthdayStoreError.invalidPullPage }
+      }
+      try validateRemoteBirthday(change.record)
+    }
+
+    if page.changes.isEmpty {
+      guard page.nextCursor == currentCursor, !page.hasMore else {
+        throw BirthdayStoreError.invalidPullPage
+      }
+    } else {
+      guard page.nextCursor == previousSequence else { throw BirthdayStoreError.invalidPullPage }
+      guard page.nextCursor > currentCursor else { throw BirthdayStoreError.invalidPullPage }
+    }
+  }
+
+  private func validateRemoteBirthday(_ remote: APIBirthday) throws {
+    try BirthdayValidator.validate(
+      BirthdayDraft(
+        name: remote.name,
+        lunarBirthday: LunarBirthday(
+          month: remote.lunarMonth,
+          day: remote.lunarDay,
+          isLeapMonth: remote.isLeapMonth
+        ),
+        reminder: remote.reminder
+      ))
   }
 
   private func saveConflict(

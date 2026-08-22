@@ -31,6 +31,7 @@ public enum PushBatcher {
       let dto: PushOperationDTO
       do {
         dto = try PushOperationDTO(operation)
+        try validate(dto)
       } catch {
         throw PushBatcherError.invalidOperation(operation.operationId)
       }
@@ -61,11 +62,33 @@ public enum PushBatcher {
   private static func encodedSize(_ operations: [PushOperationDTO]) throws -> Int {
     try MobileJSON.encoder.encode(PushRequest(operations: operations)).count
   }
+
+  private static func validate(_ operation: PushOperationDTO) throws {
+    guard let payload = operation.payload else { return }
+    try BirthdayValidator.validate(
+      BirthdayDraft(
+        name: payload.name,
+        lunarBirthday: LunarBirthday(
+          month: payload.lunarMonth,
+          day: payload.lunarDay,
+          isLeapMonth: payload.isLeapMonth
+        ),
+        reminder: ReminderConfig(
+          timeMinutes: payload.reminderTimeMinutes,
+          notifyDayBefore: payload.notifyDayBefore,
+          notifySameDay: payload.notifySameDay,
+          emailEnabled: payload.emailEnabled,
+          emailAddress: payload.emailAddress,
+          emailMessage: payload.emailMessage
+        )
+      ))
+  }
 }
 
 public enum SyncError: Error, Equatable, Sendable {
   case invalidReadyOperation
   case rebindRequired
+  case retryPersistenceFailed(originalCategory: SyncErrorCategory)
 }
 
 public struct SyncSummary: Sendable, Equatable {
@@ -108,7 +131,7 @@ public actor SyncEngine {
     var conflicts = 0
 
     while true {
-      let ready = await store.readyOperations(limit: 200, now: now())
+      let ready = try await store.readyOperations(limit: 200, now: now())
       if ready.isEmpty { break }
 
       let batches: [[PushOperationDTO]]
@@ -138,11 +161,16 @@ public actor SyncEngine {
           uploaded += response.results.filter { $0.status == .applied }.count
           conflicts += response.results.filter { $0.status == .conflict }.count
         } catch {
-          try await store.recordRetry(
-            operationIDs: batch.map(\.operationId),
-            category: retryCategory(for: error),
-            now: now()
-          )
+          let category = retryCategory(for: error)
+          do {
+            try await store.recordRetry(
+              operationIDs: batch.map(\.operationId),
+              category: category,
+              now: now()
+            )
+          } catch {
+            throw SyncError.retryPersistenceFailed(originalCategory: category)
+          }
           throw error
         }
       }
@@ -193,16 +221,10 @@ public actor SyncEngine {
   }
 
   private func loadCredentialsForSync() throws -> DeviceCredentials {
-    do {
-      guard let saved = try credentials.load(), saved.refreshExpiresAt > now() else {
-        throw SyncError.rebindRequired
-      }
-      return saved
-    } catch is SyncError {
-      throw SyncError.rebindRequired
-    } catch {
+    guard let saved = try credentials.load(), saved.refreshExpiresAt > now() else {
       throw SyncError.rebindRequired
     }
+    return saved
   }
 
   private func refresh(_ current: DeviceCredentials) async throws -> DeviceCredentials {
@@ -213,10 +235,6 @@ public actor SyncEngine {
       try credentials.replaceAfterRefresh(rotated, expectedDeviceID: current.deviceId)
       return rotated
     } catch MobileAPIError.refreshInvalid {
-      throw SyncError.rebindRequired
-    } catch is SyncError {
-      throw SyncError.rebindRequired
-    } catch {
       throw SyncError.rebindRequired
     }
   }

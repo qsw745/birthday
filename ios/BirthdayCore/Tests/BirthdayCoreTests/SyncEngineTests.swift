@@ -57,18 +57,18 @@ import Testing
       now: now,
       timeZone: TimeZone(secondsFromGMT: 0)!
     )
-    let operation = try #require(await store.readyOperations(limit: 1, now: now).first)
+    let operation = try #require(try await store.readyOperations(limit: 1, now: now).first)
 
     try await store.recordRetry(
       operationIDs: [operation.operationId],
       category: .transport,
       now: now
     )
-    #expect(await store.readyOperations(limit: 1, now: now).isEmpty)
-    #expect(await store.readyOperations(limit: 1, now: now.addingTimeInterval(30)).count == 1)
+    #expect(try await store.readyOperations(limit: 1, now: now).isEmpty)
+    #expect(try await store.readyOperations(limit: 1, now: now.addingTimeInterval(30)).count == 1)
 
     try await store.markOperationTerminal(operationID: operation.operationId)
-    #expect(await store.readyOperations(limit: 1, now: now.addingTimeInterval(30)).isEmpty)
+    #expect(try await store.readyOperations(limit: 1, now: now.addingTimeInterval(30)).isEmpty)
     #expect(try await store.activeBirthdays().first?.id == record.id)
   }
 
@@ -85,7 +85,7 @@ import Testing
       now: now,
       timeZone: TimeZone(secondsFromGMT: 0)!
     )
-    let operation = try #require(await store.readyOperations(limit: 1, now: now).first)
+    let operation = try #require(try await store.readyOperations(limit: 1, now: now).first)
     let remote = makeAPIBirthday(id: record.id, name: "远端生日", version: 2)
 
     try await store.applyPushResults(
@@ -98,7 +98,7 @@ import Testing
       timeZone: TimeZone(secondsFromGMT: 0)!
     )
 
-    #expect(await store.readyOperations(limit: 10, now: now).isEmpty)
+    #expect(try await store.readyOperations(limit: 10, now: now).isEmpty)
     let conflict = try #require(try await store.syncConflicts().first)
     #expect(conflict.entityId == record.id)
     #expect(conflict.operationId == operation.operationId)
@@ -119,14 +119,14 @@ import Testing
       now: now,
       timeZone: TimeZone(secondsFromGMT: 0)!
     )
-    let second = try #require(await secondStore.readyOperations(limit: 1, now: now).first)
+    let second = try #require(try await secondStore.readyOperations(limit: 1, now: now).first)
     await #expect(throws: BirthdayStoreError.pushResultsDoNotMatchBatch) {
       try await secondStore.applyPushResults(
         [], expectedOperationIDs: [second.operationId], now: now,
         timeZone: TimeZone(secondsFromGMT: 0)!
       )
     }
-    #expect(await secondStore.readyOperations(limit: 1, now: now).count == 1)
+    #expect(try await secondStore.readyOperations(limit: 1, now: now).count == 1)
   }
 
   @Test func pullPreservesPendingLocalSnapshotAsConflictThenCommitsCursor() async throws {
@@ -156,6 +156,7 @@ import Testing
     #expect(try await store.activeBirthdays().first?.name == "本地优先")
     #expect(try await store.syncCursor() == 4)
     #expect(try await store.syncConflicts().map(\.entityId) == [record.id])
+    #expect(try await store.readyOperations(limit: 10, now: now).isEmpty)
   }
 
   @Test func syncDrainsEveryPushBatchBeforeItsFirstPull() async throws {
@@ -190,7 +191,7 @@ import Testing
     let events = await api.events()
 
     #expect(summary.uploaded == 121)
-    #expect(await store.readyOperations(limit: 500, now: now).isEmpty)
+    #expect(try await store.readyOperations(limit: 500, now: now).isEmpty)
     #expect(events.filter { $0 == .push }.count >= 3)
     #expect(try #require(events.lastIndex(of: .push)) < #require(events.firstIndex(of: .pull)))
   }
@@ -213,7 +214,7 @@ import Testing
 
     let summary = try await engine.syncNow()
 
-    #expect(summary.cursor == 4)
+    #expect(summary.cursor == 0)
     #expect(await api.refreshCount() == 1)
     #expect(try credentials.load()?.accessToken == "fresh-access")
     #expect(try credentials.load()?.refreshToken == "fresh-refresh")
@@ -228,7 +229,7 @@ import Testing
         reminder: .defaults
       ), id: UUID(), now: now, timeZone: TimeZone(secondsFromGMT: 0)!
     )
-    let sent = try #require(await store.readyOperations(limit: 1, now: now).first)
+    let sent = try #require(try await store.readyOperations(limit: 1, now: now).first)
     let sentDTO = try PushOperationDTO(sent)
     _ = try await store.save(
       BirthdayDraft(
@@ -244,10 +245,33 @@ import Testing
       timeZone: TimeZone(secondsFromGMT: 0)!
     )
 
-    let replacement = try #require(await store.readyOperations(limit: 1, now: now).first)
+    let replacement = try #require(try await store.readyOperations(limit: 1, now: now).first)
     #expect(replacement.operationId != sent.operationId)
     #expect(replacement.baseVersion == 7)
     #expect(try await store.activeBirthdays().first?.name == "发送中编辑")
+
+    _ = try await store.save(
+      BirthdayDraft(
+        name: "响应后再编辑", lunarBirthday: LunarBirthday(month: 8, day: 15, isLeapMonth: false),
+        reminder: .defaults
+      ), id: original.id, now: now.addingTimeInterval(2), timeZone: TimeZone(secondsFromGMT: 0)!
+    )
+    #expect(try await store.readyOperations(limit: 1, now: now).first?.baseVersion == 7)
+  }
+
+  @Test func pullRejectsNoProgressPageBeforeCursorOrRecordsMutate() async throws {
+    let store = try makeSyncStore()
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    await #expect(throws: BirthdayStoreError.invalidPullPage) {
+      try await store.applyPull(
+        PullResponse(changes: [], nextCursor: 0, hasMore: true), now: now,
+        timeZone: TimeZone(secondsFromGMT: 0)!
+      )
+    }
+
+    #expect(try await store.syncCursor() == 0)
+    #expect(try await store.activeBirthdays().isEmpty)
   }
 
   private func makeOperationsForExactRequestSize(_ target: Int) throws -> [SyncOperation] {
@@ -396,7 +420,7 @@ private actor RefreshingPullFakeAPI: MobileAPI {
   func pull(cursor: Int64, accessToken: String) async throws -> PullResponse {
     pulls += 1
     if expiresFirstPull, pulls == 1 { throw MobileAPIError.accessExpired }
-    return PullResponse(changes: [], nextCursor: 4, hasMore: false)
+    return PullResponse(changes: [], nextCursor: cursor, hasMore: false)
   }
   func revoke(deviceId: UUID, accessToken: String) async throws {}
   func devices(accessToken: String) async throws -> [MobileDevice] { [] }
