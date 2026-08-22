@@ -227,7 +227,7 @@ final class AppModel {
 
   var isServerBindingBlocked: Bool {
     isManagingDevice || pendingUnlinkLifecycleGeneration != nil || pendingLocalCleanup != nil
-      || serverBindingState == .binding
+      || lifecyclePauseAcquisitionCount > 0 || serverBindingState == .binding
   }
 
   let store: BirthdayStore
@@ -251,6 +251,7 @@ final class AppModel {
   private var syncPresentationReducer = SyncPresentationReducer()
   private var activeSyncPresentationRequest: SyncPresentationRequest?
   private var pendingUnlinkLifecycleGeneration: SyncRuntimeLifecycleGeneration?
+  private var lifecyclePauseAcquisitionCount = 0
 
   var currentSyncRuntimeLifecycleGeneration: SyncRuntimeLifecycleGeneration? {
     syncPresentationReducer.currentRuntimeLifecycleGeneration
@@ -1075,12 +1076,16 @@ final class AppModel {
   private func enterRebindRequired() async {
     syncPresentationReducer.requireRebind()
     activeSyncPresentationRequest = nil
+    lifecyclePauseAcquisitionCount += 1
+    defer { lifecyclePauseAcquisitionCount -= 1 }
     await deviceManagementService?.pauseForRebind()
   }
 
   private func enterMissingCredentials() async {
     syncPresentationReducer.transitionToMissingCredentials()
     activeSyncPresentationRequest = nil
+    lifecyclePauseAcquisitionCount += 1
+    defer { lifecyclePauseAcquisitionCount -= 1 }
     await deviceManagementService?.pauseForMissingCredentials()
   }
 

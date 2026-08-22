@@ -421,6 +421,100 @@ private actor DeviceBindingStub: ServerDeviceBinding {
     #expect(try await remoteAccessGate.perform { _ in true })
   }
 
+  @Test func lifecyclePauseAcquisitionRejectsBindingUntilDrainThenAllowsExplicitRebind()
+    async throws
+  {
+    let credentials = try makeCredentialStore()
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let suspension = RemoteLeaseSuspension()
+    let service = DeviceManagementService(
+      api: DeviceManagementAPI(),
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+    let forbiddenBinder = DeviceBindingStub(
+      credentials: credentials,
+      savedCredentials: reboundCredentials(accessToken: "access-forbidden")
+    )
+    let retryBinder = DeviceBindingStub(
+      credentials: credentials,
+      savedCredentials: reboundCredentials()
+    )
+    let remoteLease = Task {
+      try await remoteAccessGate.perform { permit in
+        await suspension.suspend()
+        try await remoteAccessGate.validate(permit)
+        return true
+      }
+    }
+    await suspension.waitUntilStarted()
+
+    let pause = Task { await service.pauseForRebind() }
+    while await remoteAccessGate.paused() == false { await Task.yield() }
+
+    await #expect(throws: DeviceManagementError.operationInProgress) {
+      try await service.performBinding(
+        using: forbiddenBinder,
+        username: "admin",
+        password: "new-password",
+        deviceName: "Forbidden iPhone"
+      )
+    }
+    #expect(await forbiddenBinder.requestCount() == 0)
+    #expect(try credentials.load()?.accessToken == "access-current")
+
+    await suspension.resume()
+    await #expect(throws: RemoteSyncAccessError.staleGeneration) {
+      try await remoteLease.value
+    }
+    await pause.value
+
+    try await service.performBinding(
+      using: retryBinder,
+      username: "admin",
+      password: "new-password",
+      deviceName: "Rebound iPhone"
+    )
+    #expect(await retryBinder.requestCount() == 1)
+    #expect(try credentials.load()?.accessToken == "access-rebound")
+    #expect(await remoteAccessGate.paused() == false)
+    #expect(try await remoteAccessGate.perform { _ in true })
+  }
+
+  @Test func cancelledLifecyclePauseAndDuplicateCallerDoNotLeakAGateOwner() async throws {
+    let credentials = try makeCredentialStore()
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let suspension = RemoteLeaseSuspension()
+    let service = DeviceManagementService(
+      api: DeviceManagementAPI(),
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+    let remoteLease = Task {
+      try await remoteAccessGate.perform { permit in
+        await suspension.suspend()
+        try await remoteAccessGate.validate(permit)
+        return true
+      }
+    }
+    await suspension.waitUntilStarted()
+
+    let firstPause = Task { await service.pauseForRebind() }
+    while await remoteAccessGate.paused() == false { await Task.yield() }
+
+    let duplicatePause = Task { await service.pauseForRebind() }
+    await duplicatePause.value
+    firstPause.cancel()
+    await suspension.resume()
+
+    await #expect(throws: RemoteSyncAccessError.staleGeneration) {
+      try await remoteLease.value
+    }
+    await firstPause.value
+    #expect(await remoteAccessGate.paused() == false)
+    #expect(try await remoteAccessGate.perform { _ in true })
+  }
+
   @Test(arguments: [MobileAPIError.accessExpired, MobileAPIError.refreshInvalid])
   func authFailureRequiresRebindAndNeverClearsLocally(error: MobileAPIError) async throws {
     let credentials = try makeCredentialStore()
@@ -868,10 +962,10 @@ private actor DeviceBindingStub: ServerDeviceBinding {
     )
   }
 
-  private func reboundCredentials() -> DeviceCredentials {
+  private func reboundCredentials(accessToken: String = "access-rebound") -> DeviceCredentials {
     DeviceCredentials(
       deviceId: currentID,
-      accessToken: "access-rebound",
+      accessToken: accessToken,
       accessExpiresAt: Date(timeIntervalSince1970: 1_810_000_000),
       refreshToken: "refresh-rebound",
       refreshExpiresAt: Date(timeIntervalSince1970: 1_910_000_000),

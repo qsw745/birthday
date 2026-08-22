@@ -66,7 +66,18 @@ public actor DeviceManagementService {
   }
 
   private var unlinkPauseState: UnlinkPauseState = .idle
-  private var lifecyclePauseToken: RemoteSyncPauseToken?
+  private enum LifecyclePauseState: Equatable {
+    case idle
+    case acquiring(UUID)
+    case paused(RemoteSyncPauseToken)
+
+    var token: RemoteSyncPauseToken? {
+      guard case .paused(let token) = self else { return nil }
+      return token
+    }
+  }
+
+  private var lifecyclePauseState: LifecyclePauseState = .idle
 
   public init(
     api: any MobileAPI,
@@ -148,6 +159,7 @@ public actor DeviceManagementService {
     guard
       !operationInProgress,
       bindingReservation == nil,
+      bindingAllowedForCurrentLifecyclePauseState,
       bindingAllowedForCurrentUnlinkState
     else { throw DeviceManagementError.operationInProgress }
     let reservation = DeviceBindingReservation(serviceID: serviceID, ownerID: UUID())
@@ -268,8 +280,20 @@ public actor DeviceManagementService {
   }
 
   public func pauseForRebind() async {
-    guard lifecyclePauseToken == nil else { return }
-    lifecyclePauseToken = await remoteAccessGate.pauseAndDrain()
+    guard lifecyclePauseState == .idle else { return }
+    let ownerID = UUID()
+    lifecyclePauseState = .acquiring(ownerID)
+    let token = await remoteAccessGate.pauseAndDrain()
+    guard lifecyclePauseState == .acquiring(ownerID) else {
+      _ = await remoteAccessGate.resume(after: token)
+      return
+    }
+    guard !Task.isCancelled else {
+      lifecyclePauseState = .idle
+      _ = await remoteAccessGate.resume(after: token)
+      return
+    }
+    lifecyclePauseState = .paused(token)
   }
 
   public func pauseForMissingCredentials() async {
@@ -281,11 +305,12 @@ public actor DeviceManagementService {
       reservation.serviceID == serviceID,
       bindingReservation == reservation,
       !operationInProgress,
+      bindingAllowedForCurrentLifecyclePauseState,
       bindingAllowedForCurrentUnlinkState
     else { throw DeviceManagementError.operationInProgress }
     bindingReservation = nil
-    let lifecycleToken = lifecyclePauseToken
-    lifecyclePauseToken = nil
+    let lifecycleToken = lifecyclePauseState.token
+    lifecyclePauseState = .idle
     let unlinkToken = unlinkPauseState.token
     unlinkPauseState = .idle
     if let lifecycleToken {
@@ -327,6 +352,15 @@ public actor DeviceManagementService {
     case .idle, .rebindRequired, .stopped:
       true
     case .revoking, .awaitingConfirmation, .pendingCleanup:
+      false
+    }
+  }
+
+  private var bindingAllowedForCurrentLifecyclePauseState: Bool {
+    switch lifecyclePauseState {
+    case .idle, .paused:
+      true
+    case .acquiring:
       false
     }
   }
