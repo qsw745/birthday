@@ -732,17 +732,23 @@ final class AppModel {
 
     let outcome = try await syncCoordinator.request(trigger)
     switch outcome {
-    case .completed(let summary, let activeBirthdays, let health):
-      records = activeBirthdays
-      notificationHealth = health
-      syncStatus = .synchronized(summary)
-      await reloadConflicts()
+    case .completed:
+      // The coordinator publishes a completed outcome while it still owns the sync gate.
+      break
     case .unbound:
       syncStatus = .unbound
     case .coalesced:
       break
     }
     return outcome
+  }
+
+  func publishCompletedSync(_ outcome: SyncRequestOutcome) async {
+    guard case .completed(let summary, let activeBirthdays, let health) = outcome else { return }
+    records = activeBirthdays
+    notificationHealth = health
+    syncStatus = .synchronized(summary)
+    await reloadConflicts()
   }
 
   func requestSync(_ trigger: SyncTrigger) async {

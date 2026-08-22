@@ -14,7 +14,8 @@ final class SyncCoordinator {
     notificationScheduler: any NotificationScheduling,
     reminderPlanner: ReminderPlanner,
     now: @escaping @Sendable () -> Date = Date.init,
-    timeZone: @escaping @Sendable () -> TimeZone = { .current }
+    timeZone: @escaping @Sendable () -> TimeZone = { .current },
+    publish: @escaping @MainActor @Sendable (SyncRequestOutcome) async -> Void
   ) {
     coordinator = SyncRequestCoordinator(
       isBound: {
@@ -26,7 +27,8 @@ final class SyncCoordinator {
       planner: reminderPlanner,
       notificationScheduler: notificationScheduler,
       now: now,
-      timeZone: timeZone
+      timeZone: timeZone,
+      publish: { outcome in await publish(outcome) }
     )
   }
 
@@ -41,34 +43,50 @@ final class NetworkRestorationMonitor {
   private let queue: DispatchQueue
   private let onRestored: @MainActor @Sendable () -> Void
   private var transition = NetworkRestorationTransition()
-  private var hasStarted = false
+  private enum State {
+    case new
+    case started
+    case cancelled
+  }
+
+  private var state: State = .new
 
   init(onRestored: @escaping @MainActor @Sendable () -> Void) {
     monitor = NWPathMonitor()
     queue = DispatchQueue(label: "top.qisw.birthday.network-restoration")
     self.onRestored = onRestored
     monitor.pathUpdateHandler = { [weak self] path in
-      let isSatisfied = path.status == .satisfied
+      let state: NetworkPathState
+      switch path.status {
+      case .unsatisfied:
+        state = .unsatisfied
+      case .requiresConnection:
+        state = .requiresConnection
+      case .satisfied:
+        state = .satisfied
+      @unknown default:
+        state = .requiresConnection
+      }
       Task { @MainActor [weak self] in
-        self?.receive(isSatisfied: isSatisfied)
+        self?.receive(state)
       }
     }
   }
 
   func start() {
-    guard !hasStarted else { return }
-    hasStarted = true
+    guard state == .new else { return }
+    state = .started
     monitor.start(queue: queue)
   }
 
   func stop() {
-    guard hasStarted else { return }
+    guard state == .started else { return }
     monitor.cancel()
-    hasStarted = false
+    state = .cancelled
   }
 
-  private func receive(isSatisfied: Bool) {
-    guard transition.receive(isSatisfied: isSatisfied) else { return }
+  private func receive(_ state: NetworkPathState) {
+    guard transition.receive(state) else { return }
     onRestored()
   }
 }
@@ -80,16 +98,19 @@ final class BackgroundRefreshCoordinator {
 
   private let policy: BackgroundRefreshPolicy
   private let runner: BackgroundRefreshRunner
-  private let runSync: @MainActor @Sendable () async throws -> SyncRequestOutcome
+  private let readiness: BackgroundRefreshReadiness
+  private let runSync: @MainActor @Sendable () async throws -> BackgroundRefreshWorkResult
   private var isRegistered = false
 
   init(
     policy: BackgroundRefreshPolicy = BackgroundRefreshPolicy(),
     runner: BackgroundRefreshRunner = BackgroundRefreshRunner(),
-    runSync: @escaping @MainActor @Sendable () async throws -> SyncRequestOutcome
+    readiness: BackgroundRefreshReadiness,
+    runSync: @escaping @MainActor @Sendable () async throws -> BackgroundRefreshWorkResult
   ) {
     self.policy = policy
     self.runner = runner
+    self.readiness = readiness
     self.runSync = runSync
   }
 
@@ -128,8 +149,8 @@ final class BackgroundRefreshCoordinator {
 
   private func handle(_ task: BGAppRefreshTask) async {
     scheduleNext()
-    let work = Task { [runner, runSync] in
-      await runner.run { try await runSync() }
+    let work = Task { [readiness, runner, runSync] in
+      await runner.run(readiness: readiness) { try await runSync() }
     }
     task.expirationHandler = { work.cancel() }
     task.setTaskCompleted(success: await work.value)
@@ -142,9 +163,12 @@ final class AppSyncRuntime {
   static let shared = AppSyncRuntime()
 
   private weak var model: AppModel?
-  private lazy var backgroundRefreshCoordinator = BackgroundRefreshCoordinator { [weak self] in
-    guard let model = self?.model else { return .unbound }
-    return try await model.performSync(.backgroundRefresh)
+  private let readiness = BackgroundRefreshReadiness()
+  private lazy var backgroundRefreshCoordinator = BackgroundRefreshCoordinator(
+    readiness: readiness
+  ) { [weak self] in
+    guard let model = self?.model else { return .notReady }
+    return .outcome(try await model.performSync(.backgroundRefresh))
   }
 
   private init() {}
@@ -153,7 +177,8 @@ final class AppSyncRuntime {
     backgroundRefreshCoordinator.registerAndSchedule()
   }
 
-  func install(model: AppModel) {
+  func install(model: AppModel) async {
     self.model = model
+    await readiness.markReady()
   }
 }

@@ -29,6 +29,23 @@ import Testing
   #expect(await probe.events() == ["sync", "load", "schedule"])
 }
 
+@Test func requestCoordinatorKeepsGateLeasedUntilPublicationFinishes() async throws {
+  let probe = SyncTriggerProbe(holdFirstPublication: true)
+  let coordinator = makeCoordinator(
+    probe: probe,
+    publish: { outcome in await probe.publish(outcome) }
+  )
+
+  let first = Task { try await coordinator.request(.foreground) }
+  await probe.waitForFirstPublication()
+  let second = try await coordinator.request(.manual)
+  await probe.allowFirstPublication()
+
+  #expect(second == .coalesced)
+  #expect(try await first.value.summary == syncTriggerSummary)
+  #expect(await probe.events() == ["sync", "load", "schedule", "publish"])
+}
+
 @Test func requestCoordinatorReturnsUnboundWithoutSyncing() async throws {
   let probe = SyncTriggerProbe()
   let coordinator = makeCoordinator(probe: probe, bound: false)
@@ -83,14 +100,38 @@ import Testing
   #expect(await probe.events() == ["sync", "sync", "load", "schedule"])
 }
 
-@Test func networkRestorationRequiresAnExplicitUnsatisfiedToSatisfiedTransition() {
+@Test func networkRestorationRequiresAnAdjacentUnsatisfiedToSatisfiedTransition() {
   var transition = NetworkRestorationTransition()
 
-  #expect(transition.receive(isSatisfied: true) == false)
-  #expect(transition.receive(isSatisfied: true) == false)
-  #expect(transition.receive(isSatisfied: false) == false)
-  #expect(transition.receive(isSatisfied: true) == true)
-  #expect(transition.receive(isSatisfied: true) == false)
+  #expect(transition.receive(.satisfied) == false)
+  #expect(transition.receive(.unsatisfied) == false)
+  #expect(transition.receive(.requiresConnection) == false)
+  #expect(transition.receive(.satisfied) == false)
+  #expect(transition.receive(.unsatisfied) == false)
+  #expect(transition.receive(.satisfied) == true)
+}
+
+@Test func networkMonitorLifecycleCreatesNewMonitorOnlyWhileActive() {
+  var lifecycle = NetworkRestorationMonitorLifecycle()
+
+  #expect(lifecycle.update(isActive: false) == .none)
+  #expect(lifecycle.update(isActive: true) == .startNewMonitor)
+  #expect(lifecycle.update(isActive: true) == .none)
+  #expect(lifecycle.update(isActive: false) == .stopMonitor)
+  #expect(lifecycle.update(isActive: false) == .none)
+  #expect(lifecycle.update(isActive: true) == .startNewMonitor)
+}
+
+@Test func networkDisabledRuntimeUsesOfflineCompositionWithoutRemoteOrSystemTriggers() {
+  let disabled = SyncRuntimeCompositionPolicy(isUITesting: false, networkDisabled: true)
+  let enabled = SyncRuntimeCompositionPolicy(isUITesting: false, networkDisabled: false)
+
+  #expect(disabled.mode == .offline)
+  #expect(disabled.allowsRemoteSyncComposition == false)
+  #expect(disabled.allowsSystemSyncTriggers == false)
+  #expect(enabled.mode == .networked)
+  #expect(enabled.allowsRemoteSyncComposition)
+  #expect(enabled.allowsSystemSyncTriggers)
 }
 
 @Test func backgroundRefreshPolicyIsOpportunisticAndSixHoursOut() {
@@ -101,13 +142,72 @@ import Testing
   #expect(policy.isOpportunistic)
 }
 
-@Test func backgroundRefreshRunnerMapsOnlyCompletedOrUnboundWorkToCompletion() async {
+@Test func backgroundRefreshRunnerWaitsForReadyRuntimeBeforeRunningWork() async {
   let runner = BackgroundRefreshRunner()
+  let readiness = BackgroundRefreshReadiness()
+  let probe = BackgroundRefreshProbe()
+  let work = Task {
+    await runner.run(readiness: readiness) {
+      await probe.recordRun()
+      return .outcome(.unbound)
+    }
+  }
 
-  #expect(await runner.run { .unbound })
-  #expect(await runner.run { .coalesced } == false)
+  await Task.yield()
+  await Task.yield()
+  #expect(await probe.runCount() == 0)
+
+  await readiness.markReady()
+  #expect(await work.value)
+  #expect(await probe.runCount() == 1)
+}
+
+@Test func backgroundRefreshRunnerCancellationWhileWaitingForReadinessFailsCompletion() async {
+  let runner = BackgroundRefreshRunner()
+  let readiness = BackgroundRefreshReadiness()
+  let probe = BackgroundRefreshProbe()
+  let work = Task {
+    await runner.run(readiness: readiness) {
+      await probe.recordRun()
+      return .outcome(.unbound)
+    }
+  }
+
+  await Task.yield()
+  work.cancel()
+
+  #expect(await work.value == false)
+  await readiness.markReady()
+  await Task.yield()
+  #expect(await probe.runCount() == 0)
+}
+
+@Test func backgroundRefreshRunnerCompletesOnlyReadyUnboundOrReadyBoundWork() async {
+  let runner = BackgroundRefreshRunner()
+  let readiness = BackgroundRefreshReadiness()
+  await readiness.markReady()
+
+  #expect(await runner.run(readiness: readiness) { .outcome(.unbound) })
   #expect(
-    await runner.run {
+    await runner.run(readiness: readiness) {
+      .outcome(
+        .completed(
+          syncTriggerSummary,
+          [],
+          NotificationHealth(
+            state: .scheduled,
+            scheduledCount: 0,
+            coverageEnd: nil,
+            errorCategory: nil
+          )
+        )
+      )
+    }
+  )
+  #expect(await runner.run(readiness: readiness) { .notReady } == false)
+  #expect(await runner.run(readiness: readiness) { .outcome(.coalesced) } == false)
+  #expect(
+    await runner.run(readiness: readiness) {
       throw SyncTriggerTestError.syncFailed
     } == false
   )
@@ -140,15 +240,20 @@ private actor SyncTriggerProbe {
   private var holdFirstSync = false
   private var firstSyncStarted: CheckedContinuation<Void, Never>?
   private var firstSyncResumption: CheckedContinuation<Void, Never>?
+  private var holdFirstPublication = false
+  private var firstPublicationStarted: CheckedContinuation<Void, Never>?
+  private var firstPublicationResumption: CheckedContinuation<Void, Never>?
 
   init(
     failFirstSync: Bool = false,
     notificationFails: Bool = false,
-    holdFirstSync: Bool = false
+    holdFirstSync: Bool = false,
+    holdFirstPublication: Bool = false
   ) {
     self.failFirstSync = failFirstSync
     self.notificationFails = notificationFails
     self.holdFirstSync = holdFirstSync
+    self.holdFirstPublication = holdFirstPublication
   }
 
   func synchronize() async throws -> SyncSummary {
@@ -189,6 +294,17 @@ private actor SyncTriggerProbe {
     )
   }
 
+  func publish(_ outcome: SyncRequestOutcome) async {
+    guard outcome.summary == syncTriggerSummary else { return }
+    recordedEvents.append("publish")
+    if holdFirstPublication {
+      holdFirstPublication = false
+      firstPublicationStarted?.resume()
+      firstPublicationStarted = nil
+      await withCheckedContinuation { firstPublicationResumption = $0 }
+    }
+  }
+
   func waitForFirstSync() async {
     guard recordedEvents.isEmpty else { return }
     await withCheckedContinuation { firstSyncStarted = $0 }
@@ -199,12 +315,23 @@ private actor SyncTriggerProbe {
     firstSyncResumption = nil
   }
 
+  func waitForFirstPublication() async {
+    guard !recordedEvents.contains("publish") else { return }
+    await withCheckedContinuation { firstPublicationStarted = $0 }
+  }
+
+  func allowFirstPublication() {
+    firstPublicationResumption?.resume()
+    firstPublicationResumption = nil
+  }
+
   func events() -> [String] { recordedEvents }
 }
 
 private func makeCoordinator(
   probe: SyncTriggerProbe,
-  bound: Bool = true
+  bound: Bool = true,
+  publish: @escaping @Sendable (SyncRequestOutcome) async -> Void = { _ in }
 ) -> SyncRequestCoordinator {
   return SyncRequestCoordinator(
     isBound: { bound },
@@ -213,7 +340,8 @@ private func makeCoordinator(
     planner: ReminderPlanner(calculator: SyncTriggerCalculator()),
     notificationScheduler: SyncTriggerNotificationScheduler(probe: probe),
     now: { syncTriggerNow },
-    timeZone: { syncTriggerTimeZone }
+    timeZone: { syncTriggerTimeZone },
+    publish: publish
   )
 }
 
@@ -223,4 +351,14 @@ private struct SyncTriggerNotificationScheduler: NotificationScheduling {
   func apply(_ plan: ReminderPlan) async throws -> NotificationHealth {
     try await probe.applyNotifications(plan)
   }
+}
+
+private actor BackgroundRefreshProbe {
+  private var count = 0
+
+  func recordRun() {
+    count += 1
+  }
+
+  func runCount() -> Int { count }
 }

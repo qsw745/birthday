@@ -31,6 +31,8 @@ targets:
         NSFaceIDUsageDescription: 使用 Face ID 保护生日资料
         BGTaskSchedulerPermittedIdentifiers:
           - top.qisw.birthday.refresh
+        UIBackgroundModes:
+          - fetch
     dependencies:
       - package: BirthdayCore
   BirthdayMobileUITests:

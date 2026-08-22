@@ -8,7 +8,11 @@ import UIKit
 struct BirthdayMobileApp: App {
   init() {
     let bootstrap = UITestBootstrap()
-    guard !bootstrap.isEnabled && !bootstrap.networkDisabled else { return }
+    let runtime = SyncRuntimeCompositionPolicy(
+      isUITesting: bootstrap.isEnabled,
+      networkDisabled: bootstrap.networkDisabled
+    )
+    guard runtime.allowsSystemSyncTriggers else { return }
     AppSyncRuntime.shared.registerBackgroundRefresh()
   }
 
@@ -27,6 +31,7 @@ private struct BirthdayAppBootstrapView: View {
   @State private var initializationError: String?
   @State private var initializationAttempt = 0
   @State private var networkRestorationMonitor: NetworkRestorationMonitor?
+  @State private var networkMonitorLifecycle = NetworkRestorationMonitorLifecycle()
   private let uiTestBootstrap = UITestBootstrap()
 
   var body: some View {
@@ -46,8 +51,8 @@ private struct BirthdayAppBootstrapView: View {
         .modelContainer(container)
         .task {
           await model.reload()
-          configureSyncRuntime(for: model)
-          guard syncRuntimeEnabled else { return }
+          await configureSyncRuntime(for: model)
+          guard syncRuntimeEnabled, scenePhase == .active else { return }
           await model.requestSync(.appLaunch)
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -56,13 +61,15 @@ private struct BirthdayAppBootstrapView: View {
             model.refreshAuthenticationCapability()
             Task {
               await model.reload()
+              await configureSyncRuntime(for: model)
               guard syncRuntimeEnabled else { return }
               await model.requestSync(.foreground)
             }
           case .background:
+            stopNetworkRestorationMonitoring()
             model.lockForBackground()
           case .inactive:
-            break
+            stopNetworkRestorationMonitoring()
           @unknown default:
             break
           }
@@ -121,20 +128,40 @@ private struct BirthdayAppBootstrapView: View {
   }
 
   private var syncRuntimeEnabled: Bool {
-    !uiTestBootstrap.isEnabled && !uiTestBootstrap.networkDisabled
+    syncRuntimePolicy.allowsSystemSyncTriggers
   }
 
-  private func configureSyncRuntime(for model: AppModel) {
-    guard syncRuntimeEnabled else { return }
-    AppSyncRuntime.shared.install(model: model)
+  private var syncRuntimePolicy: SyncRuntimeCompositionPolicy {
+    SyncRuntimeCompositionPolicy(
+      isUITesting: uiTestBootstrap.isEnabled,
+      networkDisabled: uiTestBootstrap.networkDisabled
+    )
+  }
 
-    if networkRestorationMonitor == nil {
+  private func configureSyncRuntime(for model: AppModel) async {
+    guard syncRuntimeEnabled else { return }
+    await AppSyncRuntime.shared.install(model: model)
+
+    switch networkMonitorLifecycle.update(isActive: scenePhase == .active) {
+    case .none:
+      break
+    case .startNewMonitor:
       let monitor = NetworkRestorationMonitor {
         Task { await model.requestSync(.networkRestored) }
       }
       networkRestorationMonitor = monitor
       monitor.start()
+    case .stopMonitor:
+      networkRestorationMonitor?.stop()
+      networkRestorationMonitor = nil
     }
+  }
+
+  private func stopNetworkRestorationMonitoring() {
+    guard syncRuntimeEnabled else { return }
+    guard networkMonitorLifecycle.update(isActive: false) == .stopMonitor else { return }
+    networkRestorationMonitor?.stop()
+    networkRestorationMonitor = nil
   }
 
   private func makeAppModel(container: ModelContainer) -> AppModel {
@@ -193,6 +220,10 @@ private struct BirthdayAppBootstrapView: View {
       )
     }
 
+    guard syncRuntimePolicy.allowsRemoteSyncComposition else {
+      return makeOfflineAppModel(container: container)
+    }
+
     let notificationCenter = UNUserNotificationCenter.current()
     let notificationClient = SystemNotificationCenterClient(center: notificationCenter)
     let credentials = DeviceCredentialStore(secure: KeychainStore())
@@ -221,10 +252,26 @@ private struct BirthdayAppBootstrapView: View {
         store: store,
         credentials: credentials,
         notificationScheduler: notificationScheduler,
-        reminderPlanner: reminderPlanner
+        reminderPlanner: reminderPlanner,
+        publish: { [weak model] outcome in
+          await model?.publishCompletedSync(outcome)
+        }
       )
     )
     return model
+  }
+
+  private func makeOfflineAppModel(container: ModelContainer) -> AppModel {
+    AppModel(
+      store: BirthdayStore(modelContainer: container),
+      preferences: .standard,
+      authenticator: LocalAuthenticationService(),
+      serverDeviceBinder: OfflineServerDeviceBinder(),
+      notificationScheduler: OfflineNotificationScheduler(),
+      oneShotNotificationScheduler: OfflineOneShotNotificationScheduler(),
+      reminderPlanner: ReminderPlanner(),
+      requestNotificationAuthorization: { false }
+    )
   }
 
   private func seedSnapshotImportPreview(in container: ModelContainer) throws {
@@ -365,6 +412,26 @@ private struct UITestOneShotNotificationScheduler: OneShotNotificationScheduling
 }
 
 private struct UITestNotificationScheduler: NotificationScheduling {
+  func apply(_ plan: ReminderPlan) async throws -> NotificationHealth {
+    let scheduledCount =
+      plan.birthdayNotifications.count
+      + (plan.maintenanceNotification == nil ? 0 : 1)
+    return NotificationHealth(
+      state: .scheduled,
+      scheduledCount: scheduledCount,
+      coverageEnd: plan.coverageEnd,
+      errorCategory: nil
+    )
+  }
+}
+
+private struct OfflineOneShotNotificationScheduler: OneShotNotificationScheduling {
+  func schedule(birthdayID: UUID, name: String, now: Date) async -> OneShotNotificationResult {
+    .scheduled
+  }
+}
+
+private struct OfflineNotificationScheduler: NotificationScheduling {
   func apply(_ plan: ReminderPlan) async throws -> NotificationHealth {
     let scheduledCount =
       plan.birthdayNotifications.count

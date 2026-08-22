@@ -70,6 +70,7 @@ public actor SyncRequestCoordinator {
   private let notificationScheduler: any NotificationScheduling
   private let now: @Sendable () -> Date
   private let timeZone: @Sendable () -> TimeZone
+  private let publish: @Sendable (SyncRequestOutcome) async -> Void
 
   public init(
     gate: SyncTriggerGate = SyncTriggerGate(),
@@ -79,7 +80,8 @@ public actor SyncRequestCoordinator {
     planner: ReminderPlanner,
     notificationScheduler: any NotificationScheduling,
     now: @escaping @Sendable () -> Date = Date.init,
-    timeZone: @escaping @Sendable () -> TimeZone = { .current }
+    timeZone: @escaping @Sendable () -> TimeZone = { .current },
+    publish: @escaping @Sendable (SyncRequestOutcome) async -> Void = { _ in }
   ) {
     self.gate = gate
     self.isBound = isBound
@@ -89,6 +91,7 @@ public actor SyncRequestCoordinator {
     self.notificationScheduler = notificationScheduler
     self.now = now
     self.timeZone = timeZone
+    self.publish = publish
   }
 
   public func request(_ trigger: SyncTrigger) async throws -> SyncRequestOutcome {
@@ -102,6 +105,7 @@ public actor SyncRequestCoordinator {
     let notificationScheduler = notificationScheduler
     let now = now
     let timeZone = timeZone
+    let publish = publish
     guard
       let outcome = try await gate.perform({
         try Task.checkCancellation()
@@ -129,7 +133,10 @@ public actor SyncRequestCoordinator {
           health = Self.failedNotificationHealth(category: "schedule_failed")
         }
         try Task.checkCancellation()
-        return SyncRequestOutcome.completed(summary, records, health)
+        let outcome = SyncRequestOutcome.completed(summary, records, health)
+        await publish(outcome)
+        try Task.checkCancellation()
+        return outcome
       })
     else {
       return .coalesced
@@ -147,16 +154,64 @@ public actor SyncRequestCoordinator {
   }
 }
 
-/// Emits a restoration only for a known `.unsatisfied` to `.satisfied` transition.
+public enum NetworkPathState: Equatable, Sendable {
+  case unsatisfied
+  case requiresConnection
+  case satisfied
+}
+
+/// Emits a restoration only for an adjacent `.unsatisfied` to `.satisfied` transition.
 public struct NetworkRestorationTransition: Equatable, Sendable {
-  private var wasSatisfied: Bool?
+  private var previousState: NetworkPathState?
 
   public init() {}
 
-  public mutating func receive(isSatisfied: Bool) -> Bool {
-    defer { wasSatisfied = isSatisfied }
-    return wasSatisfied == false && isSatisfied
+  public mutating func receive(_ state: NetworkPathState) -> Bool {
+    defer { previousState = state }
+    return previousState == .unsatisfied && state == .satisfied
   }
+}
+
+public enum NetworkMonitorLifecycleCommand: Equatable, Sendable {
+  case none
+  case startNewMonitor
+  case stopMonitor
+}
+
+/// Treats cancelled path monitors as terminal and asks the app composition to create a new one.
+public struct NetworkRestorationMonitorLifecycle: Equatable, Sendable {
+  private var isMonitoring = false
+
+  public init() {}
+
+  public mutating func update(isActive: Bool) -> NetworkMonitorLifecycleCommand {
+    if isActive {
+      guard !isMonitoring else { return .none }
+      isMonitoring = true
+      return .startNewMonitor
+    }
+
+    guard isMonitoring else { return .none }
+    isMonitoring = false
+    return .stopMonitor
+  }
+}
+
+public enum SyncRuntimeMode: Equatable, Sendable {
+  case offline
+  case networked
+}
+
+/// Defines whether app composition may construct remote sync dependencies or system sync triggers.
+public struct SyncRuntimeCompositionPolicy: Equatable, Sendable {
+  public let mode: SyncRuntimeMode
+
+  public init(isUITesting: Bool, networkDisabled: Bool) {
+    mode = isUITesting || networkDisabled ? .offline : .networked
+  }
+
+  public var allowsRemoteSyncComposition: Bool { mode == .networked }
+  public var allowsSystemSyncTriggers: Bool { mode == .networked }
 }
 
 /// Background refresh is an opportunity requested after six hours, never a deadline.
@@ -174,21 +229,83 @@ public struct BackgroundRefreshPolicy: Equatable, Sendable {
 
 /// Converts a best-effort background sync into the success flag expected by a scheduler.
 /// Cancellation and failures remain failures; an unbound device is a valid no-work completion.
+public enum BackgroundRefreshWorkResult: Equatable, Sendable {
+  case notReady
+  case outcome(SyncRequestOutcome)
+}
+
+/// Lets a cold-launched background task wait for app runtime installation without treating it as unbound.
+public actor BackgroundRefreshReadiness {
+  private var isReady = false
+  private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+  private var cancelledWaiters: Set<UUID> = []
+
+  public init() {}
+
+  public func markReady() {
+    isReady = true
+    let pending = waiters.values
+    waiters.removeAll()
+    cancelledWaiters.removeAll()
+    for waiter in pending {
+      waiter.resume()
+    }
+  }
+
+  public func waitUntilReady() async throws {
+    guard !isReady else { return }
+    let id = UUID()
+
+    await withTaskCancellationHandler(
+      operation: {
+        await withCheckedContinuation { continuation in
+          if isReady || cancelledWaiters.remove(id) != nil {
+            continuation.resume()
+          } else {
+            waiters[id] = continuation
+          }
+        }
+      },
+      onCancel: {
+        Task { await self.cancelWaiter(id) }
+      })
+
+    cancelledWaiters.remove(id)
+    try Task.checkCancellation()
+  }
+
+  private func cancelWaiter(_ id: UUID) {
+    guard !isReady else { return }
+    if let waiter = waiters.removeValue(forKey: id) {
+      waiter.resume()
+    } else {
+      cancelledWaiters.insert(id)
+    }
+  }
+}
+
 public actor BackgroundRefreshRunner {
   public init() {}
 
   public func run(
-    _ sync: @Sendable () async throws -> SyncRequestOutcome
+    readiness: BackgroundRefreshReadiness,
+    _ sync: @Sendable () async throws -> BackgroundRefreshWorkResult
   ) async -> Bool {
     do {
+      try await readiness.waitUntilReady()
       try Task.checkCancellation()
-      let outcome = try await sync()
+      let result = try await sync()
       try Task.checkCancellation()
-      switch outcome {
-      case .completed, .unbound:
-        return true
-      case .coalesced:
+      switch result {
+      case .notReady:
         return false
+      case .outcome(let outcome):
+        switch outcome {
+        case .completed, .unbound:
+          return true
+        case .coalesced:
+          return false
+        }
       }
     } catch {
       return false
