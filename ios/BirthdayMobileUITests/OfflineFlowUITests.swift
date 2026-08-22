@@ -1,6 +1,27 @@
 import XCTest
 
 final class OfflineFlowUITests: XCTestCase {
+  func testLocalOnlySettingsExposeBindingWithoutDestructiveDeviceActions() {
+    let app = XCUIApplication()
+    app.launchArguments = ["-ui-testing", "-network-disabled"]
+    app.launch()
+
+    XCTAssertTrue(app.staticTexts["离线也能完整使用"].waitForExistence(timeout: 5))
+    app.buttons["继续"].tap()
+    app.buttons["暂不开启"].tap()
+    app.buttons["skipServerBindingButton"].tap()
+    if app.buttons["unlockButton"].waitForExistence(timeout: 2) {
+      app.buttons["unlockButton"].tap()
+    }
+
+    app.tabBars.buttons["设置"].tap()
+
+    XCTAssertTrue(app.staticTexts["仅本地使用"].waitForExistence(timeout: 3))
+    XCTAssertTrue(app.buttons["bindFromSettingsButton"].exists)
+    XCTAssertFalse(app.buttons["stopSyncButton"].exists)
+    XCTAssertFalse(app.buttons["revokeDeviceButton"].exists)
+  }
+
   func testBoundDeviceReviewsEveryDuplicateBeforeAtomicSnapshotImport() {
     let app = XCUIApplication()
     app.launchArguments = [

@@ -211,7 +211,8 @@ import Testing
         accessToken: "old-access",
         accessExpiresAt: now.addingTimeInterval(59),
         refreshToken: "old-refresh",
-        refreshExpiresAt: now.addingTimeInterval(15_552_000)
+        refreshExpiresAt: now.addingTimeInterval(15_552_000),
+        username: "Adminé"
       ))
     let api = RefreshingPullFakeAPI(deviceID: deviceID, expiresFirstPull: false)
     let engine = SyncEngine(
@@ -224,6 +225,7 @@ import Testing
     #expect(await api.pullCount() == 1)
     #expect(try credentials.load()?.accessToken == "fresh-access")
     #expect(try credentials.load()?.refreshToken == "fresh-refresh")
+    #expect(try credentials.load()?.username == "Adminé")
   }
 
   @Test func appliedOldInFlightOperationKeepsMidFlightEditAsFreshOutboxOperation() async throws {

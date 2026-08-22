@@ -82,6 +82,18 @@ private struct BirthdayAppBootstrapView: View {
             break
           }
         }
+        .onChange(of: model.isSyncRuntimeEnabled) { _, enabled in
+          if enabled {
+            Task {
+              await AppSyncRuntime.shared.install(model: model)
+              guard scenePhase == .active else { return }
+              startActiveSceneSync(for: model, trigger: .foreground)
+            }
+          } else {
+            deactivateSceneSyncRuntime()
+            AppSyncRuntime.shared.uninstall(model: model)
+          }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
           Task { await model.reload() }
         }
@@ -294,6 +306,9 @@ private struct BirthdayAppBootstrapView: View {
           await model?.publishCompletedSync(outcome)
         }
       )
+    )
+    model.configureDeviceManagement(
+      DeviceManagementService(api: mobileAPI, credentials: credentials)
     )
     return model
   }

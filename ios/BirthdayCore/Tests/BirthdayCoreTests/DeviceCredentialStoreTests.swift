@@ -308,7 +308,45 @@ private actor BindingMobileAPI: MobileAPI {
     #expect(requests[0].deviceId == firstDeviceID)
     #expect(requests[0].username == "admin")
     #expect(requests[0].deviceName == "iPhone")
-    #expect(try credentials.load() == DeviceCredentials(response))
+    #expect(try credentials.load() == DeviceCredentials(response, username: "admin"))
+  }
+
+  @Test func legacyCredentialBundleWithoutUsernameDecodesForSafeRebindOnly() throws {
+    let secure = InMemorySecureTokenStore()
+    let store = DeviceCredentialStore(secure: secure, makeDeviceID: { self.firstDeviceID })
+    _ = try store.loadOrCreateDeviceID()
+    let legacy = """
+      {
+        "deviceId":"11111111-1111-4111-8111-111111111111",
+        "accessToken":"legacy-access",
+        "accessExpiresAt":"2027-01-15T08:00:00.000Z",
+        "refreshToken":"legacy-refresh",
+        "refreshExpiresAt":"2030-03-17T17:46:40.000Z"
+      }
+      """
+    try secure.save(Data(legacy.utf8), account: "mobile-device-credentials")
+
+    let loaded = try #require(try store.load())
+
+    #expect(loaded.username == nil)
+    #expect(loaded.deviceId == firstDeviceID)
+  }
+
+  @Test func binderPreservesTheTrimmedUsernameWithoutCaseOrUnicodeNormalization() async throws {
+    let secure = InMemorySecureTokenStore()
+    let credentials = DeviceCredentialStore(
+      secure: secure,
+      makeDeviceID: { self.firstDeviceID }
+    )
+    let api = BindingMobileAPI(
+      replies: [.success(makeTokenResponse(deviceID: firstDeviceID, tokenSuffix: "case"))]
+    )
+    let binder = ServerDeviceBinder(api: api, credentials: credentials)
+
+    try await binder.bind(username: "  Adminé  ", password: "secret", deviceName: "iPhone")
+
+    #expect(try credentials.load()?.username == "Adminé")
+    #expect(await api.loginRequests.first?.username == "Adminé")
   }
 
   @Test func snapshotAfterBindingReloadsSavedCredentialsWithoutSubmittingPasswordAgain()
@@ -363,7 +401,7 @@ private actor BindingMobileAPI: MobileAPI {
 
     let requests = await api.loginRequests
     #expect(requests.map(\.deviceId) == [firstDeviceID, firstDeviceID])
-    #expect(try credentials.load() == DeviceCredentials(response))
+    #expect(try credentials.load() == DeviceCredentials(response, username: "admin"))
   }
 
   @Test func binderRejectsAMismatchedResponseWithoutSavingTokens() async throws {

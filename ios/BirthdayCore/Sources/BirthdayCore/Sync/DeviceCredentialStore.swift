@@ -6,28 +6,32 @@ public struct DeviceCredentials: Codable, Equatable, Sendable {
   public let accessExpiresAt: Date
   public let refreshToken: String
   public let refreshExpiresAt: Date
+  public let username: String?
 
   public init(
     deviceId: UUID,
     accessToken: String,
     accessExpiresAt: Date,
     refreshToken: String,
-    refreshExpiresAt: Date
+    refreshExpiresAt: Date,
+    username: String? = nil
   ) {
     self.deviceId = deviceId
     self.accessToken = accessToken
     self.accessExpiresAt = accessExpiresAt
     self.refreshToken = refreshToken
     self.refreshExpiresAt = refreshExpiresAt
+    self.username = username
   }
 
-  public init(_ response: TokenResponse) {
+  public init(_ response: TokenResponse, username: String? = nil) {
     self.init(
       deviceId: response.deviceId,
       accessToken: response.accessToken,
       accessExpiresAt: response.accessExpiresAt,
       refreshToken: response.refreshToken,
-      refreshExpiresAt: response.refreshExpiresAt
+      refreshExpiresAt: response.refreshExpiresAt,
+      username: username
     )
   }
 }
@@ -57,10 +61,11 @@ public struct ServerDeviceBinder: ServerDeviceBinding {
   }
 
   public func bind(username: String, password: String, deviceName: String) async throws {
+    let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
     let deviceID = try credentials.loadOrCreateDeviceID()
     let response = try await api.login(
       LoginRequest(
-        username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+        username: trimmedUsername,
         password: password,
         deviceId: deviceID,
         deviceName: deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -69,7 +74,7 @@ public struct ServerDeviceBinder: ServerDeviceBinding {
     guard response.deviceId == deviceID else {
       throw ServerDeviceBindingError.responseDeviceIDMismatch
     }
-    try credentials.save(DeviceCredentials(response))
+    try credentials.save(DeviceCredentials(response, username: trimmedUsername))
   }
 
   public func loadSnapshot() async throws -> SnapshotResponse {

@@ -237,7 +237,7 @@ public actor SyncEngine {
     do {
       let response = try await api.refresh(RefreshRequest(refreshToken: current.refreshToken))
       guard response.deviceId == current.deviceId else { throw SyncError.rebindRequired }
-      let rotated = DeviceCredentials(response)
+      let rotated = DeviceCredentials(response, username: current.username)
       try credentials.replaceAfterRefresh(rotated, expectedDeviceID: current.deviceId)
       return rotated
     } catch MobileAPIError.refreshInvalid {

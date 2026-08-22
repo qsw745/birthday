@@ -180,5 +180,12 @@ final class AppSyncRuntime {
   func install(model: AppModel) async {
     self.model = model
     await readiness.markReady()
+    backgroundRefreshCoordinator.scheduleNext()
+  }
+
+  func uninstall(model: AppModel) {
+    guard self.model === model else { return }
+    self.model = nil
+    backgroundRefreshCoordinator.cancelPending()
   }
 }
