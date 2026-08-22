@@ -8,6 +8,7 @@ struct UITestBootstrap: Equatable, Sendable {
   let snapshotImportPreviewEnabled: Bool
   let snapshotFirstLoadFails: Bool
   let snapshotFirstRefreshFails: Bool
+  let transportCleanupFailure: Bool
 
   init(arguments: [String] = ProcessInfo.processInfo.arguments) {
     isEnabled = arguments.contains("-ui-testing")
@@ -15,6 +16,7 @@ struct UITestBootstrap: Equatable, Sendable {
     snapshotImportPreviewEnabled = arguments.contains("-snapshot-import-preview")
     snapshotFirstLoadFails = arguments.contains("-snapshot-first-load-fails")
     snapshotFirstRefreshFails = arguments.contains("-snapshot-first-refresh-fails")
+    transportCleanupFailure = arguments.contains("-transport-cleanup-failure")
   }
 
   var isSnapshotImportFixtureEnabled: Bool {
@@ -212,8 +214,16 @@ final class AppModel {
   private(set) var isLoadingManagedDevices = false
   private(set) var isManagingDevice = false
   private(set) var deviceManagementMessage: String?
-  private(set) var isSyncRuntimeEnabled = false
-  private(set) var needsRevokedCredentialCleanup = false
+  var isSyncRuntimeEnabled: Bool { syncPresentationReducer.isRemoteSyncEnabled }
+  private(set) var pendingLocalCleanup: PendingLocalCleanup?
+
+  var needsRevokedCredentialCleanup: Bool {
+    pendingLocalCleanup == .serverRevoked
+  }
+
+  var canResumeSyncAfterLocalCleanupFailure: Bool {
+    pendingLocalCleanup == .transportUnknown
+  }
 
   let store: BirthdayStore
   let oneShotNotificationScheduler: any OneShotNotificationScheduling
@@ -473,7 +483,7 @@ final class AppModel {
       if syncCoordinator != nil {
         await deviceManagementService?.resumeAfterBinding()
         syncPresentationReducer.bind()
-        isSyncRuntimeEnabled = true
+        pendingLocalCleanup = nil
       }
       serverBindingState = .credentialsSavedAwaitingSnapshotPreview
       return true
@@ -740,8 +750,7 @@ final class AppModel {
 
   func configureSyncCoordinator(_ coordinator: SyncCoordinator, initiallyBound: Bool) {
     syncCoordinator = coordinator
-    isSyncRuntimeEnabled = true
-    if initiallyBound { syncPresentationReducer.bind() }
+    syncPresentationReducer.configureRemoteRuntime(initiallyBound: initiallyBound)
   }
 
   func configureDeviceManagement(_ service: DeviceManagementService) {
@@ -755,6 +764,13 @@ final class AppModel {
       return
     }
 
+    pendingLocalCleanup = await deviceManagementService.pendingLocalCleanup
+    if let pendingLocalCleanup {
+      managedDevices = []
+      deviceManagementMessage = cleanupMessage(for: pendingLocalCleanup)
+      return
+    }
+
     isLoadingManagedDevices = true
     defer { isLoadingManagedDevices = false }
     do {
@@ -762,10 +778,12 @@ final class AppModel {
       deviceManagementMessage = nil
     } catch DeviceManagementError.credentialsUnavailable {
       managedDevices = []
+      await enterMissingCredentials()
       deviceManagementMessage = nil
     } catch DeviceManagementError.rebindRequired {
       managedDevices = []
-      deviceManagementMessage = "设备列表认证已失效；同步状态将在下次请求时要求重新绑定。"
+      await enterRebindRequired()
+      deviceManagementMessage = "设备列表认证已失效；同步已暂停，请重新绑定。"
     } catch MobileAPIError.transport {
       managedDevices = []
       deviceManagementMessage = "暂时无法读取设备列表；同步状态未改变。"
@@ -797,8 +815,7 @@ final class AppModel {
     isManagingDevice = true
     deviceManagementMessage = nil
     defer { isManagingDevice = false }
-    isSyncRuntimeEnabled = false
-    syncPresentationReducer.pauseOffline()
+    syncPresentationReducer.pauseForUnlink()
 
     do {
       let outcome = try await deviceManagementService.beginUnlinkCurrent()
@@ -807,6 +824,7 @@ final class AppModel {
       }
       return outcome
     } catch DeviceManagementError.credentialClearFailedAfterServerRevoke {
+      pendingLocalCleanup = .serverRevoked
       failCloseRevokedRuntime(
         message: "服务器已撤销此设备，但本机同步凭据清除失败。请再次清理本机凭据；期间同步保持停用。"
       )
@@ -829,6 +847,7 @@ final class AppModel {
       disableSyncRuntimeAfterUnlink()
       return true
     } catch {
+      pendingLocalCleanup = await deviceManagementService.pendingLocalCleanup
       deviceManagementMessage =
         needsRevokedCredentialCleanup
         ? "服务器已撤销此设备，但本机同步凭据仍未能清除；同步继续保持停用。"
@@ -855,7 +874,7 @@ final class AppModel {
         break
       case .unbound:
         syncStatus = .unbound
-        if let request { finishSyncPresentation(request, result: .coalesced) }
+        await enterMissingCredentials()
       case .coalesced:
         if let request { finishSyncPresentation(request, result: .coalesced) }
       }
@@ -945,9 +964,12 @@ final class AppModel {
     case DeviceManagementError.confirmationMismatch:
       deviceManagementMessage = "管理员用户名不匹配，未发送撤销请求。"
     case DeviceManagementError.rebindRequired,
-      DeviceManagementError.credentialsUnavailable:
+      DeviceManagementError.revokedSessionRequiresLocalCleanup:
       await enterRebindRequired()
       deviceManagementMessage = "需要重新绑定后才能管理设备。"
+    case DeviceManagementError.credentialsUnavailable:
+      await enterMissingCredentials()
+      deviceManagementMessage = nil
     case DeviceManagementError.operationInProgress:
       deviceManagementMessage = "另一项设备操作正在进行，请稍候。"
     case MobileAPIError.transport:
@@ -956,32 +978,28 @@ final class AppModel {
     case MobileAPIError.server:
       if !isSyncRuntimeEnabled {
         syncPresentationReducer.bind()
-        isSyncRuntimeEnabled = true
       }
       deviceManagementMessage = "服务器未能完成设备操作，本机资料未改变。"
     default:
       if !isSyncRuntimeEnabled {
         syncPresentationReducer.bind()
-        isSyncRuntimeEnabled = true
       }
       deviceManagementMessage = "设备操作未完成，本机资料未改变。"
     }
   }
 
   private func disableSyncRuntimeAfterUnlink() {
-    isSyncRuntimeEnabled = false
     syncPresentationReducer.useLocalOnly()
     syncStatus = .unbound
     managedDevices = []
-    needsRevokedCredentialCleanup = false
+    pendingLocalCleanup = nil
     deviceManagementMessage = nil
   }
 
   private func failCloseRevokedRuntime(message: String) {
-    isSyncRuntimeEnabled = false
     syncStatus = .failed
     managedDevices = []
-    needsRevokedCredentialCleanup = true
+    pendingLocalCleanup = .serverRevoked
     syncPresentationReducer.failClosed(message: message)
     deviceManagementMessage = message
   }
@@ -989,15 +1007,50 @@ final class AppModel {
   func cancelPendingLocalStopSync() async {
     await deviceManagementService?.cancelPendingLocalUnlink()
     syncPresentationReducer.bind()
-    isSyncRuntimeEnabled = true
+    pendingLocalCleanup = nil
     deviceManagementMessage = nil
   }
 
+  func resumeSyncAfterLocalCleanupFailure() async -> Bool {
+    guard
+      let deviceManagementService,
+      pendingLocalCleanup == .transportUnknown
+    else { return false }
+    do {
+      try await deviceManagementService.resumeSyncAfterPendingLocalCleanup()
+      pendingLocalCleanup = nil
+      syncPresentationReducer.bind()
+      deviceManagementMessage =
+        "已保留本机同步凭据并恢复同步；若服务器已撤销此设备，下次同步会要求重新绑定。"
+      return true
+    } catch {
+      pendingLocalCleanup = await deviceManagementService.pendingLocalCleanup
+      deviceManagementMessage = cleanupMessage(for: pendingLocalCleanup)
+      return false
+    }
+  }
+
   private func enterRebindRequired() async {
-    isSyncRuntimeEnabled = false
     syncPresentationReducer.requireRebind()
     activeSyncPresentationRequest = nil
     await deviceManagementService?.pauseForRebind()
+  }
+
+  private func enterMissingCredentials() async {
+    syncPresentationReducer.transitionToMissingCredentials()
+    activeSyncPresentationRequest = nil
+    await deviceManagementService?.pauseForMissingCredentials()
+  }
+
+  private func cleanupMessage(for reason: PendingLocalCleanup?) -> String? {
+    switch reason {
+    case .transportUnknown:
+      "本机同步凭据清除失败。可重试清理，或明确保留凭据并恢复同步。"
+    case .serverRevoked:
+      "服务器已撤销此设备，但本机同步凭据仍未能清除；只能重试清理或重新绑定。"
+    case nil:
+      nil
+    }
   }
 
   private func finishSyncPresentation(

@@ -123,6 +123,8 @@ private actor RefreshUnlinkRaceAPI: MobileAPI {
 
 private enum DeleteFailure: Error, Equatable { case denied }
 
+private enum ReadFailure: Error, Equatable { case denied }
+
 private final class DeleteFailingSecureTokenStore: SecureTokenStore, @unchecked Sendable {
   private let lock = NSLock()
   private var values: [String: Data] = [:]
@@ -145,6 +147,50 @@ private final class DeleteFailingSecureTokenStore: SecureTokenStore, @unchecked 
 
   func allowDelete() {
     lock.withLock { shouldFailDelete = false }
+  }
+}
+
+private final class ReadFailingSecureTokenStore: SecureTokenStore, @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [String: Data] = [:]
+  private var shouldFailRead = false
+
+  func save(_ data: Data, account: String) throws {
+    lock.withLock { values[account] = data }
+  }
+
+  func read(account: String) throws -> Data? {
+    try lock.withLock {
+      if shouldFailRead { throw ReadFailure.denied }
+      return values[account]
+    }
+  }
+
+  func delete(account: String) throws {
+    _ = lock.withLock { values.removeValue(forKey: account) }
+  }
+
+  func failReads() {
+    lock.withLock { shouldFailRead = true }
+  }
+}
+
+private actor RemoteLeaseSuspension {
+  private var started = false
+  private var continuation: CheckedContinuation<Void, Never>?
+
+  func suspend() async {
+    started = true
+    await withCheckedContinuation { continuation = $0 }
+  }
+
+  func waitUntilStarted() async {
+    while !started { await Task.yield() }
+  }
+
+  func resume() {
+    continuation?.resume()
+    continuation = nil
   }
 }
 
@@ -463,6 +509,125 @@ private final class DeleteFailingSecureTokenStore: SecureTokenStore, @unchecked 
     #expect(try credentials.load() == nil)
     let restartedStore = DeviceCredentialStore(secure: secure)
     #expect(try restartedStore.load() == nil)
+  }
+
+  @Test func cancellationWhileDrainingResumesOnlyTheUnlinkPauseOwner() async throws {
+    let credentials = try makeCredentialStore()
+    let api = DeviceManagementAPI()
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let suspension = RemoteLeaseSuspension()
+    let existing = Task {
+      try await remoteAccessGate.perform { _ in
+        await suspension.suspend()
+        return true
+      }
+    }
+    await suspension.waitUntilStarted()
+    let service = DeviceManagementService(
+      api: api,
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+    let unlink = Task { try await service.beginUnlinkCurrent() }
+    for _ in 0..<100 { await Task.yield() }
+
+    unlink.cancel()
+    await suspension.resume()
+    _ = try? await existing.value
+
+    await #expect(throws: CancellationError.self) {
+      try await unlink.value
+    }
+    #expect(await api.revokeRequests.isEmpty)
+    #expect(try credentials.load() != nil)
+    #expect(await remoteAccessGate.paused() == false)
+  }
+
+  @Test func credentialReadFailureAfterDrainDoesNotLeakTheUnlinkPause() async throws {
+    let secure = ReadFailingSecureTokenStore()
+    let credentials = DeviceCredentialStore(secure: secure, makeDeviceID: { self.currentID })
+    try credentials.save(makeCredentials())
+    secure.failReads()
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let service = DeviceManagementService(
+      api: DeviceManagementAPI(),
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+
+    await #expect(throws: ReadFailure.denied) {
+      try await service.beginUnlinkCurrent()
+    }
+
+    #expect(await remoteAccessGate.paused() == false)
+    #expect(try await remoteAccessGate.perform { _ in true })
+  }
+
+  @Test func failedTransportCleanupRemainsVisibleAndCanExplicitlyResumeOldCredentials() async throws
+  {
+    let secure = DeleteFailingSecureTokenStore()
+    let credentials = DeviceCredentialStore(secure: secure, makeDeviceID: { self.currentID })
+    try credentials.save(makeCredentials())
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let service = DeviceManagementService(
+      api: DeviceManagementAPI(revokeMode: .failure(.transport("offline"))),
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+
+    #expect(
+      try await service.beginUnlinkCurrent()
+        == .needsLocalConfirmation(message: DeviceManagementService.localUnlinkWarning)
+    )
+    await #expect(throws: DeviceManagementError.credentialClearFailed) {
+      try await service.confirmLocalUnlink()
+    }
+    #expect(await service.pendingLocalCleanup == .transportUnknown)
+    #expect(await remoteAccessGate.paused())
+
+    try await service.resumeSyncAfterPendingLocalCleanup()
+
+    #expect(await service.pendingLocalCleanup == nil)
+    #expect(await remoteAccessGate.paused() == false)
+    #expect(try credentials.load() != nil)
+  }
+
+  @Test func pendingTransportCleanupRejectsAnotherUnlinkWithoutASecondRevoke() async throws {
+    let credentials = try makeCredentialStore()
+    let api = DeviceManagementAPI(revokeMode: .failure(.transport("offline")))
+    let service = DeviceManagementService(api: api, credentials: credentials)
+
+    #expect(
+      try await service.beginUnlinkCurrent()
+        == .needsLocalConfirmation(message: DeviceManagementService.localUnlinkWarning)
+    )
+    await #expect(throws: DeviceManagementError.operationInProgress) {
+      try await service.beginUnlinkCurrent()
+    }
+    #expect(await api.revokeRequests.count == 1)
+  }
+
+  @Test func serverRevokedCleanupFailureCannotResumeTheOldCredentials() async throws {
+    let secure = DeleteFailingSecureTokenStore()
+    let credentials = DeviceCredentialStore(secure: secure, makeDeviceID: { self.currentID })
+    try credentials.save(makeCredentials())
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let service = DeviceManagementService(
+      api: DeviceManagementAPI(),
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+
+    await #expect(throws: DeviceManagementError.credentialClearFailedAfterServerRevoke) {
+      try await service.beginUnlinkCurrent()
+    }
+    #expect(await service.pendingLocalCleanup == .serverRevoked)
+
+    await #expect(throws: DeviceManagementError.revokedSessionRequiresLocalCleanup) {
+      try await service.resumeSyncAfterPendingLocalCleanup()
+    }
+    #expect(await remoteAccessGate.paused())
+    #expect(try credentials.load() != nil)
   }
 
   private func makeCredentialStore(username: String? = "admin") throws -> DeviceCredentialStore {

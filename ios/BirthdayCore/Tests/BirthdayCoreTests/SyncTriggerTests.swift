@@ -12,6 +12,23 @@ import Testing
   #expect(await gate.begin() == true)
 }
 
+@Test func nestedRemotePauseOwnersCannotResumeEachOther() async throws {
+  let gate = RemoteSyncAccessGate()
+  let firstOwner = await gate.pauseAndDrain()
+  let secondOwner = await gate.pauseAndDrain()
+
+  _ = await gate.resume(after: firstOwner)
+
+  #expect(await gate.paused())
+  await #expect(throws: RemoteSyncAccessError.paused) {
+    try await gate.perform { _ in true }
+  }
+
+  _ = await gate.resume(after: secondOwner)
+  #expect(await gate.paused() == false)
+  #expect(try await gate.perform { _ in true })
+}
+
 @Test func requestCoordinatorCoalescesConcurrentTriggersAndKeepsRequiredOrder() async throws {
   let probe = SyncTriggerProbe(holdFirstSync: true)
   let coordinator = makeCoordinator(probe: probe)
@@ -168,6 +185,25 @@ import Testing
   }
 }
 
+@Test func lifecycleTransitionsDisableEveryTriggerForMissingCredentialsAndRebind() {
+  var reducer = SyncPresentationReducer()
+  reducer.configureRemoteRuntime(initiallyBound: true)
+  #expect(reducer.isRemoteSyncEnabled)
+
+  reducer.transitionToMissingCredentials()
+  #expect(reducer.presentation == .localOnly)
+  #expect(reducer.isRemoteSyncEnabled == false)
+
+  reducer.bind()
+  reducer.requireRebind()
+  #expect(reducer.presentation == .rebindRequired(pendingCount: 0))
+  #expect(reducer.isRemoteSyncEnabled == false)
+
+  reducer.bind()
+  #expect(reducer.isRemoteSyncEnabled)
+  #expect(reducer.presentation == .idle(lastSuccess: nil))
+}
+
 @Test func rebindPauseBlocksFutureForegroundAndBackgroundCoordinatorRequests() async throws {
   let remoteAccessGate = RemoteSyncAccessGate()
   let probe = SyncTriggerProbe()
@@ -243,6 +279,61 @@ func invalidatedRuntimeInstallCannotCommitOrScheduleAndANewInstallCan() async {
     )
   )
   #expect(probe.events == ["prepare", "prepare", "commit", "schedule"])
+}
+
+@Test
+@MainActor
+func deliveredBackgroundWorkCannotRunAfterUninstallButANewGenerationCan() async {
+  let delivery = RuntimeDeliveryCoordinator()
+  var scheduleCount = 0
+  var runCount = 0
+
+  delivery.activate()
+  let stale = delivery.captureForDelivery()
+  delivery.invalidate()
+  let staleResult = await delivery.handle(
+    stale,
+    scheduleNext: { scheduleCount += 1 },
+    run: {
+      runCount += 1
+      return true
+    }
+  )
+
+  #expect(staleResult == nil)
+  #expect(scheduleCount == 0)
+  #expect(runCount == 0)
+
+  delivery.activate()
+  let current = delivery.captureForDelivery()
+  let currentResult = await delivery.handle(
+    current,
+    scheduleNext: { scheduleCount += 1 },
+    run: {
+      runCount += 1
+      return true
+    }
+  )
+
+  #expect(currentResult == true)
+  #expect(scheduleCount == 1)
+  #expect(runCount == 1)
+}
+
+@Test
+@MainActor
+func backgroundSchedulingRequiresRegistrationAndAnActiveRuntimeGeneration() {
+  let delivery = RuntimeDeliveryCoordinator()
+
+  #expect(delivery.canSchedule(isRegistered: false) == false)
+  #expect(delivery.canSchedule(isRegistered: true) == false)
+
+  delivery.activate()
+  #expect(delivery.canSchedule(isRegistered: false) == false)
+  #expect(delivery.canSchedule(isRegistered: true))
+
+  delivery.invalidate()
+  #expect(delivery.canSchedule(isRegistered: true) == false)
 }
 
 @Test func networkRestorationRequiresAnAdjacentUnsatisfiedToSatisfiedTransition() {

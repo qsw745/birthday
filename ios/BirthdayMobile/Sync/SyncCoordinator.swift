@@ -22,7 +22,8 @@ final class SyncCoordinator {
       remoteAccessGate: remoteAccessGate,
       isBound: {
         guard let saved = try credentials.load() else { return false }
-        return saved.refreshExpiresAt > now()
+        guard saved.refreshExpiresAt > now() else { throw SyncError.rebindRequired }
+        return true
       },
       synchronizeWithAccess: { permit in
         try await syncEngine.syncNow(withRemoteAccess: permit)
@@ -104,7 +105,9 @@ final class BackgroundRefreshCoordinator {
   private let runner: BackgroundRefreshRunner
   private let readiness: BackgroundRefreshReadiness
   private let runSync: @MainActor @Sendable () async throws -> BackgroundRefreshWorkResult
+  private nonisolated let delivery: RuntimeDeliveryCoordinator
   private var isRegistered = false
+  private var activeWork: [UUID: Task<Bool?, Never>] = [:]
 
   init(
     policy: BackgroundRefreshPolicy = BackgroundRefreshPolicy(),
@@ -116,6 +119,7 @@ final class BackgroundRefreshCoordinator {
     self.runner = runner
     self.readiness = readiness
     self.runSync = runSync
+    delivery = RuntimeDeliveryCoordinator()
   }
 
   func registerAndSchedule() {
@@ -128,8 +132,9 @@ final class BackgroundRefreshCoordinator {
           task.setTaskCompleted(success: false)
           return
         }
+        let deliveryToken = self?.delivery.captureForDelivery()
         Task { @MainActor [weak self] in
-          await self?.handle(refreshTask)
+          await self?.handle(refreshTask, deliveryToken: deliveryToken)
         }
       }
     }
@@ -138,6 +143,7 @@ final class BackgroundRefreshCoordinator {
   }
 
   func scheduleNext() {
+    guard delivery.canSchedule(isRegistered: isRegistered) else { return }
     let request = BGAppRefreshTaskRequest(identifier: Self.identifier)
     request.earliestBeginDate = policy.nextEarliestBeginDate(after: Date())
     do {
@@ -151,13 +157,35 @@ final class BackgroundRefreshCoordinator {
     BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.identifier)
   }
 
-  private func handle(_ task: BGAppRefreshTask) async {
-    scheduleNext()
-    let work = Task { [readiness, runner, runSync] in
-      await runner.run(readiness: readiness) { try await runSync() }
+  func activateRuntime() {
+    delivery.activate()
+  }
+
+  func invalidateRuntime() {
+    delivery.invalidate()
+    for work in activeWork.values {
+      work.cancel()
     }
+    activeWork.removeAll()
+  }
+
+  private func handle(
+    _ task: BGAppRefreshTask,
+    deliveryToken: RuntimeDeliveryToken?
+  ) async {
+    let workID = UUID()
+    let work = Task { @MainActor [delivery, readiness, runner, runSync, weak self] in
+      await delivery.handle(
+        deliveryToken,
+        scheduleNext: { self?.scheduleNext() },
+        run: { await runner.run(readiness: readiness) { try await runSync() } }
+      )
+    }
+    activeWork[workID] = work
     task.expirationHandler = { work.cancel() }
-    task.setTaskCompleted(success: await work.value)
+    let success = await work.value
+    activeWork.removeValue(forKey: workID)
+    task.setTaskCompleted(success: success ?? false)
   }
 }
 
@@ -187,13 +215,17 @@ final class AppSyncRuntime {
     await installer.install(
       model: model,
       prepare: { [readiness] in await readiness.markReady() },
-      commit: { [weak self] candidate in self?.model = candidate },
+      commit: { [weak self] candidate in
+        self?.model = candidate
+        self?.backgroundRefreshCoordinator.activateRuntime()
+      },
       schedule: { [weak self] in self?.backgroundRefreshCoordinator.scheduleNext() }
     )
   }
 
   func uninstall(model: AppModel) {
     installer.invalidate()
+    backgroundRefreshCoordinator.invalidateRuntime()
     backgroundRefreshCoordinator.cancelPending()
     guard self.model === model else { return }
     self.model = nil

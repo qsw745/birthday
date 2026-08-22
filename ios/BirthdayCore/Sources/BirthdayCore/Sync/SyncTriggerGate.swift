@@ -73,8 +73,11 @@ public struct SyncPresentationReducer: Equatable, Sendable {
   private var pendingCount = 0
   private var conflictCount = 0
   private var lastSuccess: Date?
+  private var remoteSyncEnabled = false
 
   public init() {}
+
+  public var isRemoteSyncEnabled: Bool { remoteSyncEnabled }
 
   public var presentation: SyncPresentationState {
     switch lifecycle {
@@ -101,6 +104,14 @@ public struct SyncPresentationReducer: Equatable, Sendable {
     advanceGeneration()
     lifecycle = .bound
     transient = .stable
+    remoteSyncEnabled = true
+  }
+
+  public mutating func configureRemoteRuntime(initiallyBound: Bool) {
+    advanceGeneration()
+    lifecycle = initiallyBound ? .bound : .localOnly
+    transient = .stable
+    remoteSyncEnabled = true
   }
 
   public mutating func useLocalOnly() {
@@ -108,18 +119,25 @@ public struct SyncPresentationReducer: Equatable, Sendable {
     lifecycle = .localOnly
     transient = .stable
     lastSuccess = nil
+    remoteSyncEnabled = false
+  }
+
+  public mutating func transitionToMissingCredentials() {
+    useLocalOnly()
   }
 
   public mutating func requireRebind() {
     advanceGeneration()
     lifecycle = .rebindRequired
     transient = .stable
+    remoteSyncEnabled = false
   }
 
   public mutating func failClosed(message: String) {
     advanceGeneration()
     lifecycle = .bound
     transient = .failed(message: message)
+    remoteSyncEnabled = false
   }
 
   public mutating func updateLocalFacts(pendingCount: Int, conflictCount: Int) {
@@ -138,6 +156,13 @@ public struct SyncPresentationReducer: Equatable, Sendable {
     advanceGeneration()
     lifecycle = .bound
     transient = .offline
+  }
+
+  public mutating func pauseForUnlink() {
+    advanceGeneration()
+    lifecycle = .bound
+    transient = .offline
+    remoteSyncEnabled = false
   }
 
   public mutating func finishSync(
@@ -224,6 +249,85 @@ public final class RuntimeInstallationCoordinator<Model: AnyObject> {
   }
 }
 
+public struct RuntimeDeliveryToken: Equatable, Sendable {
+  fileprivate let generation: UInt64
+}
+
+private final class RuntimeDeliveryGenerationFence: @unchecked Sendable {
+  private let lock = NSLock()
+  private var generation: UInt64 = 0
+  private var active = false
+
+  func activate() {
+    lock.withLock {
+      generation &+= 1
+      active = true
+    }
+  }
+
+  func invalidate() {
+    lock.withLock {
+      generation &+= 1
+      active = false
+    }
+  }
+
+  func capture() -> RuntimeDeliveryToken? {
+    lock.withLock {
+      guard active else { return nil }
+      return RuntimeDeliveryToken(generation: generation)
+    }
+  }
+
+  func permits(_ token: RuntimeDeliveryToken?) -> Bool {
+    lock.withLock {
+      guard active, let token else { return false }
+      return token.generation == generation
+    }
+  }
+
+  func isActive() -> Bool {
+    lock.withLock { active }
+  }
+}
+
+/// Fences work at system-delivery time, before it can be queued onto the main actor.
+@MainActor
+public final class RuntimeDeliveryCoordinator {
+  private nonisolated let fence = RuntimeDeliveryGenerationFence()
+
+  public init() {}
+
+  public func activate() {
+    fence.activate()
+  }
+
+  public func invalidate() {
+    fence.invalidate()
+  }
+
+  public nonisolated func captureForDelivery() -> RuntimeDeliveryToken? {
+    fence.capture()
+  }
+
+  public nonisolated func canSchedule(isRegistered: Bool) -> Bool {
+    isRegistered && fence.isActive()
+  }
+
+  public func handle<Value: Sendable>(
+    _ token: RuntimeDeliveryToken?,
+    scheduleNext: @MainActor () -> Void,
+    run: @MainActor () async -> Value
+  ) async -> Value? {
+    guard fence.permits(token) else { return nil }
+    scheduleNext()
+    guard fence.permits(token) else { return nil }
+    let value = await run()
+    guard fence.permits(token) else { return nil }
+    return value
+  }
+}
+
 /// Holds the single in-process lease for work that may start a sync request.
 public actor SyncTriggerGate {
   private var running = false
@@ -261,6 +365,8 @@ public struct RemoteSyncAccessPermit: Equatable, Sendable {
 }
 
 public struct RemoteSyncPauseToken: Equatable, Sendable {
+  fileprivate let gateID: UUID
+  fileprivate let ownerID: UUID
   fileprivate let generation: UInt64
 }
 
@@ -273,6 +379,7 @@ public actor RemoteSyncAccessGate {
   private let gateID = UUID()
   private var generation: UInt64 = 0
   private var isPaused = false
+  private var pauseOwners: Set<UUID> = []
   private var cancellations: [UUID: @Sendable () -> Void] = [:]
   private var drainWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -303,11 +410,13 @@ public actor RemoteSyncAccessGate {
 
   @discardableResult
   public func pauseAndDrain() async -> RemoteSyncPauseToken {
-    if !isPaused {
+    if pauseOwners.isEmpty {
       generation &+= 1
       isPaused = true
     }
-    let token = RemoteSyncPauseToken(generation: generation)
+    let ownerID = UUID()
+    pauseOwners.insert(ownerID)
+    let token = RemoteSyncPauseToken(gateID: gateID, ownerID: ownerID, generation: generation)
     for cancel in cancellations.values {
       cancel()
     }
@@ -318,11 +427,14 @@ public actor RemoteSyncAccessGate {
 
   @discardableResult
   public func resume(after token: RemoteSyncPauseToken?) -> UInt64 {
-    guard isPaused else {
-      generation &+= 1
-      return generation
-    }
-    guard token?.generation == generation else { return generation }
+    guard
+      isPaused,
+      let token,
+      token.gateID == gateID,
+      token.generation == generation,
+      pauseOwners.remove(token.ownerID) != nil
+    else { return generation }
+    guard pauseOwners.isEmpty else { return generation }
     generation &+= 1
     isPaused = false
     return generation

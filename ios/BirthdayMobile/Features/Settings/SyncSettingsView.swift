@@ -87,7 +87,7 @@ struct SyncSettingsView: View {
               .accessibilityIdentifier("deviceManagementMessage")
           }
 
-          if isRevokedCredentialCleanupRequired {
+          if model.pendingLocalCleanup != nil {
             Button {
               Task { _ = await model.confirmLocalStopSync() }
             } label: {
@@ -96,6 +96,16 @@ struct SyncSettingsView: View {
             }
             .disabled(deviceActionsDisabled)
             .accessibilityIdentifier("retryCredentialCleanupButton")
+            if model.canResumeSyncAfterLocalCleanupFailure {
+              Button {
+                Task { _ = await model.resumeSyncAfterLocalCleanupFailure() }
+              } label: {
+                Label("保留凭据并恢复同步", systemImage: "arrow.clockwise.icloud")
+                  .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+              }
+              .disabled(deviceActionsDisabled)
+              .accessibilityIdentifier("resumeSyncAfterCleanupFailureButton")
+            }
           } else {
             Button(role: .destructive) {
               isConfirmingStop = true
@@ -276,7 +286,8 @@ struct SyncSettingsView: View {
   }
 
   private var showsBindingAction: Bool {
-    switch model.syncPresentation {
+    if model.needsRevokedCredentialCleanup { return true }
+    return switch model.syncPresentation {
     case .localOnly, .rebindRequired:
       true
     default:
@@ -286,15 +297,11 @@ struct SyncSettingsView: View {
 
   private var showsStopSync: Bool {
     (model.isSyncRuntimeEnabled && model.syncPresentation != .localOnly)
-      || isRevokedCredentialCleanupRequired
+      || model.pendingLocalCleanup != nil
   }
 
   private var deviceActionsDisabled: Bool {
     model.isManagingDevice || model.syncPresentation == .syncing
-  }
-
-  private var isRevokedCredentialCleanupRequired: Bool {
-    model.needsRevokedCredentialCleanup
   }
 
   private var statusTitle: String {

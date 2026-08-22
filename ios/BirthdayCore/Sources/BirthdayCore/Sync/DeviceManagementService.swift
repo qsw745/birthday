@@ -16,6 +16,11 @@ public enum UnlinkOutcome: Equatable, Sendable {
   case needsLocalConfirmation(message: String)
 }
 
+public enum PendingLocalCleanup: Equatable, Sendable {
+  case transportUnknown
+  case serverRevoked
+}
+
 public struct ManagedDevice: Equatable, Identifiable, Sendable {
   public let device: MobileDevice
   public let isCurrent: Bool
@@ -35,9 +40,26 @@ public actor DeviceManagementService {
   private let credentials: DeviceCredentialStore
   private let remoteAccessGate: RemoteSyncAccessGate
   private var operationInProgress = false
-  private var serverRevokedButCredentialClearFailed = false
-  private var pauseToken: RemoteSyncPauseToken?
-  private var awaitingLocalUnlinkConfirmation = false
+  private enum UnlinkPauseState: Equatable {
+    case idle
+    case revoking(RemoteSyncPauseToken)
+    case awaitingConfirmation(RemoteSyncPauseToken)
+    case pendingCleanup(RemoteSyncPauseToken, PendingLocalCleanup)
+    case rebindRequired(RemoteSyncPauseToken)
+    case stopped(RemoteSyncPauseToken)
+
+    var token: RemoteSyncPauseToken? {
+      switch self {
+      case .idle: nil
+      case .revoking(let token), .awaitingConfirmation(let token),
+        .pendingCleanup(let token, _), .rebindRequired(let token), .stopped(let token):
+        token
+      }
+    }
+  }
+
+  private var unlinkPauseState: UnlinkPauseState = .idle
+  private var lifecyclePauseToken: RemoteSyncPauseToken?
 
   public init(
     api: any MobileAPI,
@@ -50,7 +72,12 @@ public actor DeviceManagementService {
   }
 
   public var isFailClosedAfterServerRevoke: Bool {
-    serverRevokedButCredentialClearFailed
+    pendingLocalCleanup == .serverRevoked
+  }
+
+  public var pendingLocalCleanup: PendingLocalCleanup? {
+    guard case .pendingCleanup(_, let reason) = unlinkPauseState else { return nil }
+    return reason
   }
 
   public func listDevices() async throws -> [ManagedDevice] {
@@ -99,36 +126,60 @@ public actor DeviceManagementService {
     defer { operationInProgress = false }
 
     try Task.checkCancellation()
-    await pauseRemoteAccess()
-    let current = try requireUsableCredentials()
+    let token = await remoteAccessGate.pauseAndDrain()
+    unlinkPauseState = .revoking(token)
+
+    do {
+      try Task.checkCancellation()
+    } catch {
+      await releaseUnlinkPause(token)
+      throw error
+    }
+
+    let current: DeviceCredentials
+    do {
+      current = try requireUsableCredentials()
+    } catch {
+      await releaseUnlinkPause(token)
+      throw error
+    }
     guard let username = current.username, !username.isEmpty else {
+      unlinkPauseState = .rebindRequired(token)
       throw DeviceManagementError.rebindRequired
     }
-    try Task.checkCancellation()
+    do {
+      try Task.checkCancellation()
+    } catch {
+      await releaseUnlinkPause(token)
+      throw error
+    }
 
     do {
       try await api.revoke(deviceId: current.deviceId, accessToken: current.accessToken)
     } catch MobileAPIError.transport {
-      awaitingLocalUnlinkConfirmation = true
+      unlinkPauseState = .awaitingConfirmation(token)
       return .needsLocalConfirmation(message: Self.localUnlinkWarning)
     } catch MobileAPIError.accessExpired {
+      unlinkPauseState = .rebindRequired(token)
       throw DeviceManagementError.rebindRequired
     } catch MobileAPIError.refreshInvalid {
+      unlinkPauseState = .rebindRequired(token)
       throw DeviceManagementError.rebindRequired
     } catch is CancellationError {
-      await resumeRemoteAccess()
+      await releaseUnlinkPause(token)
       throw CancellationError()
     } catch {
-      await resumeRemoteAccess()
+      await releaseUnlinkPause(token)
       throw error
     }
 
     do {
       try credentials.clearCredentials()
     } catch {
-      serverRevokedButCredentialClearFailed = true
+      unlinkPauseState = .pendingCleanup(token, .serverRevoked)
       throw DeviceManagementError.credentialClearFailedAfterServerRevoke
     }
+    unlinkPauseState = .stopped(token)
     return .unlinked
   }
 
@@ -136,41 +187,76 @@ public actor DeviceManagementService {
     guard !operationInProgress else { throw DeviceManagementError.operationInProgress }
     operationInProgress = true
     defer { operationInProgress = false }
+    let token: RemoteSyncPauseToken
+    let cleanupReason: PendingLocalCleanup
+    switch unlinkPauseState {
+    case .awaitingConfirmation(let ownedToken):
+      token = ownedToken
+      cleanupReason = .transportUnknown
+    case .pendingCleanup(let ownedToken, let reason):
+      token = ownedToken
+      cleanupReason = reason
+    default:
+      throw DeviceManagementError.operationInProgress
+    }
+
     do {
       try credentials.clearCredentials()
-      serverRevokedButCredentialClearFailed = false
-      awaitingLocalUnlinkConfirmation = false
+      unlinkPauseState = .stopped(token)
     } catch {
+      unlinkPauseState = .pendingCleanup(token, cleanupReason)
       throw DeviceManagementError.credentialClearFailed
     }
   }
 
   public func cancelPendingLocalUnlink() async {
-    guard awaitingLocalUnlinkConfirmation else { return }
-    awaitingLocalUnlinkConfirmation = false
-    await resumeRemoteAccess()
+    guard case .awaitingConfirmation(let token) = unlinkPauseState else { return }
+    await releaseUnlinkPause(token)
+  }
+
+  public func resumeSyncAfterPendingLocalCleanup() async throws {
+    guard case .pendingCleanup(let token, let reason) = unlinkPauseState else {
+      throw DeviceManagementError.operationInProgress
+    }
+    guard reason == .transportUnknown else {
+      throw DeviceManagementError.revokedSessionRequiresLocalCleanup
+    }
+    await releaseUnlinkPause(token)
   }
 
   public func pauseForRebind() async {
-    await pauseRemoteAccess()
+    guard lifecyclePauseToken == nil else { return }
+    lifecyclePauseToken = await remoteAccessGate.pauseAndDrain()
+  }
+
+  public func pauseForMissingCredentials() async {
+    await pauseForRebind()
   }
 
   public func resumeAfterBinding() async {
-    serverRevokedButCredentialClearFailed = false
-    awaitingLocalUnlinkConfirmation = false
-    await resumeRemoteAccess()
+    let lifecycleToken = lifecyclePauseToken
+    lifecyclePauseToken = nil
+    let unlinkToken = unlinkPauseState.token
+    unlinkPauseState = .idle
+    if let lifecycleToken {
+      _ = await remoteAccessGate.resume(after: lifecycleToken)
+    }
+    if let unlinkToken {
+      _ = await remoteAccessGate.resume(after: unlinkToken)
+    }
   }
 
   private func beginOperation() throws {
-    guard !serverRevokedButCredentialClearFailed else {
+    guard pendingLocalCleanup != .serverRevoked else {
       throw DeviceManagementError.revokedSessionRequiresLocalCleanup
     }
     guard !operationInProgress else { throw DeviceManagementError.operationInProgress }
+    guard unlinkPauseState == .idle else { throw DeviceManagementError.operationInProgress }
     operationInProgress = true
   }
 
   private func requireUsableCredentials() throws -> DeviceCredentials {
-    guard !serverRevokedButCredentialClearFailed else {
+    guard pendingLocalCleanup != .serverRevoked else {
       throw DeviceManagementError.revokedSessionRequiresLocalCleanup
     }
     guard let current = try credentials.load() else {
@@ -179,13 +265,9 @@ public actor DeviceManagementService {
     return current
   }
 
-  private func pauseRemoteAccess() async {
-    guard pauseToken == nil else { return }
-    pauseToken = await remoteAccessGate.pauseAndDrain()
-  }
-
-  private func resumeRemoteAccess() async {
-    _ = await remoteAccessGate.resume(after: pauseToken)
-    pauseToken = nil
+  private func releaseUnlinkPause(_ token: RemoteSyncPauseToken) async {
+    guard unlinkPauseState.token == token else { return }
+    unlinkPauseState = .idle
+    _ = await remoteAccessGate.resume(after: token)
   }
 }

@@ -1,6 +1,51 @@
 import XCTest
 
 final class OfflineFlowUITests: XCTestCase {
+  func testTransportCleanupFailureKeepsRetryAndExplicitResumeActionsVisible() {
+    let app = XCUIApplication()
+    app.launchArguments = [
+      "-ui-testing",
+      "-network-disabled",
+      "-transport-cleanup-failure",
+    ]
+    app.launch()
+
+    XCTAssertTrue(app.staticTexts["离线也能完整使用"].waitForExistence(timeout: 5))
+    app.buttons["继续"].tap()
+    app.buttons["暂不开启"].tap()
+    app.buttons["skipServerBindingButton"].tap()
+    if app.buttons["unlockButton"].waitForExistence(timeout: 2) {
+      app.buttons["unlockButton"].tap()
+    }
+    app.tabBars.buttons["设置"].tap()
+
+    let stopSyncButton = app.buttons["stopSyncButton"]
+    for _ in 0..<4 where !stopSyncButton.exists {
+      app.swipeUp()
+    }
+    XCTAssertTrue(stopSyncButton.waitForExistence(timeout: 3))
+    stopSyncButton.tap()
+    app.buttons["撤销此设备并停止"].tap()
+    XCTAssertTrue(app.staticTexts["服务器暂时不可达"].waitForExistence(timeout: 3))
+    app.buttons["仍要停止本机同步"].tap()
+
+    let retryCleanupButton = app.buttons["retryCredentialCleanupButton"]
+    let resumeSyncButton = app.buttons["resumeSyncAfterCleanupFailureButton"]
+    for _ in 0..<4 where !retryCleanupButton.exists {
+      app.swipeUp()
+    }
+    XCTAssertTrue(retryCleanupButton.waitForExistence(timeout: 3))
+    XCTAssertTrue(resumeSyncButton.waitForExistence(timeout: 3))
+    resumeSyncButton.tap()
+
+    for _ in 0..<4 where !stopSyncButton.exists {
+      app.swipeUp()
+    }
+    XCTAssertTrue(stopSyncButton.waitForExistence(timeout: 3))
+    XCTAssertFalse(retryCleanupButton.exists)
+    XCTAssertFalse(resumeSyncButton.exists)
+  }
+
   func testLocalOnlySettingsExposeBindingWithoutDestructiveDeviceActions() {
     let app = XCUIApplication()
     app.launchArguments = ["-ui-testing", "-network-disabled"]

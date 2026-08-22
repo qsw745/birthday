@@ -1,4 +1,5 @@
 import BirthdayCore
+import Foundation
 import SwiftData
 import SwiftUI
 import UIKit
@@ -257,8 +258,9 @@ private struct BirthdayAppBootstrapView: View {
         timeZone = { .current }
       }
 
-      return AppModel(
-        store: BirthdayStore(modelContainer: container),
+      let store = BirthdayStore(modelContainer: container)
+      let model = AppModel(
+        store: store,
         selectedMonth: selectedMonth,
         preferences: preferences,
         authenticator: UITestAppLockAuthenticator(),
@@ -273,6 +275,10 @@ private struct BirthdayAppBootstrapView: View {
         now: now,
         timeZone: timeZone
       )
+      if uiTestBootstrap.transportCleanupFailure {
+        configureTransportCleanupFailureFixture(model: model, store: store)
+      }
+      return model
     }
 
     guard syncRuntimePolicy.allowsRemoteSyncComposition else {
@@ -345,6 +351,49 @@ private struct BirthdayAppBootstrapView: View {
     )
   }
 
+  private func configureTransportCleanupFailureFixture(model: AppModel, store: BirthdayStore) {
+    let deviceID = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
+    let secure = UITestDeleteFailingSecureTokenStore()
+    let credentials = DeviceCredentialStore(secure: secure)
+    try! credentials.save(
+      DeviceCredentials(
+        deviceId: deviceID,
+        accessToken: "ui-test-access",
+        accessExpiresAt: Date(timeIntervalSinceNow: 3_600),
+        refreshToken: "ui-test-refresh",
+        refreshExpiresAt: Date(timeIntervalSinceNow: 86_400),
+        username: "admin"
+      ))
+    let api = UITestTransportCleanupMobileAPI(deviceID: deviceID)
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let scheduler = UITestNotificationScheduler()
+    let planner = ReminderPlanner()
+    let engine = SyncEngine(
+      api: api,
+      store: store,
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+    model.configureSyncCoordinator(
+      SyncCoordinator(
+        syncEngine: engine,
+        remoteAccessGate: remoteAccessGate,
+        store: store,
+        credentials: credentials,
+        notificationScheduler: scheduler,
+        reminderPlanner: planner,
+        publish: { [weak model] outcome in await model?.publishCompletedSync(outcome) }
+      ),
+      initiallyBound: true
+    )
+    model.configureDeviceManagement(
+      DeviceManagementService(
+        api: api,
+        credentials: credentials,
+        remoteAccessGate: remoteAccessGate
+      ))
+  }
+
   private func seedSnapshotImportPreview(in container: ModelContainer) throws {
     let context = ModelContext(container)
     let date = Date(timeIntervalSince1970: 1_788_000_000)
@@ -362,6 +411,71 @@ private struct BirthdayAppBootstrapView: View {
     entity.syncStateRaw = SyncState.synced.rawValue
     context.insert(entity)
     try context.save()
+  }
+}
+
+private enum UITestCredentialDeleteError: Error {
+  case denied
+}
+
+private final class UITestDeleteFailingSecureTokenStore: SecureTokenStore, @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [String: Data] = [:]
+
+  func save(_ data: Data, account: String) throws {
+    lock.withLock { values[account] = data }
+  }
+
+  func read(account: String) throws -> Data? {
+    lock.withLock { values[account] }
+  }
+
+  func delete(account: String) throws {
+    throw UITestCredentialDeleteError.denied
+  }
+}
+
+private actor UITestTransportCleanupMobileAPI: MobileAPI {
+  private let deviceID: UUID
+
+  init(deviceID: UUID) {
+    self.deviceID = deviceID
+  }
+
+  func login(_ request: LoginRequest) async throws -> TokenResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func refresh(_ request: RefreshRequest) async throws -> TokenResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func snapshot(accessToken: String) async throws -> SnapshotResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func push(_ request: PushRequest, accessToken: String) async throws -> PushResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func pull(cursor: Int64, accessToken: String) async throws -> PullResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func revoke(deviceId: UUID, accessToken: String) async throws {
+    throw MobileAPIError.transport("ui_test_transport_cleanup")
+  }
+
+  func devices(accessToken: String) async throws -> [MobileDevice] {
+    [
+      MobileDevice(
+        deviceId: deviceID,
+        deviceName: "UI Test iPhone",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        lastUsedAt: nil,
+        revokedAt: nil
+      )
+    ]
   }
 }
 
