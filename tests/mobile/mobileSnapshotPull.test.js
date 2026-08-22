@@ -283,7 +283,7 @@ for (const { name, changes, limit, expectedHasMore, expectedSeqs, expectedLimitP
     limit: 2,
     expectedHasMore: false,
     expectedSeqs: ['1'],
-    expectedLimitParam: 3,
+    expectedLimitParam: '3',
   },
   {
     name: 'exactly limit',
@@ -291,7 +291,7 @@ for (const { name, changes, limit, expectedHasMore, expectedSeqs, expectedLimitP
     limit: 2,
     expectedHasMore: false,
     expectedSeqs: ['1', '2'],
-    expectedLimitParam: 3,
+    expectedLimitParam: '3',
   },
   {
     name: 'more than limit',
@@ -299,7 +299,7 @@ for (const { name, changes, limit, expectedHasMore, expectedSeqs, expectedLimitP
     limit: 2,
     expectedHasMore: true,
     expectedSeqs: ['1', '2'],
-    expectedLimitParam: 3,
+    expectedLimitParam: '3',
   },
 ]) {
   test(`pull computes exact hasMore and nextCursor when the page has ${name}`, async () => {
@@ -326,7 +326,7 @@ test('pull preserves a canonical empty-page cursor and performs only the event q
 
   assert.deepEqual(result, { changes: [], nextCursor: cursor, hasMore: false })
   assert.equal(pool.calls.length, 1)
-  assert.deepEqual(pool.calls[0].params, ['birthday', cursor, 201])
+  assert.deepEqual(pool.calls[0].params, ['birthday', cursor, '201'])
 })
 
 test('pull never converts BIGINT cursor or sequence values through Number', async () => {
@@ -506,14 +506,13 @@ for (const [name, mutate] of [
   })
 }
 
-test('pull defaults limit to 200 and binds limit+1 as an integer query parameter', async () => {
+test('pull defaults limit to 200 and binds limit+1 as a canonical decimal string', async () => {
   const pool = createPullPool({ changes: [] })
   const repository = createMobileSyncRepository({ pool })
 
   await repository.pull('0')
 
-  assert.deepEqual(pool.calls[0].params, ['birthday', '0', 201])
-  assert.equal(Number.isSafeInteger(pool.calls[0].params[2]), true)
+  assert.deepEqual(pool.calls[0].params, ['birthday', '0', '201'])
 })
 
 test('pull rejects malformed cursor strings before touching the database', async () => {
@@ -536,7 +535,7 @@ test('pull accepts the signed Int64 maximum cursor as an exact bound string', as
   const result = await repository.pull(INT64_MAX, 1)
 
   assert.deepEqual(result, { changes: [], nextCursor: INT64_MAX, hasMore: false })
-  assert.deepEqual(pool.calls[0].params, ['birthday', INT64_MAX, 2])
+  assert.deepEqual(pool.calls[0].params, ['birthday', INT64_MAX, '2'])
   assert.equal(typeof pool.calls[0].params[1], 'string')
   assert.match(pool.calls[0].sql, /seq\s*>\s*CAST\s*\(\s*\?\s+AS\s+SIGNED\s*\)/i)
 })

@@ -49,6 +49,7 @@ const express = require('express')
 const mysql = require('mysql2/promise')
 const request = require('supertest')
 const { createProductionMobileRouter, MOBILE_API_CONTRACT } = require('../../routes/mobile')
+const { createMobileSyncRepository } = require('../../repositories/mobileSyncRepository')
 const { calculateNextSolarDate } = require('../../utils/helpers')
 
 const DEVICE_A_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -172,10 +173,16 @@ function birthdayPayload(overrides = {}) {
   }
 }
 
-function operation({ operationId, type = 'upsert', baseVersion, payload }) {
+function operation({
+  operationId,
+  entityId = BIRTHDAY_ID,
+  type = 'upsert',
+  baseVersion,
+  payload,
+}) {
   return {
     operationId,
-    entityId: BIRTHDAY_ID,
+    entityId,
     type,
     baseVersion,
     ...(type === 'upsert' ? { payload } : {}),
@@ -188,6 +195,79 @@ async function schemaExists(adminPool, database) {
     [database],
   )
   return rows.length === 1
+}
+
+async function withDisposableDatabase(t, body) {
+  const databaseIdentifier = quoteIdentifier(databaseConfig.database)
+  const adminPool = mysql.createPool({
+    host: databaseConfig.host,
+    port: databaseConfig.port,
+    user: databaseConfig.user,
+    password: databaseConfig.password,
+    waitForConnections: true,
+    connectionLimit: 1,
+    queueLimit: 0,
+    connectTimeout: 5_000,
+  })
+  let applicationPool = null
+  let createdByThisRun = false
+
+  try {
+    assert.equal(
+      await schemaExists(adminPool, databaseConfig.database),
+      false,
+      `refusing to reuse existing database ${databaseConfig.database}`,
+    )
+    await adminPool.query(
+      `CREATE DATABASE ${databaseIdentifier} DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci`,
+    )
+    createdByThisRun = true
+    assert.equal(await schemaExists(adminPool, databaseConfig.database), true)
+    t.diagnostic(`created disposable database ${databaseConfig.database}; information_schema read-back=true`)
+
+    applicationPool = mysql.createPool({
+      host: databaseConfig.host,
+      port: databaseConfig.port,
+      user: databaseConfig.user,
+      password: databaseConfig.password,
+      database: databaseConfig.database,
+      waitForConnections: true,
+      connectionLimit: 8,
+      queueLimit: 0,
+      connectTimeout: 5_000,
+      timezone: '+08:00',
+      multipleStatements: true,
+    })
+    await applicationPool.query(PRE_MOBILE_SCHEMA_SQL)
+    const migration = fs.readFileSync(
+      path.join(__dirname, '../../sql/migrations/20260821_mobile_sync.sql'),
+      'utf8',
+    )
+    await applicationPool.query(migration)
+    await body(applicationPool)
+  } finally {
+    let cleanupError = null
+    try {
+      if (applicationPool) await applicationPool.end()
+    } catch (error) {
+      cleanupError = error
+    }
+    try {
+      if (createdByThisRun) {
+        await adminPool.query(`DROP DATABASE ${databaseIdentifier}`)
+        assert.equal(await schemaExists(adminPool, databaseConfig.database), false)
+        t.diagnostic(`dropped disposable database ${databaseConfig.database}; information_schema read-back=false`)
+      }
+    } catch (error) {
+      if (!cleanupError) cleanupError = error
+    }
+    try {
+      await adminPool.end()
+    } catch (error) {
+      if (!cleanupError) cleanupError = error
+    }
+    if (cleanupError) throw cleanupError
+  }
 }
 
 test('production mobile routers preserve the two-device incremental sync contract', { timeout: 60_000 }, async t => {
@@ -393,4 +473,277 @@ test('production mobile routers preserve the two-device incremental sync contrac
     }
     if (cleanupError) throw cleanupError
   }
+})
+
+test('real InnoDB races, duplicate keys, deadlocks, and lock timeouts obey retry boundaries', { timeout: 60_000 }, async t => {
+  await withDisposableDatabase(t, async applicationPool => {
+    const app = createApplication(applicationPool)
+    const loginA = await login(app, DEVICE_A_ID, '并发设备 A')
+    const loginB = await login(app, DEVICE_B_ID, '并发设备 B')
+    assert.equal(loginA.status, 200)
+    assert.equal(loginB.status, 200)
+
+    const raceEntityId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+    const createBodies = [
+      {
+        operations: [operation({
+          operationId: '55555555-5555-4555-8555-555555555555',
+          entityId: raceEntityId,
+          baseVersion: '0',
+          payload: birthdayPayload({ id: raceEntityId, name: '并发创建 A' }),
+        })],
+      },
+      {
+        operations: [operation({
+          operationId: '66666666-6666-4666-8666-666666666666',
+          entityId: raceEntityId,
+          baseVersion: '0',
+          payload: birthdayPayload({ id: raceEntityId, name: '并发创建 B' }),
+        })],
+      },
+    ]
+    const createResponses = await Promise.all([
+      authorized(app, 'post', MOBILE_API_CONTRACT.endpoints.push, loginA.body.accessToken)
+        .send(createBodies[0]),
+      authorized(app, 'post', MOBILE_API_CONTRACT.endpoints.push, loginB.body.accessToken)
+        .send(createBodies[1]),
+    ])
+    assert.deepEqual(createResponses.map(response => response.status), [200, 200])
+    assert.deepEqual(
+      createResponses.map(response => response.body.results[0].status).sort(),
+      ['applied', 'conflict'],
+    )
+
+    const updateBodies = [
+      {
+        operations: [operation({
+          operationId: '77777777-7777-4777-8777-777777777777',
+          entityId: raceEntityId,
+          baseVersion: '1',
+          payload: birthdayPayload({ id: raceEntityId, name: '并发更新 A' }),
+        })],
+      },
+      {
+        operations: [operation({
+          operationId: '88888888-8888-4888-8888-888888888888',
+          entityId: raceEntityId,
+          baseVersion: '1',
+          payload: birthdayPayload({ id: raceEntityId, name: '并发更新 B' }),
+        })],
+      },
+    ]
+    const updateResponses = await Promise.all([
+      authorized(app, 'post', MOBILE_API_CONTRACT.endpoints.push, loginA.body.accessToken)
+        .send(updateBodies[0]),
+      authorized(app, 'post', MOBILE_API_CONTRACT.endpoints.push, loginB.body.accessToken)
+        .send(updateBodies[1]),
+    ])
+    assert.deepEqual(updateResponses.map(response => response.status), [200, 200])
+    assert.deepEqual(
+      updateResponses.map(response => response.body.results[0].status).sort(),
+      ['applied', 'conflict'],
+    )
+    const [updatedRows] = await applicationPool.execute(
+      'SELECT COUNT(*) AS row_count, CAST(MAX(version) AS CHAR) AS version FROM birthdays WHERE id = ?',
+      [raceEntityId],
+    )
+    assert.equal(Number(updatedRows[0].row_count), 1)
+    assert.equal(updatedRows[0].version, '2')
+
+    const replayEntityId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+    const replayOperationId = '99999999-9999-4999-8999-999999999999'
+    const replayBody = {
+      operations: [operation({
+        operationId: replayOperationId,
+        entityId: replayEntityId,
+        baseVersion: '0',
+        payload: birthdayPayload({ id: replayEntityId, name: '并发重放' }),
+      })],
+    }
+    const replayResponses = await Promise.all([
+      authorized(app, 'post', MOBILE_API_CONTRACT.endpoints.push, loginA.body.accessToken)
+        .send(replayBody),
+      authorized(app, 'post', MOBILE_API_CONTRACT.endpoints.push, loginA.body.accessToken)
+        .send(replayBody),
+    ])
+    assert.deepEqual(replayResponses.map(response => response.status), [200, 200])
+    assert.deepEqual(replayResponses[0].body, replayResponses[1].body)
+    const [replayCounts] = await applicationPool.execute(
+      `SELECT
+        (SELECT COUNT(*) FROM birthdays WHERE id = ?) AS birthday_count,
+        (SELECT COUNT(*) FROM mobile_sync_operations WHERE operation_id = ?) AS operation_count`,
+      [replayEntityId, replayOperationId],
+    )
+    assert.equal(Number(replayCounts[0].birthday_count), 1)
+    assert.equal(Number(replayCounts[0].operation_count), 1)
+
+    await applicationPool.query(`CREATE TABLE retry_unique_probe (
+      id INT NOT NULL AUTO_INCREMENT,
+      marker VARCHAR(32) NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_retry_unique_marker (marker)
+    ) ENGINE=InnoDB`)
+    await applicationPool.query(`CREATE TABLE retry_lock_probe (
+      id INT NOT NULL,
+      PRIMARY KEY (id)
+    ) ENGINE=InnoDB`)
+    await applicationPool.query(
+      "INSERT INTO retry_unique_probe (marker) VALUES ('duplicate')",
+    )
+    await applicationPool.query(
+      'INSERT INTO retry_lock_probe (id) VALUES (1), (2), (3), (4)',
+    )
+
+    const probeOperation = operation({
+      operationId: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa',
+      entityId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      baseVersion: '0',
+      payload: birthdayPayload({
+        id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+        name: '事务探针',
+      }),
+    })
+    let uniqueAttempts = 0
+    const uniqueRepository = createMobileSyncRepository({
+      pool: applicationPool,
+      applyMobileOperationFn: async connection => {
+        uniqueAttempts += 1
+        await connection.query(
+          "INSERT INTO retry_unique_probe (marker) VALUES ('duplicate')",
+        )
+      },
+    })
+    await assert.rejects(
+      uniqueRepository.applyOperation(DEVICE_A_ID, probeOperation),
+      error => error.code === 'ER_DUP_ENTRY',
+    )
+    assert.equal(uniqueAttempts, 1)
+
+    let timeoutBlocker = await applicationPool.getConnection()
+    await timeoutBlocker.beginTransaction()
+    await timeoutBlocker.query('SELECT id FROM retry_lock_probe WHERE id = 3 FOR UPDATE')
+    let timeoutAttempts = 0
+    let timeoutAcquisitions = 0
+    const timeoutRepository = createMobileSyncRepository({
+      pool: {
+        async getConnection() {
+          timeoutAcquisitions += 1
+          return applicationPool.getConnection()
+        },
+      },
+      applyMobileOperationFn: async connection => {
+        timeoutAttempts += 1
+        await connection.query('SET SESSION innodb_lock_wait_timeout = 1')
+        try {
+          await connection.query('SELECT id FROM retry_lock_probe WHERE id = 3 FOR UPDATE')
+        } catch (error) {
+          if (error.code === 'ER_LOCK_WAIT_TIMEOUT' && timeoutBlocker) {
+            await timeoutBlocker.rollback()
+            timeoutBlocker.release()
+            timeoutBlocker = null
+          }
+          throw error
+        }
+        return { status: 'lock-timeout-recovered' }
+      },
+    })
+    try {
+      assert.deepEqual(
+        await timeoutRepository.applyOperation(DEVICE_A_ID, probeOperation),
+        { status: 'lock-timeout-recovered' },
+      )
+    } finally {
+      if (timeoutBlocker) {
+        await timeoutBlocker.rollback()
+        timeoutBlocker.release()
+        timeoutBlocker = null
+      }
+    }
+    assert.equal(timeoutAttempts, 2)
+    assert.equal(timeoutAcquisitions, 2)
+
+    let deadlockArrivals = 0
+    let releaseDeadlockBarrier
+    const deadlockBarrier = new Promise(resolve => { releaseDeadlockBarrier = resolve })
+    const deadlockAttempts = new Map()
+    let deadlockAcquisitions = 0
+    const deadlockRepository = createMobileSyncRepository({
+      pool: {
+        async getConnection() {
+          deadlockAcquisitions += 1
+          return applicationPool.getConnection()
+        },
+      },
+      applyMobileOperationFn: async (connection, { operation: current }) => {
+        const attempt = (deadlockAttempts.get(current.entityId) || 0) + 1
+        deadlockAttempts.set(current.entityId, attempt)
+        if (attempt > 1) return { status: 'deadlock-retried' }
+
+        const isFirst = current.entityId === raceEntityId
+        const firstLock = isFirst ? 1 : 2
+        const secondLock = isFirst ? 2 : 1
+        await connection.query(
+          'SELECT id FROM retry_lock_probe WHERE id = ? FOR UPDATE',
+          [firstLock],
+        )
+        deadlockArrivals += 1
+        if (deadlockArrivals === 2) releaseDeadlockBarrier()
+        await deadlockBarrier
+        await connection.query(
+          'SELECT id FROM retry_lock_probe WHERE id = ? FOR UPDATE',
+          [secondLock],
+        )
+        return { status: 'deadlock-survived' }
+      },
+    })
+    const deadlockOperations = [
+      operation({
+        operationId: 'bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb',
+        entityId: raceEntityId,
+        baseVersion: '2',
+        payload: birthdayPayload({ id: raceEntityId, name: '死锁 A' }),
+      }),
+      operation({
+        operationId: 'cccccccc-1111-4111-8111-cccccccccccc',
+        entityId: replayEntityId,
+        baseVersion: '1',
+        payload: birthdayPayload({ id: replayEntityId, name: '死锁 B' }),
+      }),
+    ]
+    await Promise.all(deadlockOperations.map(current => (
+      deadlockRepository.applyOperation(DEVICE_A_ID, current)
+    )))
+    assert.deepEqual([...deadlockAttempts.values()].sort(), [1, 2])
+    assert.equal(deadlockAcquisitions, 3)
+
+    const exhaustedBlocker = await applicationPool.getConnection()
+    await exhaustedBlocker.beginTransaction()
+    await exhaustedBlocker.query('SELECT id FROM retry_lock_probe WHERE id = 4 FOR UPDATE')
+    let exhaustedAttempts = 0
+    let exhaustedAcquisitions = 0
+    const exhaustedRepository = createMobileSyncRepository({
+      pool: {
+        async getConnection() {
+          exhaustedAcquisitions += 1
+          return applicationPool.getConnection()
+        },
+      },
+      applyMobileOperationFn: async connection => {
+        exhaustedAttempts += 1
+        await connection.query('SET SESSION innodb_lock_wait_timeout = 1')
+        await connection.query('SELECT id FROM retry_lock_probe WHERE id = 4 FOR UPDATE')
+      },
+    })
+    try {
+      await assert.rejects(
+        exhaustedRepository.applyOperation(DEVICE_A_ID, probeOperation),
+        error => error.code === 'ER_LOCK_WAIT_TIMEOUT',
+      )
+    } finally {
+      await exhaustedBlocker.rollback()
+      exhaustedBlocker.release()
+    }
+    assert.equal(exhaustedAttempts, 3)
+    assert.equal(exhaustedAcquisitions, 3)
+  })
 })

@@ -172,7 +172,11 @@ function createMobileSyncRepository({
          AND seq > CAST(? AS SIGNED)
        ORDER BY seq ASC
        LIMIT ?`,
-      ['birthday', normalizedCursor, normalizedLimit + 1],
+      // mysql2/MySQL 8 rejects a numeric LIMIT parameter in the native
+      // prepared-statement path with ER_WRONG_ARGUMENTS. The value has already
+      // passed the strict 1...200 integer contract; bind its canonical decimal
+      // string so the server can execute the prepared LIMIT safely.
+      ['birthday', normalizedCursor, String(normalizedLimit + 1)],
     )
     const pageRows = changeRows.slice(0, normalizedLimit)
     if (pageRows.length === 0) {
