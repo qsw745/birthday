@@ -108,6 +108,10 @@
 
 原始令牌只在响应中出现；服务器只持久化令牌哈希。
 
+同一 `username + deviceId` 可以重复登录。服务端在一个显式事务中锁定设备行并原子替换设备名、两枚令牌哈希和两项有效期，同时清空 `revokedAt` 与 `lastUsedAt`；因此响应在网络中丢失后可安全重试，已撤销的同账号设备也可重新绑定。提交后旧访问令牌与旧刷新令牌立即失效，客户端只能保存最后一次成功响应中的整组新凭据；设备的 `deviceId`、所有者和首次 `createdAt` 不变。
+
+`deviceId` 不可跨用户名接管。即使密码验证成功，只要该设备 ID 已属于不同用户名，服务端也不会改动原行，并返回 HTTP 409 `mobile_device_ownership_conflict`；响应和安全日志均不包含原所有者、令牌哈希或数据库消息。意外的唯一令牌哈希冲突会回滚整个绑定事务，对外统一为 HTTP 500 `server_error`。
+
 ### 刷新令牌
 
 `POST /api/mobile/auth/refresh`
@@ -391,6 +395,7 @@
 | 401 | `mobile_access_expired` | 访问令牌未知、过期或已撤销。 |
 | 401 | `mobile_refresh_invalid` | 刷新令牌未知、过期、已撤销或已被轮换。 |
 | 404 | `mobile_device_not_found` | 当前账号没有对应的可撤销设备。 |
+| 409 | `mobile_device_ownership_conflict` | `deviceId` 已属于不同用户名；原设备行保持不变且不披露所有者。 |
 | 413 | `payload_too_large` | 请求超过 64 KiB JSON 解析上限。 |
 | 429 | `api_rate_limited` | 全局 API 限流窗口内请求次数过多；若它先于登录限流命中，客户端也必须可解码此错误。 |
 | 429 | `mobile_login_rate_limited` | 当前登录限流窗口内尝试次数过多。 |

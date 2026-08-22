@@ -23,6 +23,7 @@ const ERROR_DEFINITIONS = Object.freeze({
   refreshInvalid: Object.freeze({ code: 'mobile_refresh_invalid', status: 401 }),
   invalidDevice: Object.freeze({ code: 'invalid_mobile_device', status: 400 }),
   deviceNotFound: Object.freeze({ code: 'mobile_device_not_found', status: 404 }),
+  deviceOwnershipConflict: Object.freeze({ code: 'mobile_device_ownership_conflict', status: 409 }),
   invalidCursor: Object.freeze({ code: 'invalid_cursor', status: 400 }),
   invalidLimit: Object.freeze({ code: 'invalid_limit', status: 400 }),
   invalidBirthdayPayload: Object.freeze({ code: 'invalid_birthday_payload', status: 400 }),

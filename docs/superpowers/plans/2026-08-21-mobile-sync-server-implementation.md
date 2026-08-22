@@ -354,7 +354,7 @@ git commit -m "fix(server): 正确换算闰月生日"
 
 **Interfaces:**
 - Consumes: `crypto.randomBytes`, repository query function
-- Produces: `issueTokenPair(now)`, `hashToken(token)`, `createMobileAuth({ sessions })`
+- Produces: `issueTokenPair(now)`, `hashToken(token)`, `bindSession(...)`, `createMobileAuth({ sessions })`
 
 - [ ] **Step 1: Write failing token tests**
 
@@ -400,14 +400,17 @@ module.exports = { ACCESS_TTL_MS, REFRESH_TTL_MS, hashToken, issueTokenPair }
 `mobileSessionRepository` accepts `{ pool }` and exports:
 
 ```js
-createSession({ deviceId, username, deviceName, pair })
+bindSession({ deviceId, username, deviceName, pair })
+createSession({ deviceId, username, deviceName, pair }) // compatibility alias only
 findByAccessToken(accessToken, now)
 rotateByRefreshToken(refreshToken, nextPair, now)
 revoke(deviceId, username)
 list(username)
 ```
 
-Each lookup hashes the presented token before SQL. `rotateByRefreshToken` updates both hashes and both expirations only when `revoked_at IS NULL` and `refresh_expires_at > ?`; it returns `null` otherwise.
+`bindSession` is the primary login contract. It acquires one explicit connection/transaction, locks `SELECT username ... WHERE device_id = ? FOR UPDATE`, and then either inserts a missing device or updates only a row with the same username. Rebinding replaces the device name, both hashes, and both expirations, clears `revoked_at`/`last_used_at`, and preserves `device_id`、`username`、`created_at`; therefore a lost login response can be retried and an intentionally revoked same-owner device can be restored while the prior token pair becomes invalid. A different username receives stable `mobile_device_ownership_conflict` without modifying the row. Unique token-hash collisions fail naturally and roll back the transaction. Rollback failure destroys the tainted connection, and neither thrown ownership errors nor logs include token hashes or owner names. `createSession` remains only a compatibility alias to this same transactional path.
+
+Each lookup hashes the presented token before SQL. `rotateByRefreshToken` updates both hashes and both expirations only when `revoked_at IS NULL` and `refresh_expires_at > ?`; it returns `null` otherwise. Stateful repository tests must prove transaction/lock ordering, same-owner revoked rebind, cross-owner immutability, cross-device hash-collision rollback, and rollback-failure destruction; source-only SQL regex assertions are insufficient.
 
 - [ ] **Step 4: Write and implement the Bearer middleware contract**
 
@@ -443,9 +446,9 @@ module.exports = { createMobileAuth }
 
 - [ ] **Step 5: Run tests**
 
-Run: `node --test tests/mobile/mobileTokens.test.js tests/mobile/mobileAuthMiddleware.test.js`
+Run: `node --test tests/mobile/mobileTokens.test.js tests/mobile/mobileSessionRepository.test.js tests/mobile/mobileAuthMiddleware.test.js`
 
-Expected: PASS.
+Expected: token lifetime/hash, transactional bind/rebind/ownership/collision/cleanup, and Bearer middleware cases PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -476,7 +479,7 @@ const { createTestApp } = require('../helpers/createTestApp')
 const { createMobileAuthRouter } = require('../../routes/mobileAuth')
 
 test('login binds one device and returns token pair', async () => {
-  const sessions = { createSession: async input => input }
+  const sessions = { bindSession: async input => input }
   const router = createMobileAuthRouter({ sessions, verifyPassword: async () => true, env: { AUTH_USERNAME: 'admin', AUTH_PASSWORD_HASH: 'hash' }, now: () => new Date('2026-08-21T00:00:00Z') })
   const response = await request(createTestApp({ path: '/api/mobile/auth', router })).post('/api/mobile/auth/login').send({ username: 'admin', password: 'secret', deviceId: '11111111-1111-4111-8111-111111111111', deviceName: 'iPhone' })
   assert.equal(response.status, 200)
@@ -502,7 +505,7 @@ Expected: module-not-found failure.
 
 - [ ] **Step 3: Implement router validation and response shape**
 
-`POST /login` validates username, password, UUID `deviceId`, and a 1...100 character `deviceName`; it rate-limits like the existing login route. On success it calls `issueTokenPair(now())`, stores only hashes through the repository, and returns:
+`POST /login` validates username, password, UUID `deviceId`, and a 1...100 character `deviceName`; it rate-limits like the existing login route. On success it calls `issueTokenPair(now())`, calls the repository's primary `bindSession` boundary (falling back to the compatibility `createSession` alias only for legacy injection), stores only hashes, and returns:
 
 ```json
 {
@@ -514,13 +517,15 @@ Expected: module-not-found failure.
 }
 ```
 
+Repeated successful login with the same username and `deviceId` atomically rebinds the row, invalidates both old tokens, refreshes the name/expirations, and restores a revoked session. The same `deviceId` can never be claimed by another username: the API returns HTTP 409 `mobile_device_ownership_conflict` without owner or database detail. Unexpected unique constraints and other repository failures remain HTTP 500 `server_error` through the sanitized API error boundary.
+
 `POST /refresh` rotates both tokens. `POST /revoke` and `GET /devices` require injected mobile auth middleware; revoke may target only the current username's devices.
 
 - [ ] **Step 4: Run route tests**
 
 Run: `node --test tests/mobile/mobileAuthRoutes.test.js`
 
-Expected: login, invalid login, refresh, revoke ownership, and list-device cases PASS.
+Expected: first login, lost-response same-device retry with only the second pair usable, revoked-session recovery, cross-username 409 without disclosure, unexpected unique-error sanitization, invalid login, refresh, revoke ownership, and list-device cases PASS.
 
 - [ ] **Step 5: Commit**
 

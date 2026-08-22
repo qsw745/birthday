@@ -1,35 +1,124 @@
 const { hashToken } = require('../utils/mobileTokens')
+const { MOBILE_ERROR_CODES } = require('../utils/mobileApiContract')
+
+function safeErrorMetadata(error) {
+  const metadata = {
+    name: typeof error?.name === 'string' ? error.name : 'Error',
+  }
+  if (typeof error?.code === 'string') metadata.code = error.code
+  return metadata
+}
+
+function attachRollbackFailure(primaryError, rollbackError) {
+  if (!primaryError || (typeof primaryError !== 'object' && typeof primaryError !== 'function')) {
+    return
+  }
+  try {
+    Object.defineProperty(primaryError, 'rollbackFailure', {
+      configurable: true,
+      enumerable: false,
+      value: safeErrorMetadata(rollbackError),
+    })
+  } catch {
+    // Preserve a frozen third-party error as the primary failure.
+  }
+}
+
+async function rollbackAfterFailure(connection, primaryError) {
+  try {
+    await connection.rollback()
+    return false
+  } catch (rollbackError) {
+    attachRollbackFailure(primaryError, rollbackError)
+    try {
+      if (typeof connection.destroy === 'function') connection.destroy()
+    } catch {
+      // A tainted connection must never be returned to the pool.
+    }
+    return true
+  }
+}
+
+function deviceOwnershipConflict() {
+  const error = new Error('mobile device ownership conflict')
+  error.name = 'MobileDeviceOwnershipConflictError'
+  error.code = MOBILE_ERROR_CODES.deviceOwnershipConflict
+  return error
+}
 
 function createMobileSessionRepository({ pool, now = () => new Date() }) {
   async function bindSession({ deviceId, username, deviceName, pair }) {
-    await pool.execute(
-      `INSERT INTO mobile_device_sessions (
-        device_id, username, device_name, access_token_hash, refresh_token_hash,
-        access_expires_at, refresh_expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        device_id = IF(
-          device_id = VALUES(device_id) AND username = VALUES(username),
-          device_id,
-          NULL
-        ),
-        device_name = VALUES(device_name),
-        access_token_hash = VALUES(access_token_hash),
-        refresh_token_hash = VALUES(refresh_token_hash),
-        access_expires_at = VALUES(access_expires_at),
-        refresh_expires_at = VALUES(refresh_expires_at),
-        revoked_at = NULL,
-        last_used_at = NULL`,
-      [
-        deviceId,
-        username,
-        deviceName,
-        hashToken(pair.accessToken),
-        hashToken(pair.refreshToken),
-        pair.accessExpiresAt,
-        pair.refreshExpiresAt,
-      ],
-    )
+    const connection = await pool.getConnection()
+    let destroyed = false
+    let transactionStarted = false
+    try {
+      await connection.beginTransaction()
+      transactionStarted = true
+      const [rows] = await connection.execute(
+        `SELECT username
+         FROM mobile_device_sessions
+         WHERE device_id = ?
+         FOR UPDATE`,
+        [deviceId],
+      )
+      const current = rows[0]
+      if (current && current.username !== username) throw deviceOwnershipConflict()
+
+      const accessTokenHash = hashToken(pair.accessToken)
+      const refreshTokenHash = hashToken(pair.refreshToken)
+      if (current) {
+        const [result] = await connection.execute(
+          `UPDATE mobile_device_sessions
+           SET device_name = ?,
+               access_token_hash = ?,
+               refresh_token_hash = ?,
+               access_expires_at = ?,
+               refresh_expires_at = ?,
+               revoked_at = NULL,
+               last_used_at = NULL
+           WHERE device_id = ?
+             AND username = ?`,
+          [
+            deviceName,
+            accessTokenHash,
+            refreshTokenHash,
+            pair.accessExpiresAt,
+            pair.refreshExpiresAt,
+            deviceId,
+            username,
+          ],
+        )
+        if (result.affectedRows !== 1) {
+          const error = new Error('mobile session rebind failed')
+          error.code = 'mobile_session_rebind_failed'
+          throw error
+        }
+      } else {
+        await connection.execute(
+          `INSERT INTO mobile_device_sessions (
+            device_id, username, device_name, access_token_hash, refresh_token_hash,
+            access_expires_at, refresh_expires_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            deviceId,
+            username,
+            deviceName,
+            accessTokenHash,
+            refreshTokenHash,
+            pair.accessExpiresAt,
+            pair.refreshExpiresAt,
+          ],
+        )
+      }
+
+      await connection.commit()
+      transactionStarted = false
+    } catch (error) {
+      if (transactionStarted) destroyed = await rollbackAfterFailure(connection, error)
+      throw error
+    } finally {
+      if (!destroyed) connection.release()
+    }
   }
 
   const createSession = bindSession

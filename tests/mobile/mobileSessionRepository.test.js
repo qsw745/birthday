@@ -2,6 +2,10 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 const { createMobileSessionRepository } = require('../../repositories/mobileSessionRepository')
+const {
+  StatefulMobileSessionPool,
+  sessionRow,
+} = require('../helpers/statefulMobileSessionPool')
 
 const digest = token => crypto.createHash('sha256').update(token).digest('hex')
 
@@ -53,8 +57,8 @@ const originalPair = {
   refreshExpiresAt: new Date('2027-02-17T00:00:00Z'),
 }
 
-test('createSession persists hashes and expiry timestamps, never presented tokens', async () => {
-  const pool = createPool([{ affectedRows: 1 }])
+test('createSession compatibility alias uses the transactional binding path and stores only token hashes', async () => {
+  const pool = new StatefulMobileSessionPool()
   const sessions = createMobileSessionRepository({ pool })
 
   await sessions.createSession({
@@ -64,22 +68,37 @@ test('createSession persists hashes and expiry timestamps, never presented token
     pair: originalPair,
   })
 
-  const [{ sql, params }] = pool.calls
-  assert.match(sql, /INSERT INTO mobile_device_sessions/i)
-  assert.deepEqual(params, [
-    'device-1',
-    'admin',
-    'iPhone',
-    digest(originalPair.accessToken),
-    digest(originalPair.refreshToken),
-    originalPair.accessExpiresAt,
-    originalPair.refreshExpiresAt,
+  const [stored] = pool.snapshot()
+  assert.equal(stored.device_id, 'device-1')
+  assert.equal(stored.username, 'admin')
+  assert.equal(stored.device_name, 'iPhone')
+  assert.equal(stored.access_token_hash, digest(originalPair.accessToken))
+  assert.equal(stored.refresh_token_hash, digest(originalPair.refreshToken))
+  assert.deepEqual(stored.access_expires_at, originalPair.accessExpiresAt)
+  assert.deepEqual(stored.refresh_expires_at, originalPair.refreshExpiresAt)
+  assert.deepEqual(pool.lifecycle, [
+    'getConnection',
+    'begin',
+    'select-owner-for-update',
+    'insert-session',
+    'commit',
+    'release',
   ])
-  assert.ok(params.every(value => value !== originalPair.accessToken && value !== originalPair.refreshToken))
 })
 
-test('bindSession atomically rebinds the same username and device while rejecting unique-hash cross-device collisions', async () => {
-  const pool = createPool([{ affectedRows: 2 }])
+test('bindSession revives the same owner atomically and invalidates both previous credentials', async () => {
+  const createdAt = new Date('2026-08-01T00:00:00.000Z')
+  const oldAccess = 'old-access-token'
+  const oldRefresh = 'old-refresh-token'
+  const pool = new StatefulMobileSessionPool([sessionRow({
+    deviceId: 'device-1',
+    accessToken: oldAccess,
+    refreshToken: oldRefresh,
+    deviceName: 'Old iPhone',
+    createdAt,
+    lastUsedAt: new Date('2026-08-20T12:00:00.000Z'),
+    revokedAt: new Date('2026-08-20T13:00:00.000Z'),
+  })])
   const sessions = createMobileSessionRepository({ pool })
 
   await sessions.bindSession({
@@ -89,25 +108,131 @@ test('bindSession atomically rebinds the same username and device while rejectin
     pair: originalPair,
   })
 
-  const [{ sql, params }] = pool.calls
-  assert.match(sql, /INSERT INTO mobile_device_sessions/i)
-  assert.match(sql, /ON DUPLICATE KEY UPDATE/i)
-  assert.match(sql, /device_id\s*=\s*IF\(\s*device_id\s*=\s*VALUES\(device_id\)\s+AND\s+username\s*=\s*VALUES\(username\),\s*device_id,\s*NULL\s*\)/i)
-  assert.match(sql, /device_name\s*=\s*VALUES\(device_name\)/i)
-  assert.match(sql, /access_token_hash\s*=\s*VALUES\(access_token_hash\)/i)
-  assert.match(sql, /refresh_token_hash\s*=\s*VALUES\(refresh_token_hash\)/i)
-  assert.match(sql, /access_expires_at\s*=\s*VALUES\(access_expires_at\)/i)
-  assert.match(sql, /refresh_expires_at\s*=\s*VALUES\(refresh_expires_at\)/i)
-  assert.match(sql, /revoked_at\s*=\s*NULL/i)
-  assert.match(sql, /last_used_at\s*=\s*NULL/i)
-  assert.deepEqual(params, [
-    'device-1',
-    'admin',
-    'Renamed iPhone',
-    digest(originalPair.accessToken),
-    digest(originalPair.refreshToken),
-    originalPair.accessExpiresAt,
-    originalPair.refreshExpiresAt,
+  const lookupTime = new Date('2026-08-21T00:10:00.000Z')
+  const oldAccessLookup = await sessions.findByAccessToken(oldAccess, lookupTime)
+  const oldRefreshLookup = await sessions.rotateByRefreshToken(oldRefresh, originalPair, lookupTime)
+  const newAccessLookup = await sessions.findByAccessToken(originalPair.accessToken, lookupTime)
+  const [stored] = pool.snapshot()
+  assert.equal(oldAccessLookup, null)
+  assert.equal(oldRefreshLookup, null)
+  assert.equal(newAccessLookup.device_id, 'device-1')
+  assert.equal(stored.device_id, 'device-1')
+  assert.equal(stored.username, 'admin')
+  assert.equal(stored.device_name, 'Renamed iPhone')
+  assert.equal(stored.access_token_hash, digest(originalPair.accessToken))
+  assert.equal(stored.refresh_token_hash, digest(originalPair.refreshToken))
+  assert.deepEqual(stored.access_expires_at, originalPair.accessExpiresAt)
+  assert.deepEqual(stored.refresh_expires_at, originalPair.refreshExpiresAt)
+  assert.deepEqual(stored.created_at, createdAt)
+  assert.equal(stored.revoked_at, null)
+  assert.equal(stored.last_used_at, null)
+  assert.deepEqual(pool.lifecycle.slice(0, 6), [
+    'getConnection',
+    'begin',
+    'select-owner-for-update',
+    'update-session',
+    'commit',
+    'release',
+  ])
+})
+
+test('bindSession rejects another username without changing the locked device row', async () => {
+  const initial = sessionRow({
+    deviceId: 'device-1',
+    username: 'previous-admin',
+    accessToken: 'previous-access',
+    refreshToken: 'previous-refresh',
+  })
+  const pool = new StatefulMobileSessionPool([initial])
+  const sessions = createMobileSessionRepository({ pool })
+
+  await assert.rejects(
+    sessions.bindSession({
+      deviceId: 'device-1',
+      username: 'admin',
+      deviceName: 'Takeover Attempt',
+      pair: originalPair,
+    }),
+    error => (
+      error.code === 'mobile_device_ownership_conflict'
+      && !/previous-admin|admin|token|hash/i.test(error.message)
+    ),
+  )
+
+  assert.deepEqual(pool.snapshot(), [initial])
+  assert.deepEqual(pool.lifecycle, [
+    'getConnection',
+    'begin',
+    'select-owner-for-update',
+    'rollback',
+    'release',
+  ])
+})
+
+test('bindSession lets unique token-hash collisions fail naturally and rolls back both device rows', async () => {
+  const first = sessionRow({
+    deviceId: 'device-1',
+    accessToken: 'first-access',
+    refreshToken: 'first-refresh',
+  })
+  const second = sessionRow({
+    deviceId: 'device-2',
+    accessToken: originalPair.accessToken,
+    refreshToken: originalPair.refreshToken,
+  })
+  const pool = new StatefulMobileSessionPool([first, second])
+  const before = pool.snapshot()
+  const sessions = createMobileSessionRepository({ pool })
+
+  await assert.rejects(
+    sessions.bindSession({
+      deviceId: 'device-1',
+      username: 'admin',
+      deviceName: 'Collision',
+      pair: originalPair,
+    }),
+    error => error.code === 'ER_DUP_ENTRY',
+  )
+
+  assert.deepEqual(pool.snapshot(), before)
+  assert.deepEqual(pool.lifecycle, [
+    'getConnection',
+    'begin',
+    'select-owner-for-update',
+    'update-session',
+    'rollback',
+    'release',
+  ])
+})
+
+test('bindSession destroys a tainted connection when rollback fails and keeps the primary safe error', async () => {
+  const rollbackError = Object.assign(new Error('rollback leaked private hash'), {
+    code: 'ER_ROLLBACK_PRIVATE',
+  })
+  const pool = new StatefulMobileSessionPool([sessionRow({
+    deviceId: 'device-1',
+    username: 'previous-admin',
+    accessToken: 'previous-access',
+    refreshToken: 'previous-refresh',
+  })], { rollbackError })
+  const sessions = createMobileSessionRepository({ pool })
+
+  const error = await sessions.bindSession({
+    deviceId: 'device-1',
+    username: 'admin',
+    deviceName: 'Takeover Attempt',
+    pair: originalPair,
+  }).catch(caught => caught)
+
+  assert.equal(error.code, 'mobile_device_ownership_conflict')
+  assert.doesNotMatch(error.message, /previous-admin|admin|token|hash/i)
+  assert.deepEqual(error.rollbackFailure, { name: 'Error', code: 'ER_ROLLBACK_PRIVATE' })
+  assert.deepEqual(pool.lifecycle, [
+    'getConnection',
+    'begin',
+    'select-owner-for-update',
+    'rollback',
+    'destroy',
   ])
 })
 

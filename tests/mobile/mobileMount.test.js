@@ -63,7 +63,33 @@ class ProductionPoolFake {
 
   async getConnection() {
     this.getConnectionCalls += 1
+    const pool = this
+    let stagedSession = this.session ? { ...this.session } : null
     return {
+      async execute(sql, params) {
+        pool.calls.push({ sql, params })
+        if (/SELECT username[\s\S]+WHERE device_id = \?[\s\S]+FOR UPDATE/i.test(sql)) {
+          return [[stagedSession && stagedSession.device_id === params[0]
+            ? { username: stagedSession.username }
+            : null].filter(Boolean)]
+        }
+        if (/INSERT INTO mobile_device_sessions/i.test(sql)) {
+          stagedSession = {
+            device_id: params[0],
+            username: params[1],
+            device_name: params[2],
+            access_token_hash: params[3],
+            refresh_token_hash: params[4],
+            access_expires_at: params[5],
+            refresh_expires_at: params[6],
+            created_at: NOW,
+            last_used_at: null,
+            revoked_at: null,
+          }
+          return [{ affectedRows: 1 }]
+        }
+        throw new Error(`unexpected connection execute SQL: ${sql}`)
+      },
       async query(sql) {
         if (/SET TRANSACTION ISOLATION LEVEL/i.test(sql)) return [[]]
         if (/MAX\(seq\)/i.test(sql)) return [[{ max_seq: '0' }]]
@@ -71,8 +97,10 @@ class ProductionPoolFake {
         throw new Error(`unexpected connection SQL: ${sql}`)
       },
       async beginTransaction() {},
-      async commit() {},
+      async commit() { pool.session = stagedSession },
+      async rollback() {},
       release() {},
+      destroy() {},
     }
   }
 }
@@ -148,7 +176,7 @@ test('production mobile factory is injectable and uses one bearer session path w
   assert.deepEqual(bearerSnapshot.body, { cursor: '0', birthdays: [] })
   assert.equal(cookieSnapshot.status, 401)
   assert.deepEqual(cookieSnapshot.body, { error: 'mobile_auth_required' })
-  assert.equal(pool.getConnectionCalls, 1)
+  assert.equal(pool.getConnectionCalls, 2)
   assert.ok(pool.calls.some(call => /INSERT INTO mobile_device_sessions/i.test(call.sql)))
   assert.ok(pool.calls.some(call => /WHERE access_token_hash = \?/i.test(call.sql)))
   assert.equal(pool.session.access_token_hash, digest(login.body.accessToken))
@@ -171,7 +199,7 @@ test('API router mounts the injectable production mobile factory outside cookie 
     .send({ username: 'admin', password: 'secret', deviceId: DEVICE_ID, deviceName: 'iPhone' })
 
   assert.equal(login.status, 200)
-  assert.equal(pool.calls.length, 1)
+  assert.equal(pool.calls.length, 2)
 })
 
 test('mobile docs structurally match exported routes, limits, DTO fields, and stable errors', () => {

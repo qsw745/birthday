@@ -3,6 +3,12 @@ const assert = require('node:assert/strict')
 const request = require('supertest')
 const { createTestApp } = require('../helpers/createTestApp')
 const { createMobileAuthRouter } = require('../../routes/mobileAuth')
+const { createApiErrorHandler } = require('../../middleware/apiError')
+const { createMobileSessionRepository } = require('../../repositories/mobileSessionRepository')
+const {
+  StatefulMobileSessionPool,
+  sessionRow,
+} = require('../helpers/statefulMobileSessionPool')
 
 const ADMIN_ENV = { AUTH_USERNAME: 'admin', AUTH_PASSWORD_HASH: 'stored-hash' }
 const DEVICE_ID = '11111111-1111-4111-8111-111111111111'
@@ -21,6 +27,12 @@ function createErrorApp(router) {
   app.use((error, req, res, next) => {
     res.status(503).json({ error: 'server_error' })
   })
+  return app
+}
+
+function createContractErrorApp(router, logger = { error() {} }) {
+  const app = createApp(router)
+  app.use(createApiErrorHandler({ logger }))
   return app
 }
 
@@ -118,6 +130,90 @@ test('same-device login retry uses the rebind boundary and returns a fresh usabl
       refreshToken: retry.body.refreshToken,
     },
   ])
+})
+
+test('a lost login response can be retried on the same device and only the second token pair remains usable', async () => {
+  const pool = new StatefulMobileSessionPool()
+  const sessions = createMobileSessionRepository({ pool, now: () => NOW })
+  const app = createContractErrorApp(createRouter({ sessions }))
+
+  const lostResponse = await request(app)
+    .post('/api/mobile/auth/login')
+    .send(loginPayload({ deviceName: 'First Name' }))
+  const retry = await request(app)
+    .post('/api/mobile/auth/login')
+    .send(loginPayload({ deviceName: 'Recovered Name' }))
+
+  assert.equal(lostResponse.status, 200)
+  assert.equal(retry.status, 200)
+  assert.equal(await sessions.findByAccessToken(lostResponse.body.accessToken, NOW), null)
+  assert.equal(await sessions.rotateByRefreshToken(lostResponse.body.refreshToken, {
+    accessToken: 'unused-access',
+    refreshToken: 'unused-refresh',
+    accessExpiresAt: new Date('2026-08-21T00:30:00.000Z'),
+    refreshExpiresAt: new Date('2027-02-17T00:15:00.000Z'),
+  }, NOW), null)
+  assert.equal((await sessions.findByAccessToken(retry.body.accessToken, NOW)).device_name, 'Recovered Name')
+  assert.deepEqual(await sessions.rotateByRefreshToken(retry.body.refreshToken, {
+    accessToken: 'post-recovery-access',
+    refreshToken: 'post-recovery-refresh',
+    accessExpiresAt: new Date('2026-08-21T00:30:00.000Z'),
+    refreshExpiresAt: new Date('2027-02-17T00:15:00.000Z'),
+  }, NOW), { rotated: true, deviceId: DEVICE_ID })
+})
+
+test('login reports a stable ownership conflict without exposing the existing owner', async () => {
+  const pool = new StatefulMobileSessionPool([sessionRow({
+    deviceId: DEVICE_ID,
+    username: 'previous-admin',
+    accessToken: 'previous-access',
+    refreshToken: 'previous-refresh',
+  })])
+  const sessions = createMobileSessionRepository({ pool, now: () => NOW })
+  const logs = []
+  const app = createContractErrorApp(
+    createRouter({ sessions }),
+    { error: (...args) => logs.push(args) },
+  )
+
+  const response = await request(app)
+    .post('/api/mobile/auth/login')
+    .send(loginPayload())
+
+  assert.equal(response.status, 409)
+  assert.deepEqual(response.body, { error: 'mobile_device_ownership_conflict' })
+  assert.deepEqual(logs, [[
+    'api request failed',
+    {
+      name: 'MobileDeviceOwnershipConflictError',
+      code: 'mobile_device_ownership_conflict',
+    },
+  ]])
+  assert.doesNotMatch(JSON.stringify({ body: response.body, logs }), /previous-admin|previous-access|previous-refresh/i)
+})
+
+test('login maps an unexpected unique-token error to sanitized server_error', async () => {
+  const logs = []
+  const sessions = {
+    bindSession: async () => {
+      throw Object.assign(new Error('duplicate hash=private username=previous-admin'), {
+        code: 'ER_DUP_ENTRY',
+      })
+    },
+  }
+  const app = createContractErrorApp(
+    createRouter({ sessions }),
+    { error: (...args) => logs.push(args) },
+  )
+
+  const response = await request(app)
+    .post('/api/mobile/auth/login')
+    .send(loginPayload())
+
+  assert.equal(response.status, 500)
+  assert.deepEqual(response.body, { error: 'server_error' })
+  assert.deepEqual(logs, [['api request failed', { name: 'Error', code: 'ER_DUP_ENTRY' }]])
+  assert.doesNotMatch(JSON.stringify({ body: response.body, logs }), /private|previous-admin|hash|username/i)
 })
 
 test('login returns one generic credential error and never creates a session for an unknown username or bad password', async () => {

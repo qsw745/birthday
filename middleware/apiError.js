@@ -1,4 +1,4 @@
-const { MOBILE_ERROR_CODES } = require('../utils/mobileApiContract')
+const { MOBILE_API_CONTRACT, MOBILE_ERROR_CODES } = require('../utils/mobileApiContract')
 
 const SAFE_ERROR_FIELD = /^[A-Za-z0-9_.-]{1,100}$/
 
@@ -28,6 +28,10 @@ function createApiErrorHandler({ logger = console } = {}) {
     logSafeError(logger, 'api request failed', error)
     if (error?.type === 'entity.too.large') {
       return res.status(413).json({ error: MOBILE_ERROR_CODES.payloadTooLarge })
+    }
+    if (error?.code === MOBILE_ERROR_CODES.deviceOwnershipConflict) {
+      const definition = MOBILE_API_CONTRACT.errors[error.code]
+      return res.status(definition.status).json({ error: definition.code })
     }
     return res.status(500).json({ error: MOBILE_ERROR_CODES.serverError })
   }
