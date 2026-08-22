@@ -250,6 +250,7 @@ struct BirthdayEditorView: View {
         activeOperation = nil
       case .saved(let immediateReminder):
         await model.reload()
+        Task { await model.requestSync(.localMutation) }
         guard let immediateReminder else {
           dismiss()
           return
@@ -281,6 +282,7 @@ struct BirthdayEditorView: View {
         return
       }
       await model.reload()
+      Task { await model.requestSync(.localMutation) }
       dismiss()
     }
   }

@@ -92,19 +92,27 @@ struct SettingsView: View {
       }
 
       Section("同步") {
-        HStack(alignment: .top, spacing: 12) {
-          Image(systemName: "icloud.slash")
-            .foregroundStyle(ModernAirTheme.secondaryInk)
-            .frame(width: 24)
-            .accessibilityHidden(true)
-          Text("服务器同步将在后续步骤启用")
-            .foregroundStyle(ModernAirTheme.secondaryInk)
+        Button {
+          Task { await model.requestSync(.manual) }
+        } label: {
+          HStack(spacing: 9) {
+            if model.isManualSyncing {
+              ProgressView()
+                .accessibilityHidden(true)
+            } else {
+              Image(systemName: "arrow.triangle.2.circlepath")
+                .accessibilityHidden(true)
+            }
+            Text(model.isManualSyncing ? "正在同步" : "立即同步")
+          }
+          .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
         }
-        .frame(minHeight: 44)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("服务器同步将在后续步骤启用")
-        .accessibilityValue("不可用")
-        .accessibilityAddTraits(.isStaticText)
+        .disabled(model.isManualSyncing)
+
+        Text(syncDetail)
+          .font(.caption)
+          .foregroundStyle(ModernAirTheme.secondaryInk)
+          .fixedSize(horizontal: false, vertical: true)
       }
     }
     .listStyle(.insetGrouped)
@@ -172,6 +180,21 @@ struct SettingsView: View {
     }
     .frame(minHeight: 44)
     .accessibilityElement(children: .combine)
+  }
+
+  private var syncDetail: String {
+    switch model.syncStatus {
+    case .idle:
+      "绑定服务器后可在此同步。后台刷新只是系统提供的机会，本地提醒不依赖它。"
+    case .syncing:
+      "正在与服务器同步；本地生日资料和已安排的提醒保持可用。"
+    case .synchronized(let summary):
+      "最近同步：上传 \(summary.uploaded) 条，下载 \(summary.downloaded) 条，冲突 \(summary.conflicts) 条。"
+    case .unbound:
+      "尚未绑定服务器，因此没有发出同步请求。"
+    case .failed:
+      "服务器同步未完成；本地生日资料和已安排的提醒没有被回退。"
+    }
   }
 
   private var notificationStatusTitle: String {

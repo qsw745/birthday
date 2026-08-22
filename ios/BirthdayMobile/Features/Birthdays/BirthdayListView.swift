@@ -214,6 +214,7 @@ struct BirthdayListView: View {
         try await model.store.softDelete(id: record.id, now: .now)
         deleteRetryRecord = nil
         await model.reload()
+        Task { await model.requestSync(.localMutation) }
       } catch {
         deleteRetryRecord = record
         isShowingDeleteError = true

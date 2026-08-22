@@ -6,6 +6,12 @@ import UIKit
 
 @main
 struct BirthdayMobileApp: App {
+  init() {
+    let bootstrap = UITestBootstrap()
+    guard !bootstrap.isEnabled && !bootstrap.networkDisabled else { return }
+    AppSyncRuntime.shared.registerBackgroundRefresh()
+  }
+
   var body: some Scene {
     WindowGroup {
       BirthdayAppBootstrapView()
@@ -20,6 +26,7 @@ private struct BirthdayAppBootstrapView: View {
   @State private var model: AppModel?
   @State private var initializationError: String?
   @State private var initializationAttempt = 0
+  @State private var networkRestorationMonitor: NetworkRestorationMonitor?
   private let uiTestBootstrap = UITestBootstrap()
 
   var body: some View {
@@ -37,12 +44,21 @@ private struct BirthdayAppBootstrapView: View {
           }
         }
         .modelContainer(container)
-        .task { await model.reload() }
+        .task {
+          await model.reload()
+          configureSyncRuntime(for: model)
+          guard syncRuntimeEnabled else { return }
+          await model.requestSync(.appLaunch)
+        }
         .onChange(of: scenePhase) { _, newPhase in
           switch newPhase {
           case .active:
             model.refreshAuthenticationCapability()
-            Task { await model.reload() }
+            Task {
+              await model.reload()
+              guard syncRuntimeEnabled else { return }
+              await model.requestSync(.foreground)
+            }
           case .background:
             model.lockForBackground()
           case .inactive:
@@ -101,6 +117,23 @@ private struct BirthdayAppBootstrapView: View {
       container = nil
       model = nil
       initializationError = "无法打开本地生日资料。请确认设备有可用存储空间后重新尝试；若问题持续，请重新打开应用。"
+    }
+  }
+
+  private var syncRuntimeEnabled: Bool {
+    !uiTestBootstrap.isEnabled && !uiTestBootstrap.networkDisabled
+  }
+
+  private func configureSyncRuntime(for model: AppModel) {
+    guard syncRuntimeEnabled else { return }
+    AppSyncRuntime.shared.install(model: model)
+
+    if networkRestorationMonitor == nil {
+      let monitor = NetworkRestorationMonitor {
+        Task { await model.requestSync(.networkRestored) }
+      }
+      networkRestorationMonitor = monitor
+      monitor.start()
     }
   }
 
@@ -166,20 +199,32 @@ private struct BirthdayAppBootstrapView: View {
     let mobileAPI = MobileAPIClient(
       baseURL: URL(string: "https://qisw.top/api/mobile")!
     )
-    return AppModel(
-      store: BirthdayStore(modelContainer: container),
+    let store = BirthdayStore(modelContainer: container)
+    let notificationScheduler = UserNotificationScheduler(center: notificationClient)
+    let reminderPlanner = ReminderPlanner()
+    let model = AppModel(
+      store: store,
       preferences: .standard,
       authenticator: LocalAuthenticationService(),
       serverDeviceBinder: ServerDeviceBinder(api: mobileAPI, credentials: credentials),
-      notificationScheduler: UserNotificationScheduler(
-        center: notificationClient
-      ),
+      notificationScheduler: notificationScheduler,
       oneShotNotificationScheduler: OneShotNotificationScheduler(center: notificationClient),
-      reminderPlanner: ReminderPlanner(),
+      reminderPlanner: reminderPlanner,
       requestNotificationAuthorization: {
         try await notificationCenter.requestAuthorization(options: [.alert, .sound, .badge])
       }
     )
+    let syncEngine = SyncEngine(api: mobileAPI, store: store, credentials: credentials)
+    model.configureSyncCoordinator(
+      SyncCoordinator(
+        syncEngine: syncEngine,
+        store: store,
+        credentials: credentials,
+        notificationScheduler: notificationScheduler,
+        reminderPlanner: reminderPlanner
+      )
+    )
+    return model
   }
 
   private func seedSnapshotImportPreview(in container: ModelContainer) throws {

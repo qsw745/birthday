@@ -162,6 +162,14 @@ final class AppModel {
     case completed
   }
 
+  enum SyncStatus: Equatable {
+    case idle
+    case syncing
+    case synchronized(SyncSummary)
+    case unbound
+    case failed
+  }
+
   private enum PreferenceKey {
     static let hasCompletedOnboarding = "top.qisw.birthday.hasCompletedOnboarding"
     static let lockEnabled = "top.qisw.birthday.lockEnabled"
@@ -194,6 +202,8 @@ final class AppModel {
     coverageEnd: nil,
     errorCategory: nil
   )
+  private(set) var syncStatus: SyncStatus = .idle
+  private(set) var isManualSyncing = false
 
   let store: BirthdayStore
   let oneShotNotificationScheduler: any OneShotNotificationScheduling
@@ -211,6 +221,7 @@ final class AppModel {
   private let timeZone: @Sendable () -> TimeZone
   private let conflictResolver: ConflictResolver
   private let reminderRebuildCoordinator: ReminderRebuildCoordinator
+  private var syncCoordinator: SyncCoordinator?
 
   var isLoading: Bool {
     loadState == .loading
@@ -706,6 +717,53 @@ final class AppModel {
   func rebuildReminders() async {
     let generation = nextReminderGeneration()
     await rebuildFreshSnapshot(generation: generation, reportReadFailure: true)
+  }
+
+  func configureSyncCoordinator(_ coordinator: SyncCoordinator) {
+    syncCoordinator = coordinator
+  }
+
+  @discardableResult
+  func performSync(_ trigger: SyncTrigger) async throws -> SyncRequestOutcome {
+    guard let syncCoordinator else {
+      syncStatus = .unbound
+      return .unbound
+    }
+
+    let outcome = try await syncCoordinator.request(trigger)
+    switch outcome {
+    case .completed(let summary, let activeBirthdays, let health):
+      records = activeBirthdays
+      notificationHealth = health
+      syncStatus = .synchronized(summary)
+      await reloadConflicts()
+    case .unbound:
+      syncStatus = .unbound
+    case .coalesced:
+      break
+    }
+    return outcome
+  }
+
+  func requestSync(_ trigger: SyncTrigger) async {
+    guard trigger != .manual || !isManualSyncing else { return }
+    if trigger == .manual {
+      isManualSyncing = true
+    }
+    defer {
+      if trigger == .manual {
+        isManualSyncing = false
+      }
+    }
+
+    syncStatus = .syncing
+    do {
+      _ = try await performSync(trigger)
+    } catch is CancellationError {
+      syncStatus = .idle
+    } catch {
+      syncStatus = .failed
+    }
   }
 
   private func rebuildFreshSnapshot(generation: UInt64, reportReadFailure: Bool) async {
