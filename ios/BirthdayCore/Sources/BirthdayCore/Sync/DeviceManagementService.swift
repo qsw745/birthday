@@ -32,6 +32,11 @@ public struct ManagedDevice: Equatable, Identifiable, Sendable {
   }
 }
 
+public struct DeviceBindingReservation: Equatable, Sendable {
+  fileprivate let serviceID: UUID
+  fileprivate let ownerID: UUID
+}
+
 /// Owns destructive device operations and keeps their network/Keychain boundary explicit.
 public actor DeviceManagementService {
   public static let localUnlinkWarning = "服务器可能仍保留此设备，可在重新绑定后撤销"
@@ -39,7 +44,9 @@ public actor DeviceManagementService {
   private let api: any MobileAPI
   private let credentials: DeviceCredentialStore
   private let remoteAccessGate: RemoteSyncAccessGate
+  private let serviceID = UUID()
   private var operationInProgress = false
+  private var bindingReservation: DeviceBindingReservation?
   private enum UnlinkPauseState: Equatable {
     case idle
     case revoking(RemoteSyncPauseToken)
@@ -121,6 +128,38 @@ public actor DeviceManagementService {
     }
   }
 
+  public func performBinding(
+    using binder: any ServerDeviceBinding,
+    username: String,
+    password: String,
+    deviceName: String
+  ) async throws {
+    let reservation = try reserveBinding()
+    do {
+      try await binder.bind(username: username, password: password, deviceName: deviceName)
+      try await resumeAfterBinding(reservation)
+    } catch {
+      cancelBinding(reservation)
+      throw error
+    }
+  }
+
+  public func reserveBinding() throws -> DeviceBindingReservation {
+    guard
+      !operationInProgress,
+      bindingReservation == nil,
+      bindingAllowedForCurrentUnlinkState
+    else { throw DeviceManagementError.operationInProgress }
+    let reservation = DeviceBindingReservation(serviceID: serviceID, ownerID: UUID())
+    bindingReservation = reservation
+    return reservation
+  }
+
+  public func cancelBinding(_ reservation: DeviceBindingReservation) {
+    guard bindingReservation == reservation else { return }
+    bindingReservation = nil
+  }
+
   public func beginUnlinkCurrent() async throws -> UnlinkOutcome {
     try beginOperation()
     defer { operationInProgress = false }
@@ -184,7 +223,9 @@ public actor DeviceManagementService {
   }
 
   public func confirmLocalUnlink() throws {
-    guard !operationInProgress else { throw DeviceManagementError.operationInProgress }
+    guard !operationInProgress, bindingReservation == nil else {
+      throw DeviceManagementError.operationInProgress
+    }
     operationInProgress = true
     defer { operationInProgress = false }
     let token: RemoteSyncPauseToken
@@ -235,7 +276,14 @@ public actor DeviceManagementService {
     await pauseForRebind()
   }
 
-  public func resumeAfterBinding() async {
+  public func resumeAfterBinding(_ reservation: DeviceBindingReservation) async throws {
+    guard
+      reservation.serviceID == serviceID,
+      bindingReservation == reservation,
+      !operationInProgress,
+      bindingAllowedForCurrentUnlinkState
+    else { throw DeviceManagementError.operationInProgress }
+    bindingReservation = nil
     let lifecycleToken = lifecyclePauseToken
     lifecyclePauseToken = nil
     let unlinkToken = unlinkPauseState.token
@@ -253,6 +301,7 @@ public actor DeviceManagementService {
       throw DeviceManagementError.revokedSessionRequiresLocalCleanup
     }
     guard !operationInProgress else { throw DeviceManagementError.operationInProgress }
+    guard bindingReservation == nil else { throw DeviceManagementError.operationInProgress }
     guard unlinkPauseState == .idle else { throw DeviceManagementError.operationInProgress }
     operationInProgress = true
   }
@@ -271,5 +320,14 @@ public actor DeviceManagementService {
     guard unlinkPauseState.token == token else { return }
     unlinkPauseState = .idle
     _ = await remoteAccessGate.resume(after: token)
+  }
+
+  private var bindingAllowedForCurrentUnlinkState: Bool {
+    switch unlinkPauseState {
+    case .idle, .rebindRequired, .stopped:
+      true
+    case .revoking, .awaitingConfirmation, .pendingCleanup:
+      false
+    }
   }
 }

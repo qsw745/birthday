@@ -263,7 +263,8 @@ import Testing
   }
   #expect(await probe.events().isEmpty)
 
-  await service.resumeAfterBinding()
+  let binding = try await service.reserveBinding()
+  try await service.resumeAfterBinding(binding)
   #expect(try await coordinator.request(.foreground).summary == syncTriggerSummary)
 }
 

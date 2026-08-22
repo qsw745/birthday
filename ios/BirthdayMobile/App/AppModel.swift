@@ -225,6 +225,11 @@ final class AppModel {
     pendingLocalCleanup == .transportUnknown
   }
 
+  var isServerBindingBlocked: Bool {
+    isManagingDevice || pendingUnlinkLifecycleGeneration != nil || pendingLocalCleanup != nil
+      || serverBindingState == .binding
+  }
+
   let store: BirthdayStore
   let oneShotNotificationScheduler: any OneShotNotificationScheduling
 
@@ -465,7 +470,7 @@ final class AppModel {
 
   @discardableResult
   func bindServer(username: String, password: String, deviceName: String) async -> Bool {
-    guard serverBindingState != .binding else { return false }
+    guard !isServerBindingBlocked else { return false }
 
     let normalizedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
     let normalizedDeviceName = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -484,13 +489,21 @@ final class AppModel {
 
     serverBindingState = .binding
     do {
-      try await serverDeviceBinder.bind(
-        username: normalizedUsername,
-        password: password,
-        deviceName: normalizedDeviceName
-      )
+      if let deviceManagementService {
+        try await deviceManagementService.performBinding(
+          using: serverDeviceBinder,
+          username: normalizedUsername,
+          password: password,
+          deviceName: normalizedDeviceName
+        )
+      } else {
+        try await serverDeviceBinder.bind(
+          username: normalizedUsername,
+          password: password,
+          deviceName: normalizedDeviceName
+        )
+      }
       if syncCoordinator != nil {
-        await deviceManagementService?.resumeAfterBinding()
         syncPresentationReducer.bind()
         pendingLocalCleanup = nil
         pendingUnlinkLifecycleGeneration = nil
@@ -666,6 +679,9 @@ final class AppModel {
     if error is ServerDeviceBindingError {
       return "服务器返回的数据无法验证，本地功能仍可使用。"
     }
+    if error as? DeviceManagementError == .operationInProgress {
+      return "正在处理设备或停止同步，请完成当前操作后再绑定。"
+    }
     if error is DeviceCredentialStoreError || error is KeychainError {
       return "无法安全读取或保存同步凭据，本地功能仍可使用。"
     }
@@ -823,6 +839,7 @@ final class AppModel {
   func beginStopSync() async -> UnlinkOutcome? {
     guard
       !isManagingDevice,
+      serverBindingState != .binding,
       pendingUnlinkLifecycleGeneration == nil,
       let deviceManagementService,
       let unlinkLifecycle = syncPresentationReducer.pauseForUnlink()

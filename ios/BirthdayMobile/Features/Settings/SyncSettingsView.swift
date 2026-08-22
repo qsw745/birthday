@@ -34,7 +34,14 @@ struct SyncSettingsView: View {
             Label("绑定服务器", systemImage: "link.badge.plus")
               .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
           }
+          .disabled(model.isServerBindingBlocked)
           .accessibilityIdentifier("bindFromSettingsButton")
+          if model.isServerBindingBlocked {
+            Label("正在处理设备或停止同步，完成前无法绑定服务器。", systemImage: "hourglass")
+              .font(.footnote)
+              .foregroundStyle(ModernAirTheme.secondaryInk)
+              .accessibilityIdentifier("serverBindingBlockedMessage")
+          }
         } else {
           Button {
             Task { await model.requestSync(.manual) }
@@ -301,7 +308,8 @@ struct SyncSettingsView: View {
   }
 
   private var deviceActionsDisabled: Bool {
-    model.isManagingDevice || model.syncPresentation == .syncing
+    model.isManagingDevice || model.serverBindingState == .binding
+      || model.syncPresentation == .syncing
   }
 
   private var statusTitle: String {

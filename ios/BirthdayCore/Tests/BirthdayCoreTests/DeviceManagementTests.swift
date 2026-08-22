@@ -194,6 +194,52 @@ private actor RemoteLeaseSuspension {
   }
 }
 
+private actor DeviceBindingStub: ServerDeviceBinding {
+  enum Mode: Sendable {
+    case success
+    case suspended
+  }
+
+  private let mode: Mode
+  private let credentials: DeviceCredentialStore
+  private let savedCredentials: DeviceCredentials
+  private var requests: [(String, String)] = []
+  private var continuation: CheckedContinuation<Void, Never>?
+
+  init(
+    mode: Mode = .success,
+    credentials: DeviceCredentialStore,
+    savedCredentials: DeviceCredentials
+  ) {
+    self.mode = mode
+    self.credentials = credentials
+    self.savedCredentials = savedCredentials
+  }
+
+  func bind(username: String, password: String, deviceName: String) async throws {
+    requests.append((username, deviceName))
+    if mode == .suspended {
+      await withCheckedContinuation { continuation = $0 }
+    }
+    try credentials.save(savedCredentials)
+  }
+
+  func loadSnapshot() async throws -> SnapshotResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func waitUntilBinding() async {
+    while requests.isEmpty { await Task.yield() }
+  }
+
+  func resumeBinding() {
+    continuation?.resume()
+    continuation = nil
+  }
+
+  func requestCount() -> Int { requests.count }
+}
+
 @Suite struct DeviceManagementTests {
   private let currentID = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
   private let otherID = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
@@ -368,7 +414,8 @@ private actor RemoteLeaseSuspension {
       try await remoteAccessGate.perform { _ in true }
     }
 
-    await service.resumeAfterBinding()
+    let binding = try await service.reserveBinding()
+    try await service.resumeAfterBinding(binding)
 
     #expect(await remoteAccessGate.currentGeneration() > pausedGeneration)
     #expect(try await remoteAccessGate.perform { _ in true })
@@ -442,6 +489,177 @@ private actor RemoteLeaseSuspension {
 
     #expect(try await first.value == .unlinked)
     #expect(await api.revokeRequests.count == 1)
+  }
+
+  @Test func suspendedRevokeRejectsBindingBeforeSaveAndCannotClearALaterBinding() async throws {
+    let credentials = try makeCredentialStore()
+    let api = DeviceManagementAPI(revokeMode: .suspended)
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let service = DeviceManagementService(
+      api: api,
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+    let binder = DeviceBindingStub(
+      credentials: credentials,
+      savedCredentials: reboundCredentials()
+    )
+    let unlink = Task { try await service.beginUnlinkCurrent() }
+    while await api.revokeRequests.isEmpty { await Task.yield() }
+
+    await #expect(throws: DeviceManagementError.operationInProgress) {
+      try await service.performBinding(
+        using: binder,
+        username: "admin",
+        password: "new-password",
+        deviceName: "Rebound iPhone"
+      )
+    }
+    #expect(await binder.requestCount() == 0)
+    #expect(try credentials.load()?.accessToken == "access-current")
+    #expect(await remoteAccessGate.paused())
+
+    await api.resumeRevoke()
+    #expect(try await unlink.value == .unlinked)
+    #expect(try credentials.load() == nil)
+
+    try await service.performBinding(
+      using: binder,
+      username: "admin",
+      password: "new-password",
+      deviceName: "Rebound iPhone"
+    )
+    #expect(try credentials.load()?.accessToken == "access-rebound")
+    #expect(await remoteAccessGate.paused() == false)
+  }
+
+  @Test func suspendedBindingRejectsUnlinkUntilBindingCompletes() async throws {
+    let credentials = try makeCredentialStore()
+    let api = DeviceManagementAPI()
+    let service = DeviceManagementService(api: api, credentials: credentials)
+    let binder = DeviceBindingStub(
+      mode: .suspended,
+      credentials: credentials,
+      savedCredentials: reboundCredentials()
+    )
+    let binding = Task {
+      try await service.performBinding(
+        using: binder,
+        username: "admin",
+        password: "new-password",
+        deviceName: "Rebound iPhone"
+      )
+    }
+    await binder.waitUntilBinding()
+
+    await #expect(throws: DeviceManagementError.operationInProgress) {
+      try await service.beginUnlinkCurrent()
+    }
+    #expect(await api.revokeRequests.isEmpty)
+
+    await binder.resumeBinding()
+    try await binding.value
+    #expect(try credentials.load()?.accessToken == "access-rebound")
+
+    #expect(try await service.beginUnlinkCurrent() == .unlinked)
+    #expect(await api.revokeRequests.map(\.1) == ["access-rebound"])
+  }
+
+  @Test func suspendedBindingRejectsASecondBindingBeforeSave() async throws {
+    let credentials = try makeCredentialStore()
+    let service = DeviceManagementService(api: DeviceManagementAPI(), credentials: credentials)
+    let firstBinder = DeviceBindingStub(
+      mode: .suspended,
+      credentials: credentials,
+      savedCredentials: reboundCredentials()
+    )
+    let secondBinder = DeviceBindingStub(
+      credentials: credentials,
+      savedCredentials: DeviceCredentials(
+        deviceId: currentID,
+        accessToken: "access-second",
+        accessExpiresAt: Date(timeIntervalSince1970: 1_820_000_000),
+        refreshToken: "refresh-second",
+        refreshExpiresAt: Date(timeIntervalSince1970: 1_920_000_000),
+        username: "admin"
+      )
+    )
+    let firstBinding = Task {
+      try await service.performBinding(
+        using: firstBinder,
+        username: "admin",
+        password: "first-password",
+        deviceName: "First iPhone"
+      )
+    }
+    await firstBinder.waitUntilBinding()
+
+    await #expect(throws: DeviceManagementError.operationInProgress) {
+      try await service.performBinding(
+        using: secondBinder,
+        username: "admin",
+        password: "second-password",
+        deviceName: "Second iPhone"
+      )
+    }
+    #expect(await secondBinder.requestCount() == 0)
+
+    await firstBinder.resumeBinding()
+    try await firstBinding.value
+    #expect(try credentials.load()?.accessToken == "access-rebound")
+  }
+
+  @Test func pendingTransportConfirmationRejectsBindingBeforeSave() async throws {
+    let credentials = try makeCredentialStore()
+    let service = DeviceManagementService(
+      api: DeviceManagementAPI(revokeMode: .failure(.transport("offline"))),
+      credentials: credentials
+    )
+    let binder = DeviceBindingStub(
+      credentials: credentials,
+      savedCredentials: reboundCredentials()
+    )
+    _ = try await service.beginUnlinkCurrent()
+
+    await #expect(throws: DeviceManagementError.operationInProgress) {
+      try await service.performBinding(
+        using: binder,
+        username: "admin",
+        password: "new-password",
+        deviceName: "Rebound iPhone"
+      )
+    }
+    #expect(await binder.requestCount() == 0)
+    #expect(try credentials.load()?.accessToken == "access-current")
+  }
+
+  @Test func pendingTransportCleanupRejectsBindingBeforeSave() async throws {
+    let secure = DeleteFailingSecureTokenStore()
+    let credentials = DeviceCredentialStore(secure: secure, makeDeviceID: { self.currentID })
+    try credentials.save(makeCredentials())
+    let service = DeviceManagementService(
+      api: DeviceManagementAPI(revokeMode: .failure(.transport("offline"))),
+      credentials: credentials
+    )
+    let binder = DeviceBindingStub(
+      credentials: credentials,
+      savedCredentials: reboundCredentials()
+    )
+    _ = try await service.beginUnlinkCurrent()
+    await #expect(throws: DeviceManagementError.credentialClearFailed) {
+      try await service.confirmLocalUnlink()
+    }
+
+    await #expect(throws: DeviceManagementError.operationInProgress) {
+      try await service.performBinding(
+        using: binder,
+        username: "admin",
+        password: "new-password",
+        deviceName: "Rebound iPhone"
+      )
+    }
+    #expect(await binder.requestCount() == 0)
+    #expect(try credentials.load()?.accessToken == "access-current")
   }
 
   @Test func preCancelledUnlinkMakesNoRevokeAndLeavesCredentialsIntact() async throws {
@@ -647,6 +865,17 @@ private actor RemoteLeaseSuspension {
       refreshToken: "refresh-current",
       refreshExpiresAt: Date(timeIntervalSince1970: 1_900_000_000),
       username: username
+    )
+  }
+
+  private func reboundCredentials() -> DeviceCredentials {
+    DeviceCredentials(
+      deviceId: currentID,
+      accessToken: "access-rebound",
+      accessExpiresAt: Date(timeIntervalSince1970: 1_810_000_000),
+      refreshToken: "refresh-rebound",
+      refreshExpiresAt: Date(timeIntervalSince1970: 1_910_000_000),
+      username: "admin"
     )
   }
 

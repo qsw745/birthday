@@ -50,6 +50,14 @@ struct ServerBindingView: View {
           .accessibilityLabel("绑定失败，\(errorMessage)")
       }
 
+      if model.isServerBindingBlocked, !isBinding {
+        Label("正在处理设备或停止同步，完成后可继续绑定。", systemImage: "hourglass")
+          .font(.subheadline)
+          .foregroundStyle(ModernAirTheme.secondaryInk)
+          .fixedSize(horizontal: false, vertical: true)
+          .accessibilityIdentifier("serverBindingBlockedMessage")
+      }
+
       VStack(spacing: 12) {
         Button(action: bind) {
           HStack(spacing: 9) {
@@ -72,7 +80,7 @@ struct ServerBindingView: View {
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
         .tint(ModernAirTheme.tide)
-        .disabled(isBinding)
+        .disabled(model.isServerBindingBlocked)
         .accessibilityIdentifier("bindServerButton")
         .accessibilityHint(
           presentsSnapshotPreview
@@ -152,7 +160,7 @@ struct ServerBindingView: View {
       }
     }
     .textFieldStyle(.roundedBorder)
-    .disabled(isBinding)
+    .disabled(model.isServerBindingBlocked)
     .padding(18)
     .modernAirSurface(radius: 24)
   }
@@ -182,7 +190,7 @@ struct ServerBindingView: View {
   }
 
   private func bind() {
-    guard !isBinding else { return }
+    guard !model.isServerBindingBlocked else { return }
     focusedField = nil
 
     Task { @MainActor in
