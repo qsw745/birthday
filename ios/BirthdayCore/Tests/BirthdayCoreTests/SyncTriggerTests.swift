@@ -37,7 +37,7 @@ import Testing
   )
 
   let first = Task { try await coordinator.request(.foreground) }
-  await probe.waitForFirstPublication()
+  #expect(await probe.waitForFirstPublication())
   let second = try await coordinator.request(.manual)
   await probe.allowFirstPublication()
 
@@ -82,6 +82,42 @@ import Testing
   #expect(await probe.events() == ["sync", "load", "schedule"])
 }
 
+@Test func requestCoordinatorPublishesPlannerFailureBeforeReleasingManualRequestGate() async throws
+{
+  let probe = SyncTriggerProbe(holdFirstPublication: true)
+  let presentation = ManualSyncPresentationProbe()
+  let coordinator = makeCoordinator(
+    probe: probe,
+    reminderPlanner: ReminderPlanner(calculator: SyncTriggerFailingCalculator()),
+    publish: { outcome in
+      await presentation.publish(outcome)
+      await probe.publish(outcome)
+    }
+  )
+
+  let first = Task {
+    let outcome = try await coordinator.request(.manual)
+    await presentation.finishManualRequest()
+    return outcome
+  }
+  #expect(await probe.waitForFirstPublication())
+  #expect(await presentation.state().manualStatus == .syncing)
+  let second = try await coordinator.request(.foreground)
+  await probe.allowFirstPublication()
+  let outcome = try await first.value
+  let state = await presentation.state()
+
+  #expect(second == .coalesced)
+  #expect(outcome.summary == syncTriggerSummary)
+  #expect(outcome.activeBirthdays?.map(\.name) == ["妈妈"])
+  #expect(outcome.notificationHealth?.errorCategory == "plan_failed")
+  #expect(state.summary == syncTriggerSummary)
+  #expect(state.activeBirthdayNames == ["妈妈"])
+  #expect(state.health?.errorCategory == "plan_failed")
+  #expect(state.manualStatus == .synchronized)
+  #expect(await probe.events() == ["sync", "load", "publish"])
+}
+
 @Test func cancelledBackgroundRequestDoesNotPretendToSucceedAndReleasesGate() async throws {
   let probe = SyncTriggerProbe(holdFirstSync: true)
   let coordinator = makeCoordinator(probe: probe)
@@ -120,6 +156,92 @@ import Testing
   #expect(lifecycle.update(isActive: false) == .stopMonitor)
   #expect(lifecycle.update(isActive: false) == .none)
   #expect(lifecycle.update(isActive: true) == .startNewMonitor)
+}
+
+@Test func sceneGenerationRejectsForegroundRequestAfterAwaitWhenSceneBecomesInactive() {
+  var lifecycle = SceneSyncRequestLifecycle()
+  let activeGeneration = lifecycle.activate()
+
+  #expect(lifecycle.permits(activeGeneration))
+  lifecycle.invalidate()
+  #expect(lifecycle.permits(activeGeneration) == false)
+}
+
+@Test func sceneGenerationRejectsQueuedNetworkCallbackAfterSceneBecomesInactive() {
+  var lifecycle = SceneSyncRequestLifecycle()
+  _ = lifecycle.activate()
+  let queuedNetworkGeneration = lifecycle.currentGeneration
+
+  lifecycle.invalidate()
+
+  #expect(queuedNetworkGeneration != nil)
+  #expect(lifecycle.permits(queuedNetworkGeneration!) == false)
+}
+
+@Test
+@MainActor
+func sceneRequestAdapterStopsForegroundFlowAfterEveryAwaitBoundary() async throws {
+  for suspension in SceneSyncAdapterProbe.Suspension.allCases {
+    let probe = SceneSyncAdapterProbe(suspension: suspension)
+    let adapter = SceneSyncRequestAdapter()
+    let task = adapter.activate(
+      reload: { await probe.reload() },
+      configure: { _ in await probe.configure() },
+      request: { await probe.request("foreground") }
+    )
+
+    #expect(await probe.waitUntilSuspended())
+    adapter.invalidate()
+    await probe.resume()
+    await task.value
+    #expect(await probe.requestCount() == 0)
+
+    switch suspension {
+    case .reload:
+      #expect(await probe.events() == ["reload"])
+    case .configure:
+      #expect(await probe.events() == ["reload", "configure"])
+    }
+  }
+}
+
+@Test
+@MainActor
+func sceneRequestAdapterRejectsQueuedNetworkWorkAndAcceptsOnlyNewActiveGeneration() async throws {
+  let probe = SceneSyncAdapterProbe()
+  let adapter = SceneSyncRequestAdapter()
+  let first = adapter.activate(
+    reload: {},
+    configure: { _ in },
+    request: { await probe.request("first-foreground") }
+  )
+  let staleGeneration = try #require(adapter.currentGeneration)
+  await first.value
+
+  let staleNetwork = adapter.enqueueNetworkRestoration(for: staleGeneration) {
+    await probe.request("stale-network")
+  }
+  adapter.invalidate()
+  await staleNetwork?.value
+  #expect(await probe.requestCount(named: "stale-network") == 0)
+
+  let second = adapter.activate(
+    reload: {},
+    configure: { _ in },
+    request: { await probe.request("second-foreground") }
+  )
+  let activeGeneration = try #require(adapter.currentGeneration)
+  await second.value
+  let activeNetwork = try #require(
+    adapter.enqueueNetworkRestoration(for: activeGeneration) {
+      await probe.request("active-network")
+    })
+  await activeNetwork.value
+
+  #expect(staleGeneration != activeGeneration)
+  #expect(
+    await probe.events() == ["first-foreground", "second-foreground", "active-network"]
+  )
 }
 
 @Test func networkDisabledRuntimeUsesOfflineCompositionWithoutRemoteOrSystemTriggers() {
@@ -220,6 +342,7 @@ private let syncTriggerSummary = SyncSummary(uploaded: 2, downloaded: 3, conflic
 private enum SyncTriggerTestError: Error, Equatable {
   case syncFailed
   case notificationFailed
+  case plannerFailed
 }
 
 private struct SyncTriggerCalculator: LunarBirthdayCalculating {
@@ -233,6 +356,17 @@ private struct SyncTriggerCalculator: LunarBirthdayCalculating {
   }
 }
 
+private struct SyncTriggerFailingCalculator: LunarBirthdayCalculating {
+  func nextOccurrence(
+    of birthday: LunarBirthday,
+    reminderMinutes: Int,
+    after now: Date,
+    in timeZone: TimeZone
+  ) throws -> Date {
+    throw SyncTriggerTestError.plannerFailed
+  }
+}
+
 private actor SyncTriggerProbe {
   private var recordedEvents: [String] = []
   private var failFirstSync: Bool
@@ -241,7 +375,6 @@ private actor SyncTriggerProbe {
   private var firstSyncStarted: CheckedContinuation<Void, Never>?
   private var firstSyncResumption: CheckedContinuation<Void, Never>?
   private var holdFirstPublication = false
-  private var firstPublicationStarted: CheckedContinuation<Void, Never>?
   private var firstPublicationResumption: CheckedContinuation<Void, Never>?
 
   init(
@@ -299,8 +432,6 @@ private actor SyncTriggerProbe {
     recordedEvents.append("publish")
     if holdFirstPublication {
       holdFirstPublication = false
-      firstPublicationStarted?.resume()
-      firstPublicationStarted = nil
       await withCheckedContinuation { firstPublicationResumption = $0 }
     }
   }
@@ -315,9 +446,12 @@ private actor SyncTriggerProbe {
     firstSyncResumption = nil
   }
 
-  func waitForFirstPublication() async {
-    guard !recordedEvents.contains("publish") else { return }
-    await withCheckedContinuation { firstPublicationStarted = $0 }
+  func waitForFirstPublication() async -> Bool {
+    for _ in 0..<1_000 {
+      if recordedEvents.contains("publish") { return true }
+      try? await Task.sleep(for: .milliseconds(1))
+    }
+    return false
   }
 
   func allowFirstPublication() {
@@ -331,13 +465,14 @@ private actor SyncTriggerProbe {
 private func makeCoordinator(
   probe: SyncTriggerProbe,
   bound: Bool = true,
+  reminderPlanner: ReminderPlanner = ReminderPlanner(calculator: SyncTriggerCalculator()),
   publish: @escaping @Sendable (SyncRequestOutcome) async -> Void = { _ in }
 ) -> SyncRequestCoordinator {
   return SyncRequestCoordinator(
     isBound: { bound },
     synchronize: { try await probe.synchronize() },
     loadActiveBirthdays: { await probe.loadActiveBirthdays() },
-    planner: ReminderPlanner(calculator: SyncTriggerCalculator()),
+    planner: reminderPlanner,
     notificationScheduler: SyncTriggerNotificationScheduler(probe: probe),
     now: { syncTriggerNow },
     timeZone: { syncTriggerTimeZone },
@@ -361,4 +496,97 @@ private actor BackgroundRefreshProbe {
   }
 
   func runCount() -> Int { count }
+}
+
+private actor ManualSyncPresentationProbe {
+  struct State: Equatable {
+    var summary: SyncSummary?
+    var activeBirthdayNames: [String]
+    var health: NotificationHealth?
+    var manualStatus: ManualStatus
+  }
+
+  enum ManualStatus: Equatable {
+    case syncing
+    case synchronized
+  }
+
+  private var snapshot = State(
+    summary: nil,
+    activeBirthdayNames: [],
+    health: nil,
+    manualStatus: .syncing
+  )
+
+  func publish(_ outcome: SyncRequestOutcome) {
+    guard case .completed(let summary, let records, let health) = outcome else { return }
+    snapshot.summary = summary
+    snapshot.activeBirthdayNames = records.map(\.name)
+    snapshot.health = health
+  }
+
+  func finishManualRequest() {
+    snapshot.manualStatus = .synchronized
+  }
+
+  func state() -> State { snapshot }
+}
+
+private actor SceneSyncAdapterProbe {
+  enum Suspension: CaseIterable {
+    case reload
+    case configure
+  }
+
+  private let suspension: Suspension?
+  private var recordedEvents: [String] = []
+  private var suspended = false
+  private var resumption: CheckedContinuation<Void, Never>?
+
+  init(suspension: Suspension? = nil) {
+    self.suspension = suspension
+  }
+
+  func reload() async {
+    recordedEvents.append("reload")
+    guard suspension == .reload else { return }
+    await suspend()
+  }
+
+  func configure() async {
+    recordedEvents.append("configure")
+    guard suspension == .configure else { return }
+    await suspend()
+  }
+
+  func request(_ event: String) {
+    recordedEvents.append(event)
+  }
+
+  func waitUntilSuspended() async -> Bool {
+    for _ in 0..<1_000 {
+      if suspended { return true }
+      try? await Task.sleep(for: .milliseconds(1))
+    }
+    return false
+  }
+
+  func resume() {
+    resumption?.resume()
+    resumption = nil
+  }
+
+  func events() -> [String] { recordedEvents }
+
+  func requestCount(named name: String? = nil) -> Int {
+    recordedEvents.filter { event in
+      if let name { return event == name }
+      return event != "reload" && event != "configure"
+    }.count
+  }
+
+  private func suspend() async {
+    suspended = true
+    await withCheckedContinuation { resumption = $0 }
+  }
 }

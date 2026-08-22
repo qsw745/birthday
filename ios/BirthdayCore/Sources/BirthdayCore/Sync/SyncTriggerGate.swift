@@ -114,24 +114,25 @@ public actor SyncRequestCoordinator {
         let records = try await loadActiveBirthdays()
         try Task.checkCancellation()
 
-        let plan: ReminderPlan
+        let plan: ReminderPlan?
         do {
           plan = try planner.makePlan(records: records, now: now(), timeZone: timeZone())
         } catch {
-          return SyncRequestOutcome.completed(
-            summary,
-            records,
-            Self.failedNotificationHealth(category: "plan_failed")
-          )
+          plan = nil
         }
 
-        try Task.checkCancellation()
         let health: NotificationHealth
-        do {
-          health = try await notificationScheduler.apply(plan)
-        } catch {
-          health = Self.failedNotificationHealth(category: "schedule_failed")
+        if let plan {
+          try Task.checkCancellation()
+          do {
+            health = try await notificationScheduler.apply(plan)
+          } catch {
+            health = Self.failedNotificationHealth(category: "schedule_failed")
+          }
+        } else {
+          health = Self.failedNotificationHealth(category: "plan_failed")
         }
+
         try Task.checkCancellation()
         let outcome = SyncRequestOutcome.completed(summary, records, health)
         await publish(outcome)
@@ -194,6 +195,100 @@ public struct NetworkRestorationMonitorLifecycle: Equatable, Sendable {
     guard isMonitoring else { return .none }
     isMonitoring = false
     return .stopMonitor
+  }
+}
+
+public struct SceneSyncGeneration: Equatable, Hashable, Sendable {
+  fileprivate let value: UInt64
+}
+
+/// Makes ordinary foreground and network requests valid only for the active scene generation.
+public struct SceneSyncRequestLifecycle: Equatable, Sendable {
+  private var generation: UInt64 = 0
+  private var isActive = false
+
+  public init() {}
+
+  @discardableResult
+  public mutating func activate() -> SceneSyncGeneration {
+    generation &+= 1
+    isActive = true
+    return SceneSyncGeneration(value: generation)
+  }
+
+  public mutating func invalidate() {
+    generation &+= 1
+    isActive = false
+  }
+
+  public var currentGeneration: SceneSyncGeneration? {
+    guard isActive else { return nil }
+    return SceneSyncGeneration(value: generation)
+  }
+
+  public func permits(_ candidate: SceneSyncGeneration) -> Bool {
+    isActive && candidate.value == generation
+  }
+}
+
+/// Owns cancellable foreground/network work for one active scene generation.
+@MainActor
+public final class SceneSyncRequestAdapter {
+  private var lifecycle = SceneSyncRequestLifecycle()
+  private var foregroundTask: Task<Void, Never>?
+  private var networkTask: Task<Void, Never>?
+
+  public init() {}
+
+  public var currentGeneration: SceneSyncGeneration? {
+    lifecycle.currentGeneration
+  }
+
+  @discardableResult
+  public func activate(
+    reload: @escaping @MainActor @Sendable () async -> Void,
+    configure: @escaping @MainActor @Sendable (SceneSyncGeneration) async -> Void,
+    request: @escaping @MainActor @Sendable () async -> Void
+  ) -> Task<Void, Never> {
+    foregroundTask?.cancel()
+    networkTask?.cancel()
+    let generation = lifecycle.activate()
+    let task = Task { @MainActor [weak self] in
+      await reload()
+      guard let self, permits(generation), !Task.isCancelled else { return }
+      await configure(generation)
+      guard permits(generation), !Task.isCancelled else { return }
+      await request()
+    }
+    foregroundTask = task
+    return task
+  }
+
+  @discardableResult
+  public func enqueueNetworkRestoration(
+    for generation: SceneSyncGeneration,
+    request: @escaping @MainActor @Sendable () async -> Void
+  ) -> Task<Void, Never>? {
+    guard lifecycle.permits(generation) else { return nil }
+    networkTask?.cancel()
+    let task = Task { @MainActor [weak self] in
+      guard let self, permits(generation), !Task.isCancelled else { return }
+      await request()
+    }
+    networkTask = task
+    return task
+  }
+
+  public func invalidate() {
+    lifecycle.invalidate()
+    foregroundTask?.cancel()
+    foregroundTask = nil
+    networkTask?.cancel()
+    networkTask = nil
+  }
+
+  public func permits(_ generation: SceneSyncGeneration) -> Bool {
+    lifecycle.permits(generation)
   }
 }
 

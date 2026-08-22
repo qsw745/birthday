@@ -32,6 +32,7 @@ private struct BirthdayAppBootstrapView: View {
   @State private var initializationAttempt = 0
   @State private var networkRestorationMonitor: NetworkRestorationMonitor?
   @State private var networkMonitorLifecycle = NetworkRestorationMonitorLifecycle()
+  @State private var sceneSyncRequests = SceneSyncRequestAdapter()
   private let uiTestBootstrap = UITestBootstrap()
 
   var body: some View {
@@ -50,26 +51,26 @@ private struct BirthdayAppBootstrapView: View {
         }
         .modelContainer(container)
         .task {
-          await model.reload()
-          await configureSyncRuntime(for: model)
-          guard syncRuntimeEnabled, scenePhase == .active else { return }
-          await model.requestSync(.appLaunch)
+          guard syncRuntimeEnabled, scenePhase == .active else {
+            await model.reload()
+            return
+          }
+          startActiveSceneSync(for: model, trigger: .appLaunch)
         }
         .onChange(of: scenePhase) { _, newPhase in
           switch newPhase {
           case .active:
             model.refreshAuthenticationCapability()
-            Task {
-              await model.reload()
-              await configureSyncRuntime(for: model)
-              guard syncRuntimeEnabled else { return }
-              await model.requestSync(.foreground)
+            if syncRuntimeEnabled {
+              startActiveSceneSync(for: model, trigger: .foreground)
+            } else {
+              Task { await model.reload() }
             }
           case .background:
-            stopNetworkRestorationMonitoring()
+            deactivateSceneSyncRuntime()
             model.lockForBackground()
           case .inactive:
-            stopNetworkRestorationMonitoring()
+            deactivateSceneSyncRuntime()
           @unknown default:
             break
           }
@@ -138,16 +139,37 @@ private struct BirthdayAppBootstrapView: View {
     )
   }
 
-  private func configureSyncRuntime(for model: AppModel) async {
-    guard syncRuntimeEnabled else { return }
-    await AppSyncRuntime.shared.install(model: model)
+  private func startActiveSceneSync(for model: AppModel, trigger: SyncTrigger) {
+    stopNetworkRestorationMonitoring()
+    sceneSyncRequests.activate(
+      reload: { await model.reload() },
+      configure: { generation in
+        await configureSyncRuntime(for: model, generation: generation)
+      },
+      request: { await model.requestSync(trigger) }
+    )
+  }
 
-    switch networkMonitorLifecycle.update(isActive: scenePhase == .active) {
+  private func configureSyncRuntime(
+    for model: AppModel,
+    generation: SceneSyncGeneration
+  ) async {
+    guard
+      syncRuntimeEnabled,
+      sceneSyncRequests.permits(generation),
+      !Task.isCancelled
+    else { return }
+    await AppSyncRuntime.shared.install(model: model)
+    guard sceneSyncRequests.permits(generation), !Task.isCancelled else { return }
+
+    switch networkMonitorLifecycle.update(isActive: true) {
     case .none:
       break
     case .startNewMonitor:
       let monitor = NetworkRestorationMonitor {
-        Task { await model.requestSync(.networkRestored) }
+        sceneSyncRequests.enqueueNetworkRestoration(for: generation) {
+          await model.requestSync(.networkRestored)
+        }
       }
       networkRestorationMonitor = monitor
       monitor.start()
@@ -157,9 +179,13 @@ private struct BirthdayAppBootstrapView: View {
     }
   }
 
+  private func deactivateSceneSyncRuntime() {
+    sceneSyncRequests.invalidate()
+    stopNetworkRestorationMonitoring()
+  }
+
   private func stopNetworkRestorationMonitoring() {
-    guard syncRuntimeEnabled else { return }
-    guard networkMonitorLifecycle.update(isActive: false) == .stopMonitor else { return }
+    _ = networkMonitorLifecycle.update(isActive: false)
     networkRestorationMonitor?.stop()
     networkRestorationMonitor = nil
   }
