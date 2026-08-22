@@ -51,11 +51,18 @@ private struct BirthdayAppBootstrapView: View {
         }
         .modelContainer(container)
         .task {
-          guard syncRuntimeEnabled, scenePhase == .active else {
-            await model.reload()
-            return
-          }
-          startActiveSceneSync(for: model, trigger: .appLaunch)
+          await SyncRootRuntimeBootstrapper(policy: syncRuntimePolicy).bootstrap(
+            reload: { await model.reload() },
+            installRuntime: { await AppSyncRuntime.shared.install(model: model) },
+            sceneIsActive: { scenePhase == .active },
+            activateOrdinaryTriggers: {
+              startActiveSceneSync(
+                for: model,
+                trigger: .appLaunch,
+                reloadBeforeRequest: false
+              )
+            }
+          )
         }
         .onChange(of: scenePhase) { _, newPhase in
           switch newPhase {
@@ -139,28 +146,32 @@ private struct BirthdayAppBootstrapView: View {
     )
   }
 
-  private func startActiveSceneSync(for model: AppModel, trigger: SyncTrigger) {
+  private func startActiveSceneSync(
+    for model: AppModel,
+    trigger: SyncTrigger,
+    reloadBeforeRequest: Bool = true
+  ) {
     stopNetworkRestorationMonitoring()
     sceneSyncRequests.activate(
-      reload: { await model.reload() },
+      reload: {
+        if reloadBeforeRequest { await model.reload() }
+      },
       configure: { generation in
-        await configureSyncRuntime(for: model, generation: generation)
+        configureOrdinarySyncTriggers(for: model, generation: generation)
       },
       request: { await model.requestSync(trigger) }
     )
   }
 
-  private func configureSyncRuntime(
+  private func configureOrdinarySyncTriggers(
     for model: AppModel,
     generation: SceneSyncGeneration
-  ) async {
+  ) {
     guard
       syncRuntimeEnabled,
       sceneSyncRequests.permits(generation),
       !Task.isCancelled
     else { return }
-    await AppSyncRuntime.shared.install(model: model)
-    guard sceneSyncRequests.permits(generation), !Task.isCancelled else { return }
 
     switch networkMonitorLifecycle.update(isActive: true) {
     case .none:

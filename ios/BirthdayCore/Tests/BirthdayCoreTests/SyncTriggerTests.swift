@@ -256,6 +256,93 @@ func sceneRequestAdapterRejectsQueuedNetworkWorkAndAcceptsOnlyNewActiveGeneratio
   #expect(enabled.allowsSystemSyncTriggers)
 }
 
+@Test
+@MainActor
+func coldBackgroundRootBootstrapMakesBackgroundRuntimeReadyWithoutOrdinaryTriggers() async {
+  let readiness = BackgroundRefreshReadiness()
+  let runner = BackgroundRefreshRunner()
+  let backgroundProbe = BackgroundRefreshProbe()
+  let bootstrapProbe = RootSyncBootstrapProbe()
+  let backgroundWork = Task {
+    await runner.run(readiness: readiness) {
+      await backgroundProbe.recordRun()
+      return .outcome(.unbound)
+    }
+  }
+  let bootstrapper = SyncRootRuntimeBootstrapper(
+    policy: SyncRuntimeCompositionPolicy(isUITesting: false, networkDisabled: false)
+  )
+
+  await bootstrapper.bootstrap(
+    reload: { bootstrapProbe.reload() },
+    installRuntime: {
+      bootstrapProbe.installRuntime()
+      await readiness.markReady()
+    },
+    sceneIsActive: { false },
+    activateOrdinaryTriggers: { bootstrapProbe.activateOrdinaryTriggers() }
+  )
+
+  let backgroundDidRun = await backgroundProbe.waitForRun()
+  #expect(backgroundDidRun)
+  if !backgroundDidRun { backgroundWork.cancel() }
+  #expect(await backgroundWork.value)
+  #expect(bootstrapProbe.events == ["reload", "install-runtime"])
+  #expect(bootstrapProbe.monitorStartCount == 0)
+  #expect(bootstrapProbe.foregroundRequestCount == 0)
+  #expect(bootstrapProbe.networkRequestCount == 0)
+}
+
+@Test
+@MainActor
+func rootBootstrapKeepsRemoteRuntimeOutOfOfflineCompositions() async {
+  for policy in [
+    SyncRuntimeCompositionPolicy(isUITesting: true, networkDisabled: true),
+    SyncRuntimeCompositionPolicy(isUITesting: false, networkDisabled: true),
+  ] {
+    let probe = RootSyncBootstrapProbe()
+    let bootstrapper = SyncRootRuntimeBootstrapper(policy: policy)
+
+    await bootstrapper.bootstrap(
+      reload: { probe.reload() },
+      installRuntime: { probe.installRuntime() },
+      sceneIsActive: { true },
+      activateOrdinaryTriggers: { probe.activateOrdinaryTriggers() }
+    )
+
+    #expect(probe.events == ["reload"])
+    #expect(probe.installRuntimeCount == 0)
+    #expect(probe.monitorStartCount == 0)
+    #expect(probe.foregroundRequestCount == 0)
+    #expect(probe.networkRequestCount == 0)
+  }
+}
+
+@Test
+@MainActor
+func activeRootBootstrapInstallsRuntimeBeforeActivatingOrdinaryTriggers() async {
+  let probe = RootSyncBootstrapProbe()
+  let bootstrapper = SyncRootRuntimeBootstrapper(
+    policy: SyncRuntimeCompositionPolicy(isUITesting: false, networkDisabled: false)
+  )
+
+  await bootstrapper.bootstrap(
+    reload: { probe.reload() },
+    installRuntime: { probe.installRuntime() },
+    sceneIsActive: { true },
+    activateOrdinaryTriggers: { probe.activateOrdinaryTriggers() }
+  )
+
+  #expect(
+    probe.events == [
+      "reload", "install-runtime", "start-monitor", "foreground-request",
+    ])
+  #expect(probe.installRuntimeCount == 1)
+  #expect(probe.monitorStartCount == 1)
+  #expect(probe.foregroundRequestCount == 1)
+  #expect(probe.networkRequestCount == 0)
+}
+
 @Test func backgroundRefreshPolicyIsOpportunisticAndSixHoursOut() {
   let now = Date(timeIntervalSince1970: 1_800_000_000)
   let policy = BackgroundRefreshPolicy()
@@ -496,6 +583,39 @@ private actor BackgroundRefreshProbe {
   }
 
   func runCount() -> Int { count }
+
+  func waitForRun() async -> Bool {
+    for _ in 0..<1_000 {
+      if count > 0 { return true }
+      try? await Task.sleep(for: .milliseconds(1))
+    }
+    return false
+  }
+}
+
+@MainActor
+private final class RootSyncBootstrapProbe {
+  private(set) var events: [String] = []
+  private(set) var installRuntimeCount = 0
+  private(set) var monitorStartCount = 0
+  private(set) var foregroundRequestCount = 0
+  private(set) var networkRequestCount = 0
+
+  func reload() {
+    events.append("reload")
+  }
+
+  func installRuntime() {
+    installRuntimeCount += 1
+    events.append("install-runtime")
+  }
+
+  func activateOrdinaryTriggers() {
+    monitorStartCount += 1
+    events.append("start-monitor")
+    foregroundRequestCount += 1
+    events.append("foreground-request")
+  }
 }
 
 private actor ManualSyncPresentationProbe {

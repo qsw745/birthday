@@ -309,6 +309,29 @@ public struct SyncRuntimeCompositionPolicy: Equatable, Sendable {
   public var allowsSystemSyncTriggers: Bool { mode == .networked }
 }
 
+/// Installs the persistent background runtime after local bootstrap, independently of scene state.
+@MainActor
+public struct SyncRootRuntimeBootstrapper {
+  private let policy: SyncRuntimeCompositionPolicy
+
+  public init(policy: SyncRuntimeCompositionPolicy) {
+    self.policy = policy
+  }
+
+  public func bootstrap(
+    reload: @escaping @MainActor @Sendable () async -> Void,
+    installRuntime: @escaping @MainActor @Sendable () async -> Void,
+    sceneIsActive: @escaping @MainActor @Sendable () -> Bool,
+    activateOrdinaryTriggers: @escaping @MainActor @Sendable () -> Void
+  ) async {
+    await reload()
+    guard policy.allowsRemoteSyncComposition else { return }
+    await installRuntime()
+    guard sceneIsActive() else { return }
+    activateOrdinaryTriggers()
+  }
+}
+
 /// Background refresh is an opportunity requested after six hours, never a deadline.
 public struct BackgroundRefreshPolicy: Equatable, Sendable {
   public static let delay: TimeInterval = 6 * 60 * 60
