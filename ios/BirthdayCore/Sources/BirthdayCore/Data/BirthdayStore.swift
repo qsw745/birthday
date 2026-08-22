@@ -711,11 +711,11 @@ public actor BirthdayStore: ModelActor {
         throw BirthdayStoreError.pushResultEntityMismatch
       }
       if let sentOperation = sent[result.operationId] {
-        guard sentOperation.entityId == operation.entityId, sentOperation.type == operationType
-        else {
+        guard sentOperation.entityId == operation.entityId else {
           throw BirthdayStoreError.pushResultEntityMismatch
         }
       }
+      let sentOperationType = sent[result.operationId]?.type ?? operationType
 
       let serverRecord: APIBirthday
       switch result.status {
@@ -723,10 +723,10 @@ public actor BirthdayStore: ModelActor {
         guard let record = result.record, record.id == operation.entityId else {
           throw BirthdayStoreError.pushResultEntityMismatch
         }
-        if operationType == .upsert,
-          record.deletedAt != nil
-            || operationType == .delete, record.deletedAt == nil
-        {
+        let tombstoneMismatch =
+          (sentOperationType == .upsert && record.deletedAt != nil)
+          || (sentOperationType == .delete && record.deletedAt == nil)
+        if tombstoneMismatch {
           throw BirthdayStoreError.pushResultEntityMismatch
         }
         serverRecord = record
