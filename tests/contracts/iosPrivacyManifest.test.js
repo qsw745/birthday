@@ -33,9 +33,11 @@ test('iOS privacy manifest declares tracking, collected data, and required-reaso
   const expectedDataTypes = [
     'NSPrivacyCollectedDataTypeDeviceID',
     'NSPrivacyCollectedDataTypeEmailAddress',
+    'NSPrivacyCollectedDataTypeEmailsOrTextMessages',
     'NSPrivacyCollectedDataTypeName',
     'NSPrivacyCollectedDataTypeOtherDataTypes',
     'NSPrivacyCollectedDataTypeOtherUserContent',
+    'NSPrivacyCollectedDataTypeProductInteraction',
     'NSPrivacyCollectedDataTypeUserID',
   ]
   const declarations = manifest.NSPrivacyCollectedDataTypes
