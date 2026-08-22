@@ -57,7 +57,9 @@ private struct BirthdayAppBootstrapView: View {
         .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in
           Task { await model.reload() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in
+        .onReceive(
+          NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)
+        ) { _ in
           Task { await model.reload() }
         }
       } else if let initializationError {
@@ -169,7 +171,8 @@ private struct UITestOneShotNotificationScheduler: OneShotNotificationScheduling
 
 private struct UITestNotificationScheduler: NotificationScheduling {
   func apply(_ plan: ReminderPlan) async throws -> NotificationHealth {
-    let scheduledCount = plan.birthdayNotifications.count
+    let scheduledCount =
+      plan.birthdayNotifications.count
       + (plan.maintenanceNotification == nil ? 0 : 1)
     return NotificationHealth(
       state: .scheduled,

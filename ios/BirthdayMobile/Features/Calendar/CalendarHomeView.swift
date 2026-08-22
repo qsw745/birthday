@@ -1,7 +1,6 @@
+import BirthdayCore
 import SwiftData
 import SwiftUI
-
-import BirthdayCore
 
 struct CalendarHomeView: View {
   @Bindable var model: AppModel
@@ -117,11 +116,13 @@ struct CalendarHomeView: View {
     monthOffset: Int
   ) -> some View {
     Button {
-      guard let nextMonth = calendar.date(
-        byAdding: .month,
-        value: monthOffset,
-        to: projection.monthStart
-      ) else { return }
+      guard
+        let nextMonth = calendar.date(
+          byAdding: .month,
+          value: monthOffset,
+          to: projection.monthStart
+        )
+      else { return }
       model.selectedMonth = nextMonth
     } label: {
       Image(systemName: systemImage)
@@ -375,11 +376,11 @@ struct CalendarHomeView: View {
 
     let weekday = calendar.component(.weekday, from: projection.monthStart)
     let leadingEmptyCount = (weekday + 5) % 7
-    var cells = Array<Int?>(repeating: nil, count: leadingEmptyCount)
+    var cells = [Int?](repeating: nil, count: leadingEmptyCount)
     cells.append(contentsOf: dayRange.map(Optional.some))
 
     let trailingEmptyCount = (7 - (cells.count % 7)) % 7
-    cells.append(contentsOf: Array<Int?>(repeating: nil, count: trailingEmptyCount))
+    cells.append(contentsOf: [Int?](repeating: nil, count: trailingEmptyCount))
     return cells
   }
 
@@ -463,7 +464,9 @@ struct CalendarHomeView: View {
       "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
       "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十",
     ]
-    let month = months.indices.contains(birthday.month - 1) ? months[birthday.month - 1] : "第\(birthday.month)"
+    let month =
+      months.indices.contains(birthday.month - 1)
+      ? months[birthday.month - 1] : "第\(birthday.month)"
     let day = days.indices.contains(birthday.day - 1) ? days[birthday.day - 1] : "第\(birthday.day)日"
     return "\(birthday.isLeapMonth ? "闰" : "")\(month)月\(day)"
   }
