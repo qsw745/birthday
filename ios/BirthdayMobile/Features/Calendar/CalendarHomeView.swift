@@ -493,6 +493,7 @@ private struct CalendarHomePreviewHost: View {
       for: BirthdayEntity.self,
       SyncOperationEntity.self,
       SyncMetadataEntity.self,
+      SyncConflictEntity.self,
       configurations: configuration
     )
     self.container = container

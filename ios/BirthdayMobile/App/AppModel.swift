@@ -128,6 +128,7 @@ final class AppModel {
   enum Tab: Hashable {
     case calendar
     case birthdays
+    case conflicts
     case settings
   }
 
@@ -183,6 +184,9 @@ final class AppModel {
   private(set) var snapshotImportPreview: SnapshotImportPreview?
   private(set) var snapshotImportErrorMessage: String?
   private(set) var snapshotDuplicateDecisions: [DuplicateCandidate.ID: DuplicateDecision] = [:]
+  private(set) var conflicts: [ResolvableSyncConflict] = []
+  private(set) var conflictErrorMessage: String?
+  private(set) var resolvingConflictID: UUID?
   private(set) var isRequestingNotificationAuthorization = false
   private(set) var notificationHealth = NotificationHealth(
     state: .notRequested,
@@ -205,6 +209,7 @@ final class AppModel {
   private let snapshotRecordLoader: @Sendable (BirthdayStore) async throws -> [BirthdayRecord]
   private let now: @Sendable () -> Date
   private let timeZone: @Sendable () -> TimeZone
+  private let conflictResolver: ConflictResolver
   private let reminderRebuildCoordinator: ReminderRebuildCoordinator
 
   var isLoading: Bool {
@@ -276,6 +281,7 @@ final class AppModel {
     self.snapshotRecordLoader = snapshotRecordLoader
     self.now = now
     self.timeZone = timeZone
+    conflictResolver = ConflictResolver(store: store, now: now, timeZone: timeZone)
     reminderRebuildCoordinator = ReminderRebuildCoordinator(
       planner: reminderPlanner,
       scheduler: notificationScheduler
@@ -305,6 +311,7 @@ final class AppModel {
       let snapshot = try await store.activeBirthdays()
       records = snapshot
       loadState = .loaded
+      await reloadConflicts()
       await rebuildReminderSnapshot(snapshot, generation: generation)
     } catch {
       loadState = .failed(
@@ -313,6 +320,49 @@ final class AppModel {
       if generation == reminderGeneration {
         notificationHealth = failedNotificationHealth(category: "local_read_failed")
       }
+    }
+  }
+
+  func isResolvingConflict(_ id: UUID) -> Bool {
+    resolvingConflictID == id
+  }
+
+  func resolveConflictKeepingLocal(id: UUID) async {
+    await resolveConflict(id: id) {
+      try await self.conflictResolver.keepLocal(id: id)
+    }
+  }
+
+  func resolveConflictUsingRemote(id: UUID) async {
+    await resolveConflict(id: id) {
+      try await self.conflictResolver.useRemote(id: id)
+    }
+  }
+
+  private func resolveConflict(
+    id: UUID,
+    action: () async throws -> Void
+  ) async {
+    guard resolvingConflictID == nil else { return }
+    resolvingConflictID = id
+    conflictErrorMessage = nil
+    defer { resolvingConflictID = nil }
+
+    do {
+      try await action()
+      await reload()
+    } catch {
+      conflictErrorMessage = "未能解决同步冲突，本机资料未改变。请重新载入后再试。"
+    }
+  }
+
+  private func reloadConflicts() async {
+    do {
+      conflicts = try await conflictResolver.conflicts()
+      conflictErrorMessage = nil
+    } catch {
+      conflicts = []
+      conflictErrorMessage = "同步冲突资料无法安全读取，未执行任何更改。请重新载入后再试。"
     }
   }
 

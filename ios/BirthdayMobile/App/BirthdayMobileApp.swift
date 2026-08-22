@@ -89,6 +89,7 @@ private struct BirthdayAppBootstrapView: View {
         for: BirthdayEntity.self,
         SyncOperationEntity.self,
         SyncMetadataEntity.self,
+        SyncConflictEntity.self,
         configurations: configuration
       )
       if uiTestBootstrap.isSnapshotImportFixtureEnabled {
@@ -388,6 +389,15 @@ struct RootTabView: View {
         Label("全部", systemImage: "list.bullet")
       }
       .tag(AppModel.Tab.birthdays)
+
+      NavigationStack {
+        ConflictListView(model: model)
+      }
+      .tabItem {
+        Label("冲突", systemImage: "arrow.triangle.2.circlepath")
+      }
+      .badge(model.conflicts.count)
+      .tag(AppModel.Tab.conflicts)
 
       NavigationStack {
         SettingsView(model: model)

@@ -103,11 +103,15 @@ import Testing
     let conflict = try #require(try await store.syncConflicts().first)
     #expect(conflict.entityId == record.id)
     #expect(conflict.operationId == operation.operationId)
-    #expect(
-      try MobileJSON.decoder.decode(APIBirthday.self, from: conflict.remoteSnapshotJSON) == remote)
-    #expect(
-      try MobileJSON.decoder.decode(APIBirthday.self, from: conflict.localSnapshotJSON).name
-        == "本地生日")
+    let remoteSnapshot = try SyncConflictSnapshot.decode(
+      conflict.remoteSnapshotJSON, expectedSide: .remote)
+    let localSnapshot = try SyncConflictSnapshot.decode(
+      conflict.localSnapshotJSON, expectedSide: .local)
+    #expect(remoteSnapshot.formatVersion == SyncConflictSnapshot.currentFormatVersion)
+    #expect(localSnapshot.formatVersion == SyncConflictSnapshot.currentFormatVersion)
+    #expect(remoteSnapshot.record == remote)
+    #expect(localSnapshot.record.name == "本地生日")
+    #expect(conflict.kindRaw == SyncConflictKind.editEdit.rawValue)
 
     let secondStore = try makeSyncStore()
     _ = try await secondStore.save(
@@ -606,10 +610,13 @@ import Testing
     )
 
     let conflict = try #require(try await store.syncConflicts().first)
-    let local = try MobileJSON.decoder.decode(APIBirthday.self, from: conflict.localSnapshotJSON)
+    let local = try SyncConflictSnapshot.decode(
+      conflict.localSnapshotJSON, expectedSide: .local
+    ).record
     #expect(local.deletedAt != nil)
     #expect(
-      try MobileJSON.decoder.decode(APIBirthday.self, from: conflict.remoteSnapshotJSON) == remote)
+      try SyncConflictSnapshot.decode(conflict.remoteSnapshotJSON, expectedSide: .remote).record
+        == remote)
     let blocked = try #require(try await store.pendingOperations().first)
     #expect(blocked.operationId == conflict.operationId)
     #expect(blocked.operationType == "delete")
@@ -817,9 +824,10 @@ import Testing
     )
     let conflict = try #require(try await store.syncConflicts().first)
     #expect(
-      try MobileJSON.decoder.decode(APIBirthday.self, from: conflict.remoteSnapshotJSON) == remote)
+      try SyncConflictSnapshot.decode(conflict.remoteSnapshotJSON, expectedSide: .remote).record
+        == remote)
     #expect(
-      try MobileJSON.decoder.decode(APIBirthday.self, from: conflict.localSnapshotJSON).name
+      try SyncConflictSnapshot.decode(conflict.localSnapshotJSON, expectedSide: .local).record.name
         == "新本地")
     #expect(try await store.readyOperations(limit: 1, now: now).isEmpty)
     #expect(try await store.pendingOperations().first?.baseVersion == 0)

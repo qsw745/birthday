@@ -254,6 +254,80 @@ public actor BirthdayStore: ModelActor {
     return try modelContext.fetch(descriptor).map(SyncConflictRecord.init)
   }
 
+  func resolvableSyncConflicts() throws -> [ResolvableSyncConflict] {
+    let descriptor = FetchDescriptor<SyncConflictEntity>(
+      sortBy: [SortDescriptor(\.createdAt), SortDescriptor(\.entityId)]
+    )
+    return try modelContext.fetch(descriptor).map(decodeConflict)
+  }
+
+  func resolveConflictKeepingLocal(id: UUID, newOperationID: UUID, now: Date) throws {
+    do {
+      let resolution = try loadConflictResolution(id: id)
+      guard resolution.local.deletedAt == nil, resolution.birthday.deletedAt == nil else {
+        throw ConflictResolutionError.unsupportedConflictShape
+      }
+      guard newOperationID != resolution.operation.operationId else {
+        throw ConflictResolutionError.operationIDNotFresh
+      }
+      let allOperations = try modelContext.fetch(FetchDescriptor<SyncOperationEntity>())
+      guard !allOperations.contains(where: { $0.operationId == newOperationID }) else {
+        throw ConflictResolutionError.operationIDNotFresh
+      }
+
+      resolution.birthday.version = resolution.remote.version
+      resolution.birthday.deletedAt = nil
+      resolution.birthday.syncStateRaw = SyncState.pending.rawValue
+      let current = try map(resolution.birthday)
+      let replacement = SyncOperationEntity(
+        operationId: newOperationID,
+        entityId: id,
+        operationType: "upsert",
+        baseVersion: resolution.remote.version,
+        payloadJSON: try MobileJSON.encoder.encode(BirthdayPayloadDTO(record: current)),
+        createdAt: now,
+        attemptCount: 0,
+        nextRetryAt: nil,
+        lastErrorCategory: nil
+      )
+      modelContext.delete(resolution.operation)
+      modelContext.insert(replacement)
+      modelContext.delete(resolution.conflict)
+      try transactionCommitter(modelContext)
+    } catch {
+      modelContext.rollback()
+      throw error
+    }
+  }
+
+  func resolveConflictUsingRemote(id: UUID, now: Date, timeZone: TimeZone) throws {
+    do {
+      let resolution = try loadConflictResolution(id: id)
+      let nextSolarDate: Date?
+      if resolution.remote.deletedAt != nil || resolution.remote.nextSolarDate != nil {
+        nextSolarDate = resolution.remote.nextSolarDate
+      } else {
+        nextSolarDate = try calculator.nextOccurrence(
+          of: LunarBirthday(
+            month: resolution.remote.lunarMonth,
+            day: resolution.remote.lunarDay,
+            isLeapMonth: resolution.remote.isLeapMonth
+          ),
+          reminderMinutes: resolution.remote.reminder.timeMinutes,
+          after: now,
+          in: timeZone
+        )
+      }
+      apply(resolution.remote, nextSolarDate: nextSolarDate, to: resolution.birthday)
+      modelContext.delete(resolution.operation)
+      modelContext.delete(resolution.conflict)
+      try transactionCommitter(modelContext)
+    } catch {
+      modelContext.rollback()
+      throw error
+    }
+  }
+
   public func applyPushResults(
     _ results: [PushResult],
     expectedOperationIDs: [UUID],
@@ -918,13 +992,15 @@ public actor BirthdayStore: ModelActor {
     let descriptor = FetchDescriptor<SyncConflictEntity>(
       predicate: #Predicate { $0.entityId == entityID }
     )
-    let localData = try MobileJSON.encoder.encode(local)
-    let remoteData = try MobileJSON.encoder.encode(remote)
+    let localData = try SyncConflictSnapshot.encode(local, side: .local)
+    let remoteData = try SyncConflictSnapshot.encode(remote, side: .remote)
+    let kind = remote.deletedAt == nil ? SyncConflictKind.editEdit : .deleteEdit
     if let existing = try modelContext.fetch(descriptor).first {
       existing.operationId = operationID
       existing.localSnapshotJSON = localData
       existing.remoteSnapshotJSON = remoteData
       existing.updatedAt = now
+      existing.kindRaw = kind.rawValue
     } else {
       modelContext.insert(
         SyncConflictEntity(
@@ -933,9 +1009,102 @@ public actor BirthdayStore: ModelActor {
           localSnapshotJSON: localData,
           remoteSnapshotJSON: remoteData,
           createdAt: now,
-          updatedAt: now
+          updatedAt: now,
+          kindRaw: kind.rawValue
         ))
     }
+  }
+
+  private struct LoadedConflictResolution {
+    let conflict: SyncConflictEntity
+    let birthday: BirthdayEntity
+    let operation: SyncOperationEntity
+    let local: APIBirthday
+    let remote: APIBirthday
+  }
+
+  private func loadConflictResolution(id: UUID) throws -> LoadedConflictResolution {
+    let conflictDescriptor = FetchDescriptor<SyncConflictEntity>(
+      predicate: #Predicate { $0.entityId == id }
+    )
+    guard let conflict = try modelContext.fetch(conflictDescriptor).first else {
+      throw ConflictResolutionError.conflictNotFound
+    }
+    let decoded = try decodeConflict(conflict)
+    let birthdayDescriptor = FetchDescriptor<BirthdayEntity>(predicate: #Predicate { $0.id == id })
+    guard let birthday = try modelContext.fetch(birthdayDescriptor).first else {
+      throw ConflictResolutionError.birthdayNotFound
+    }
+    let operationID = decoded.operationId
+    let operationDescriptor = FetchDescriptor<SyncOperationEntity>(
+      predicate: #Predicate { $0.operationId == operationID }
+    )
+    guard let operation = try modelContext.fetch(operationDescriptor).first else {
+      throw ConflictResolutionError.operationNotFound
+    }
+    guard operation.entityId == id else {
+      throw ConflictResolutionError.operationEntityMismatch
+    }
+    let entityOperations = try modelContext.fetch(
+      FetchDescriptor<SyncOperationEntity>(predicate: #Predicate { $0.entityId == id })
+    )
+    guard entityOperations.count == 1 else {
+      throw ConflictResolutionError.operationEntityMismatch
+    }
+    return LoadedConflictResolution(
+      conflict: conflict,
+      birthday: birthday,
+      operation: operation,
+      local: decoded.local,
+      remote: decoded.remote
+    )
+  }
+
+  private func decodeConflict(_ conflict: SyncConflictEntity) throws -> ResolvableSyncConflict {
+    guard let operationId = conflict.operationId else {
+      throw ConflictResolutionError.operationNotFound
+    }
+    guard let kind = SyncConflictKind(rawValue: conflict.kindRaw) else {
+      throw ConflictResolutionError.invalidConflictKind
+    }
+    let local: APIBirthday
+    let remote: APIBirthday
+    do {
+      local = try SyncConflictSnapshot.decode(
+        conflict.localSnapshotJSON,
+        expectedSide: .local
+      ).record
+      remote = try SyncConflictSnapshot.decode(
+        conflict.remoteSnapshotJSON,
+        expectedSide: .remote
+      ).record
+    } catch {
+      throw ConflictResolutionError.invalidSnapshot
+    }
+    guard local.id == conflict.entityId, remote.id == conflict.entityId else {
+      throw ConflictResolutionError.snapshotEntityMismatch
+    }
+    do {
+      try validateRemoteBirthday(local)
+      try validateRemoteBirthday(remote)
+    } catch {
+      throw ConflictResolutionError.invalidSnapshot
+    }
+    let supportedShape =
+      (kind == .editEdit && local.deletedAt == nil && remote.deletedAt == nil)
+      || (kind == .deleteEdit && local.deletedAt == nil && remote.deletedAt != nil)
+    guard supportedShape else {
+      throw ConflictResolutionError.unsupportedConflictShape
+    }
+    return ResolvableSyncConflict(
+      entityId: conflict.entityId,
+      operationId: operationId,
+      local: local,
+      remote: remote,
+      kind: kind,
+      createdAt: conflict.createdAt,
+      updatedAt: conflict.updatedAt
+    )
   }
 
   private func apiBirthday(from entity: BirthdayEntity) -> APIBirthday {
