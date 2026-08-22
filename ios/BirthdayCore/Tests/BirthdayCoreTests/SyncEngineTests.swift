@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import Testing
 
 @testable import BirthdayCore
@@ -274,6 +275,103 @@ import Testing
     #expect(try await store.activeBirthdays().isEmpty)
   }
 
+  @Test func enginePullsEveryPageAndStopsAfterTerminalPage() async throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let credentials = try makeCredentials(now: now)
+    let first = makeAPIBirthday(id: UUID(), name: "第一页", version: 1)
+    let second = makeAPIBirthday(id: UUID(), name: "第二页", version: 1)
+    let api = PagedPullAPI(
+      pages: [
+        PullResponse(
+          changes: [PullChange(seq: 1, operation: .upsert, record: first)], nextCursor: 1,
+          hasMore: true),
+        PullResponse(
+          changes: [PullChange(seq: 2, operation: .upsert, record: second)], nextCursor: 2,
+          hasMore: false),
+      ])
+    let store = try makeSyncStore()
+    let summary = try await SyncEngine(
+      api: api, store: store, credentials: credentials, now: { now }
+    )
+    .syncNow()
+    #expect(summary.downloaded == 2)
+    #expect(summary.cursor == 2)
+    #expect(await api.pulledCursors() == [0, 1])
+    #expect(try await store.activeBirthdays().map(\.name).sorted() == ["第一页", "第二页"])
+  }
+
+  @Test func engineNoProgressPullFailsAfterOneRequest() async throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let credentials = try makeCredentials(now: now)
+    let api = PagedPullAPI(pages: [PullResponse(changes: [], nextCursor: 0, hasMore: true)])
+    await #expect(throws: BirthdayStoreError.invalidPullPage) {
+      try await SyncEngine(
+        api: api, store: try makeSyncStore(), credentials: credentials, now: { now }
+      )
+      .syncNow()
+    }
+    #expect(await api.pulledCursors() == [0])
+  }
+
+  @Test func pullAndPushCommitFailuresLeaveFreshStoreUnchanged() async throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let container = try makeSyncContainer()
+    let failing = BirthdayStore(
+      modelContainer: container,
+      transactionCommitter: { _ in throw CommitFailure.expected }
+    )
+    let fresh = BirthdayStore(modelContainer: container)
+    let remote = makeAPIBirthday(id: UUID(), name: "不应保存", version: 1)
+    await #expect(throws: CommitFailure.expected) {
+      try await failing.applyPull(
+        PullResponse(
+          changes: [PullChange(seq: 1, operation: .upsert, record: remote)], nextCursor: 1,
+          hasMore: false), now: now, timeZone: TimeZone(secondsFromGMT: 0)!
+      )
+    }
+    #expect(try await fresh.activeBirthdays().isEmpty)
+    #expect(try await fresh.syncCursor() == 0)
+    #expect(try await fresh.syncConflicts().isEmpty)
+  }
+
+  @Test func semanticPoisonBeforeGoodOperationBecomesTerminalThenEnginePulls() async throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let container = try makeSyncContainer()
+    let context = ModelContext(container)
+    let poisonID = UUID()
+    let payload = BirthdayPayloadDTO(
+      id: poisonID, name: "", lunarMonth: 8, lunarDay: 15, isLeapMonth: false,
+      reminderTimeMinutes: 540, notifyDayBefore: true, notifySameDay: true, emailEnabled: false,
+      emailAddress: "", emailMessage: ""
+    )
+    let poisonOperationID = UUID()
+    context.insert(
+      SyncOperationEntity(
+        operationId: poisonOperationID, entityId: poisonID, operationType: "upsert", baseVersion: 0,
+        payloadJSON: try MobileJSON.encoder.encode(payload), createdAt: now.addingTimeInterval(-1),
+        attemptCount: 0, nextRetryAt: nil, lastErrorCategory: nil
+      ))
+    try context.save()
+    let store = BirthdayStore(modelContainer: container)
+    _ = try await store.save(
+      BirthdayDraft(
+        name: "好操作", lunarBirthday: LunarBirthday(month: 8, day: 15, isLeapMonth: false),
+        reminder: .defaults
+      ), id: UUID(), now: now, timeZone: TimeZone(secondsFromGMT: 0)!
+    )
+    let credentials = try makeCredentials(now: now)
+    let api = DrainingFakeAPI(deviceID: try #require(try credentials.load()?.deviceId))
+    let summary = try await SyncEngine(
+      api: api, store: store, credentials: credentials, now: { now }
+    )
+    .syncNow()
+    let poison = try #require(
+      try await store.pendingOperations().first { $0.operationId == poisonOperationID })
+    #expect(poison.lastErrorCategory == "local_contract")
+    #expect(summary.uploaded == 1)
+    #expect(await api.events().last == .pull)
+  }
+
   private func makeOperationsForExactRequestSize(_ target: Int) throws -> [SyncOperation] {
     let fixed = try (0..<7).map { _ in
       try makeOperation(message: String(repeating: "m", count: 8_000))
@@ -313,6 +411,43 @@ import Testing
       lastErrorCategory: nil
     )
   }
+
+  private func makeCredentials(now: Date) throws -> DeviceCredentialStore {
+    let credentials = DeviceCredentialStore(secure: InMemorySecureTokenStore())
+    try credentials.save(
+      DeviceCredentials(
+        deviceId: UUID(), accessToken: "access", accessExpiresAt: now.addingTimeInterval(600),
+        refreshToken: "refresh", refreshExpiresAt: now.addingTimeInterval(15_552_000)
+      ))
+    return credentials
+  }
+}
+
+private enum CommitFailure: Error, Equatable { case expected }
+
+private actor PagedPullAPI: MobileAPI {
+  private var pages: [PullResponse]
+  private var cursors: [Int64] = []
+  init(pages: [PullResponse]) { self.pages = pages }
+  func login(_ request: LoginRequest) async throws -> TokenResponse {
+    throw MobileAPIError.invalidResponse
+  }
+  func refresh(_ request: RefreshRequest) async throws -> TokenResponse {
+    throw MobileAPIError.invalidResponse
+  }
+  func snapshot(accessToken: String) async throws -> SnapshotResponse {
+    throw MobileAPIError.invalidResponse
+  }
+  func push(_ request: PushRequest, accessToken: String) async throws -> PushResponse {
+    PushResponse(results: [])
+  }
+  func pull(cursor: Int64, accessToken: String) async throws -> PullResponse {
+    cursors.append(cursor)
+    return pages.removeFirst()
+  }
+  func revoke(deviceId: UUID, accessToken: String) async throws {}
+  func devices(accessToken: String) async throws -> [MobileDevice] { [] }
+  func pulledCursors() -> [Int64] { cursors }
 }
 
 private actor DrainingFakeAPI: MobileAPI {
