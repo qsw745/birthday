@@ -3,6 +3,7 @@ import SwiftData
 
 public enum BirthdayStoreError: Error, Equatable, Sendable {
   case unknownSyncState(String)
+  case conflictRequiresResolution
   case unknownOperation
   case pushResultsDoNotMatchBatch
   case pushResultEntityMismatch
@@ -63,10 +64,11 @@ public actor BirthdayStore: ModelActor {
     do {
       let entity: BirthdayEntity
       if let existing = try modelContext.fetch(descriptor).first {
-        _ = try requireKnownSyncState(existing.syncStateRaw)
+        try requireOrdinaryMutationAllowed(entityID: targetID, entity: existing)
         entity = existing
         apply(draft, nextSolarDate: nextSolarDate, now: now, to: entity)
       } else {
+        try requireOrdinaryMutationAllowed(entityID: targetID, entity: nil)
         entity = BirthdayEntity(id: targetID, draft: draft, nextSolarDate: nextSolarDate, now: now)
         modelContext.insert(entity)
       }
@@ -138,8 +140,9 @@ public actor BirthdayStore: ModelActor {
     let descriptor = FetchDescriptor<BirthdayEntity>(predicate: #Predicate { $0.id == id })
 
     do {
-      guard let entity = try modelContext.fetch(descriptor).first else { return }
-      _ = try requireKnownSyncState(entity.syncStateRaw)
+      let entity = try modelContext.fetch(descriptor).first
+      try requireOrdinaryMutationAllowed(entityID: id, entity: entity)
+      guard let entity else { return }
       entity.deletedAt = now
       entity.updatedAt = now
       entity.syncStateRaw = SyncState.pendingDelete.rawValue
@@ -161,8 +164,9 @@ public actor BirthdayStore: ModelActor {
     let descriptor = FetchDescriptor<BirthdayEntity>(predicate: #Predicate { $0.id == id })
 
     do {
-      guard let entity = try modelContext.fetch(descriptor).first else { return }
-      _ = try requireKnownSyncState(entity.syncStateRaw)
+      let entity = try modelContext.fetch(descriptor).first
+      try requireOrdinaryMutationAllowed(entityID: id, entity: entity)
+      guard let entity else { return }
       entity.deletedAt = nil
       entity.updatedAt = now
       entity.syncStateRaw = SyncState.pending.rawValue
@@ -1064,32 +1068,41 @@ public actor BirthdayStore: ModelActor {
     guard let operationId = conflict.operationId else {
       throw ConflictResolutionError.operationNotFound
     }
-    guard let kind = SyncConflictKind(rawValue: conflict.kindRaw) else {
+    guard let storedKind = SyncConflictKind(rawValue: conflict.kindRaw) else {
       throw ConflictResolutionError.invalidConflictKind
     }
-    let local: APIBirthday
-    let remote: APIBirthday
+    let localSnapshot: SyncConflictSnapshot
+    let remoteSnapshot: SyncConflictSnapshot
     do {
-      local = try SyncConflictSnapshot.decode(
+      localSnapshot = try SyncConflictSnapshot.decode(
         conflict.localSnapshotJSON,
         expectedSide: .local
-      ).record
-      remote = try SyncConflictSnapshot.decode(
+      )
+      remoteSnapshot = try SyncConflictSnapshot.decode(
         conflict.remoteSnapshotJSON,
         expectedSide: .remote
-      ).record
+      )
     } catch {
       throw ConflictResolutionError.invalidSnapshot
     }
+    guard localSnapshot.formatVersion == remoteSnapshot.formatVersion else {
+      throw ConflictResolutionError.invalidSnapshot
+    }
+    let local = localSnapshot.record
+    let remote = remoteSnapshot.record
     guard local.id == conflict.entityId, remote.id == conflict.entityId else {
       throw ConflictResolutionError.snapshotEntityMismatch
     }
     do {
-      try validateRemoteBirthday(local)
+      try validateLocalBirthday(local)
       try validateRemoteBirthday(remote)
     } catch {
       throw ConflictResolutionError.invalidSnapshot
     }
+    let kind =
+      localSnapshot.formatVersion == 0
+      ? (remote.deletedAt == nil ? SyncConflictKind.editEdit : .deleteEdit)
+      : storedKind
     let supportedShape =
       (kind == .editEdit && local.deletedAt == nil && remote.deletedAt == nil)
       || (kind == .deleteEdit && local.deletedAt == nil && remote.deletedAt != nil)
@@ -1161,6 +1174,34 @@ public actor BirthdayStore: ModelActor {
       throw BirthdayStoreError.unknownSyncState(rawValue)
     }
     return syncState
+  }
+
+  private func requireOrdinaryMutationAllowed(
+    entityID: UUID,
+    entity: BirthdayEntity?
+  ) throws {
+    if let entity, try requireKnownSyncState(entity.syncStateRaw) == .conflict {
+      throw BirthdayStoreError.conflictRequiresResolution
+    }
+    let descriptor = FetchDescriptor<SyncConflictEntity>(
+      predicate: #Predicate { $0.entityId == entityID }
+    )
+    guard try modelContext.fetch(descriptor).isEmpty else {
+      throw BirthdayStoreError.conflictRequiresResolution
+    }
+  }
+
+  private func validateLocalBirthday(_ local: APIBirthday) throws {
+    try BirthdayValidator.validate(
+      BirthdayDraft(
+        name: local.name,
+        lunarBirthday: LunarBirthday(
+          month: local.lunarMonth,
+          day: local.lunarDay,
+          isLeapMonth: local.isLeapMonth
+        ),
+        reminder: local.reminder
+      ))
   }
 
   private func map(_ entity: SyncOperationEntity) -> SyncOperation {

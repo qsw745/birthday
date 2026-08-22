@@ -101,21 +101,35 @@ struct BirthdayListView: View {
 
   private var birthdayList: some View {
     List(visibleRecords) { record in
-      Button {
-        editingRecord = record
-      } label: {
-        BirthdayListRow(record: record, timeZone: timeZone)
-      }
-      .buttonStyle(.plain)
-      .frame(minHeight: 58)
-      .disabled(isDeletingRecord)
-      .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-        Button(role: .destructive) {
-          deleteCandidate = record
-        } label: {
-          Label("删除", systemImage: "trash")
+      if record.syncState == .conflict {
+        VStack(alignment: .leading, spacing: 8) {
+          BirthdayListRow(record: record, timeZone: timeZone)
+
+          Button("前往处理同步冲突") {
+            model.selectedTab = .conflicts
+          }
+          .buttonStyle(.bordered)
+          .tint(ModernAirTheme.tide)
+          .accessibilityIdentifier("openConflictButton-\(record.id.uuidString)")
         }
+        .frame(minHeight: 58)
+      } else {
+        Button {
+          editingRecord = record
+        } label: {
+          BirthdayListRow(record: record, timeZone: timeZone)
+        }
+        .buttonStyle(.plain)
+        .frame(minHeight: 58)
         .disabled(isDeletingRecord)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+          Button(role: .destructive) {
+            deleteCandidate = record
+          } label: {
+            Label("删除", systemImage: "trash")
+          }
+          .disabled(isDeletingRecord)
+        }
       }
     }
     .listStyle(.insetGrouped)
@@ -253,17 +267,19 @@ private struct SearchFieldAccessibilityIdentifier: UIViewRepresentable {
 
     func installIdentifier() {
       guard
-        let searchField = window?.firstDescendant(of: UISearchTextField.self, where: {
-          $0.placeholder == self.placeholder
-        })
+        let searchField = window?.firstDescendant(
+          of: UISearchTextField.self,
+          where: {
+            $0.placeholder == self.placeholder
+          })
       else { return }
       searchField.accessibilityIdentifier = identifier
     }
   }
 }
 
-private extension UIView {
-  func firstDescendant<View: UIView>(
+extension UIView {
+  fileprivate func firstDescendant<View: UIView>(
     of type: View.Type,
     where predicate: (View) -> Bool
   ) -> View? {
@@ -319,7 +335,9 @@ private struct BirthdayListRow: View {
     .contentShape(Rectangle())
     .accessibilityElement(children: .combine)
     .accessibilityLabel(accessibilityText)
-    .accessibilityHint("轻点编辑生日")
+    .accessibilityHint(
+      record.syncState == .conflict ? "请使用下方按钮处理同步冲突" : "轻点编辑生日"
+    )
   }
 
   private var nextDateText: String {
@@ -354,14 +372,18 @@ private struct BirthdayListRow: View {
   }
 
   private var syncText: String {
-    LocalOnlyStatusPresentation.make(for: record.syncState).title
+    if record.syncState == .conflict { return "待处理冲突" }
+    return LocalOnlyStatusPresentation.make(for: record.syncState).title
   }
 
   private var syncSymbol: String {
-    "iphone"
+    record.syncState == .conflict ? "exclamationmark.triangle" : "iphone"
   }
 
   private var accessibilityText: String {
+    if record.syncState == .conflict {
+      return "\(record.name)，\(nextDateText)，农历\(lunarText)，待处理同步冲突"
+    }
     let status = LocalOnlyStatusPresentation.make(for: record.syncState)
     return "\(record.name)，\(nextDateText)，农历\(lunarText)，\(status.title)，\(status.detail)"
   }

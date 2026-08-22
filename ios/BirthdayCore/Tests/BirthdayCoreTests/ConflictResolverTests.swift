@@ -62,6 +62,79 @@ struct ConflictResolverTests {
     }
   }
 
+  @Test func realTask5ConflictWithLocalDefaultsListsAndResolvesBothChoices() async throws {
+    for choice in ResolutionChoice.allCases {
+      let store = try makeSyncStore()
+      let now = Date(timeIntervalSince1970: 1_700_000_000)
+      let local = try await store.save(
+        BirthdayDraft(
+          name: "真实本机",
+          lunarBirthday: LunarBirthday(month: 8, day: 15, isLeapMonth: false),
+          reminder: .defaults
+        ),
+        id: UUID(),
+        now: now,
+        timeZone: timeZone
+      )
+      let operation = try #require(try await store.readyOperations(limit: 1, now: now).first)
+      let remote = makeAPIBirthday(
+        id: local.id,
+        name: "真实云端",
+        version: 5,
+        updatedAt: now.addingTimeInterval(60)
+      )
+      try await store.applyPushResults(
+        [
+          PushResult(
+            operationId: operation.operationId,
+            status: .conflict,
+            record: nil,
+            remote: remote
+          )
+        ],
+        expectedOperationIDs: [operation.operationId],
+        now: now,
+        timeZone: timeZone
+      )
+
+      let resolver = makeResolver(store)
+      let listed = try await resolver.conflicts()
+      let conflict = try #require(listed.first)
+      #expect(listed.count == 1)
+      #expect(conflict.local.reminder.emailEnabled == false)
+      #expect(conflict.local.reminder.emailMessage == ReminderConfig.defaults.emailMessage)
+
+      switch choice {
+      case .keepLocal:
+        try await resolver.keepLocal(id: local.id)
+        let current = try #require(try await store.activeBirthdays().first)
+        let replacement = try #require(try await store.pendingOperations().first)
+        #expect(current.name == "真实本机")
+        #expect(current.reminder == .defaults)
+        #expect(replacement.operationId == freshOperationID)
+        #expect(replacement.operationId != operation.operationId)
+        #expect(replacement.baseVersion == remote.version)
+      case .useRemote:
+        try await resolver.useRemote(id: local.id)
+        let current = try #require(try await store.activeBirthdays().first)
+        #expect(current.id == remote.id)
+        #expect(current.name == remote.name)
+        #expect(current.lunarBirthday.month == remote.lunarMonth)
+        #expect(current.lunarBirthday.day == remote.lunarDay)
+        #expect(current.lunarBirthday.isLeapMonth == remote.isLeapMonth)
+        #expect(current.reminder == remote.reminder)
+        #expect(current.nextSolarDate != nil)
+        #expect(current.version == remote.version)
+        #expect(current.createdAt == remote.createdAt)
+        #expect(current.updatedAt == remote.updatedAt)
+        #expect(current.deletedAt == remote.deletedAt)
+        #expect(current.syncState == .synced)
+        #expect(try await store.pendingOperations().isEmpty)
+      }
+      #expect(try await store.syncConflicts().isEmpty)
+    }
+  }
+
   @Test func keepLocalCreatesFreshOperationOnRemoteVersion() async throws {
     let fixture = try makeConflictFixture()
     try await makeResolver(fixture.store).keepLocal(id: fixture.birthdayId)
@@ -207,6 +280,89 @@ struct ConflictResolverTests {
     #expect(try await fixture.store.pendingOperations().map(\.operationId) == [fixture.operationId])
   }
 
+  @Test func ordinarySaveAndDeleteCannotUnblockAConflictOperation() async throws {
+    for mutation in ConflictMutation.allCases {
+      let fixture = try makeConflictFixture()
+      let original = try #require(try await fixture.store.activeBirthdays().first)
+
+      await #expect(throws: BirthdayStoreError.conflictRequiresResolution) {
+        switch mutation {
+        case .save:
+          _ = try await fixture.store.save(
+            BirthdayDraft(
+              name: "绕过冲突的编辑",
+              lunarBirthday: original.lunarBirthday,
+              reminder: original.reminder
+            ),
+            id: fixture.birthdayId,
+            now: resolutionDate,
+            timeZone: timeZone
+          )
+        case .delete:
+          try await fixture.store.softDelete(id: fixture.birthdayId, now: resolutionDate)
+        }
+      }
+
+      #expect(try await fixture.store.activeBirthdays().first == original)
+      let operation = try #require(try await fixture.store.pendingOperations().first)
+      #expect(operation.operationId == fixture.operationId)
+      #expect(operation.lastErrorCategory == "conflict_blocked")
+      #expect(try await fixture.store.readyOperations(limit: 1, now: resolutionDate).isEmpty)
+      #expect(try await fixture.store.syncConflicts().count == 1)
+    }
+  }
+
+  @Test func legacyEditAndDeleteConflictsResolveBothChoicesEndToEnd() async throws {
+    for remoteDeleted in [false, true] {
+      for choice in ResolutionChoice.allCases {
+        let fixture = try makeConflictFixture(remoteDeleted: remoteDeleted)
+        let context = ModelContext(fixture.container)
+        let conflict = try #require(
+          try context.fetch(FetchDescriptor<SyncConflictEntity>()).first)
+        conflict.localSnapshotJSON = try MobileJSON.encoder.encode(fixture.local)
+        conflict.remoteSnapshotJSON = try MobileJSON.encoder.encode(fixture.remote)
+        conflict.kindRaw = SyncConflictKind.editEdit.rawValue
+        try context.save()
+
+        let resolver = makeResolver(fixture.store)
+        let listed = try await resolver.conflicts()
+        #expect(listed.first?.kind == (remoteDeleted ? .deleteEdit : .editEdit))
+
+        switch choice {
+        case .keepLocal:
+          try await resolver.keepLocal(id: fixture.birthdayId)
+          let replacement = try #require(try await fixture.store.pendingOperations().first)
+          #expect(replacement.operationId == freshOperationID)
+          #expect(replacement.operationId != fixture.operationId)
+          #expect(replacement.baseVersion == fixture.remote.version)
+        case .useRemote:
+          try await resolver.useRemote(id: fixture.birthdayId)
+          #expect(try await fixture.store.pendingOperations().isEmpty)
+          #expect(
+            try await fixture.store.activeBirthdays().isEmpty
+              == remoteDeleted
+          )
+        }
+        #expect(try await fixture.store.syncConflicts().isEmpty)
+      }
+    }
+  }
+
+  @Test func v1RemoteTombstoneStillRequiresExplicitDeleteEditKind() async throws {
+    let fixture = try makeConflictFixture(remoteDeleted: true)
+    let context = ModelContext(fixture.container)
+    let conflict = try #require(
+      try context.fetch(FetchDescriptor<SyncConflictEntity>()).first)
+    conflict.kindRaw = SyncConflictKind.editEdit.rawValue
+    try context.save()
+
+    await #expect(throws: ConflictResolutionError.unsupportedConflictShape) {
+      try await makeResolver(fixture.store).useRemote(id: fixture.birthdayId)
+    }
+    #expect(try await fixture.store.pendingOperations().map(\.operationId) == [fixture.operationId])
+    #expect(try await fixture.store.syncConflicts().count == 1)
+  }
+
   @Test func malformedSnapshotAndUnsupportedReverseShapeFailWithZeroWrites() async throws {
     let malformed = try makeConflictFixture()
     let malformedContext = ModelContext(malformed.container)
@@ -279,6 +435,11 @@ private enum RelationCorruption: CaseIterable {
 private enum ResolutionChoice: CaseIterable {
   case keepLocal
   case useRemote
+}
+
+private enum ConflictMutation: CaseIterable {
+  case save
+  case delete
 }
 
 private enum ConflictCommitFailure: Error {
