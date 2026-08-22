@@ -204,6 +204,38 @@ import Testing
   #expect(reducer.presentation == .idle(lastSuccess: nil))
 }
 
+@Test func olderUnlinkRecoveryCannotOverrideANewerRebindPause() async throws {
+  var reducer = SyncPresentationReducer()
+  reducer.configureRemoteRuntime(initiallyBound: true)
+  let remoteAccessGate = RemoteSyncAccessGate()
+  let unlinkGateOwner = await remoteAccessGate.pauseAndDrain()
+  let pendingUnlinkLifecycle = reducer.pauseForUnlink()
+  let unlinkLifecycle = try #require(pendingUnlinkLifecycle)
+
+  reducer.requireRebind()
+  let rebindGateOwner = await remoteAccessGate.pauseAndDrain()
+  _ = await remoteAccessGate.resume(after: unlinkGateOwner)
+
+  #expect(reducer.restoreAfterUnlink(unlinkLifecycle) == false)
+  #expect(reducer.presentation == .rebindRequired(pendingCount: 0))
+  #expect(reducer.isRemoteSyncEnabled == false)
+  #expect(await remoteAccessGate.paused())
+
+  _ = await remoteAccessGate.resume(after: rebindGateOwner)
+}
+
+@Test func currentUnlinkRecoveryRestoresTheBoundRuntime() throws {
+  var reducer = SyncPresentationReducer()
+  reducer.configureRemoteRuntime(initiallyBound: true)
+  let pendingUnlinkLifecycle = reducer.pauseForUnlink()
+  let unlinkLifecycle = try #require(pendingUnlinkLifecycle)
+
+  let restored = reducer.restoreAfterUnlink(unlinkLifecycle)
+  #expect(restored)
+  #expect(reducer.presentation == .idle(lastSuccess: nil))
+  #expect(reducer.isRemoteSyncEnabled)
+}
+
 @Test func rebindPauseBlocksFutureForegroundAndBackgroundCoordinatorRequests() async throws {
   let remoteAccessGate = RemoteSyncAccessGate()
   let probe = SyncTriggerProbe()
@@ -279,6 +311,36 @@ func invalidatedRuntimeInstallCannotCommitOrScheduleAndANewInstallCan() async {
     )
   )
   #expect(probe.events == ["prepare", "prepare", "commit", "schedule"])
+}
+
+@Test
+@MainActor
+func runtimeLifecycleInvalidatedDuringPrepareCannotCommitOrSchedule() async throws {
+  let installer = RuntimeInstallationCoordinator<RuntimeInstallTestModel>()
+  let model = RuntimeInstallTestModel()
+  let installProbe = RuntimeInstallProbe()
+  let lifecycleProbe = SyncRuntimeLifecycleProbe()
+  lifecycleProbe.configureRemoteRuntime()
+  let generation = try #require(lifecycleProbe.currentGeneration)
+
+  let install = Task { @MainActor in
+    await installer.install(
+      model: model,
+      prepare: { await installProbe.prepareAndSuspend() },
+      stillPermitted: { lifecycleProbe.permits(generation) },
+      commit: { _ in installProbe.commit() },
+      schedule: { installProbe.schedule() }
+    )
+  }
+  await installProbe.waitUntilPreparing()
+
+  lifecycleProbe.requireRebind()
+  installProbe.resumePreparation()
+
+  #expect(await install.value == false)
+  #expect(installProbe.events == ["prepare"])
+  #expect(lifecycleProbe.presentation == .rebindRequired(pendingCount: 0))
+  #expect(lifecycleProbe.isRemoteSyncEnabled == false)
 }
 
 @Test
@@ -463,6 +525,8 @@ func coldBackgroundRootBootstrapMakesBackgroundRuntimeReadyWithoutOrdinaryTrigge
   let runner = BackgroundRefreshRunner()
   let backgroundProbe = BackgroundRefreshProbe()
   let bootstrapProbe = RootSyncBootstrapProbe()
+  let lifecycleProbe = SyncRuntimeLifecycleProbe()
+  lifecycleProbe.configureRemoteRuntime()
   let backgroundWork = Task {
     await runner.run(readiness: readiness) {
       await backgroundProbe.recordRun()
@@ -474,8 +538,10 @@ func coldBackgroundRootBootstrapMakesBackgroundRuntimeReadyWithoutOrdinaryTrigge
   )
 
   await bootstrapper.bootstrap(
+    runtimeGeneration: { lifecycleProbe.currentGeneration },
     reload: { bootstrapProbe.reload() },
-    installRuntime: {
+    runtimeStillPermitted: { lifecycleProbe.permits($0) },
+    installRuntime: { _ in
       bootstrapProbe.installRuntime()
       await readiness.markReady()
     },
@@ -495,6 +561,40 @@ func coldBackgroundRootBootstrapMakesBackgroundRuntimeReadyWithoutOrdinaryTrigge
 
 @Test
 @MainActor
+func rootBootstrapInvalidatedDuringReloadCannotInstallOrActivateRuntime() async {
+  for invalidation in SyncRuntimeLifecycleInvalidation.allCases {
+    let bootstrapProbe = RootSyncBootstrapProbe()
+    let lifecycleProbe = SyncRuntimeLifecycleProbe()
+    lifecycleProbe.configureRemoteRuntime()
+    let bootstrapper = SyncRootRuntimeBootstrapper(
+      policy: SyncRuntimeCompositionPolicy(isUITesting: false, networkDisabled: false)
+    )
+
+    let bootstrap = Task { @MainActor in
+      await bootstrapper.bootstrap(
+        runtimeGeneration: { lifecycleProbe.currentGeneration },
+        reload: { await bootstrapProbe.reloadAndSuspend() },
+        runtimeStillPermitted: { lifecycleProbe.permits($0) },
+        installRuntime: { _ in bootstrapProbe.installRuntime() },
+        sceneIsActive: { true },
+        activateOrdinaryTriggers: { bootstrapProbe.activateOrdinaryTriggers() }
+      )
+    }
+    await bootstrapProbe.waitUntilReloading()
+
+    lifecycleProbe.invalidate(with: invalidation)
+    bootstrapProbe.resumeReload()
+    await bootstrap.value
+
+    #expect(bootstrapProbe.events == ["reload"])
+    #expect(bootstrapProbe.installRuntimeCount == 0)
+    #expect(bootstrapProbe.monitorStartCount == 0)
+    #expect(lifecycleProbe.isRemoteSyncEnabled == false)
+  }
+}
+
+@Test
+@MainActor
 func rootBootstrapKeepsRemoteRuntimeOutOfOfflineCompositions() async {
   for policy in [
     SyncRuntimeCompositionPolicy(isUITesting: true, networkDisabled: true),
@@ -504,8 +604,10 @@ func rootBootstrapKeepsRemoteRuntimeOutOfOfflineCompositions() async {
     let bootstrapper = SyncRootRuntimeBootstrapper(policy: policy)
 
     await bootstrapper.bootstrap(
+      runtimeGeneration: { nil },
       reload: { probe.reload() },
-      installRuntime: { probe.installRuntime() },
+      runtimeStillPermitted: { _ in false },
+      installRuntime: { _ in probe.installRuntime() },
       sceneIsActive: { true },
       activateOrdinaryTriggers: { probe.activateOrdinaryTriggers() }
     )
@@ -522,13 +624,17 @@ func rootBootstrapKeepsRemoteRuntimeOutOfOfflineCompositions() async {
 @MainActor
 func activeRootBootstrapInstallsRuntimeBeforeActivatingOrdinaryTriggers() async {
   let probe = RootSyncBootstrapProbe()
+  let lifecycleProbe = SyncRuntimeLifecycleProbe()
+  lifecycleProbe.configureRemoteRuntime()
   let bootstrapper = SyncRootRuntimeBootstrapper(
     policy: SyncRuntimeCompositionPolicy(isUITesting: false, networkDisabled: false)
   )
 
   await bootstrapper.bootstrap(
+    runtimeGeneration: { lifecycleProbe.currentGeneration },
     reload: { probe.reload() },
-    installRuntime: { probe.installRuntime() },
+    runtimeStillPermitted: { lifecycleProbe.permits($0) },
+    installRuntime: { _ in probe.installRuntime() },
     sceneIsActive: { true },
     activateOrdinaryTriggers: { probe.activateOrdinaryTriggers() }
   )
@@ -661,6 +767,47 @@ private final class RuntimeInstallProbe {
     preparationContinuation?.resume()
     preparationContinuation = nil
   }
+}
+
+@MainActor
+private final class SyncRuntimeLifecycleProbe {
+  private var reducer = SyncPresentationReducer()
+
+  var currentGeneration: SyncRuntimeLifecycleGeneration? {
+    reducer.currentRuntimeLifecycleGeneration
+  }
+
+  var presentation: SyncPresentationState { reducer.presentation }
+  var isRemoteSyncEnabled: Bool { reducer.isRemoteSyncEnabled }
+
+  func configureRemoteRuntime() {
+    reducer.configureRemoteRuntime(initiallyBound: true)
+  }
+
+  func requireRebind() {
+    reducer.requireRebind()
+  }
+
+  func invalidate(with reason: SyncRuntimeLifecycleInvalidation) {
+    switch reason {
+    case .missingCredentials:
+      reducer.transitionToMissingCredentials()
+    case .rebindRequired:
+      reducer.requireRebind()
+    case .unlink:
+      _ = reducer.pauseForUnlink()
+    }
+  }
+
+  func permits(_ generation: SyncRuntimeLifecycleGeneration) -> Bool {
+    reducer.permitsRuntimeLifecycle(generation)
+  }
+}
+
+private enum SyncRuntimeLifecycleInvalidation: CaseIterable {
+  case missingCredentials
+  case rebindRequired
+  case unlink
 }
 
 private enum SyncTriggerTestError: Error, Equatable {
@@ -863,9 +1010,26 @@ private final class RootSyncBootstrapProbe {
   private(set) var monitorStartCount = 0
   private(set) var foregroundRequestCount = 0
   private(set) var networkRequestCount = 0
+  private var isReloading = false
+  private var reloadContinuation: CheckedContinuation<Void, Never>?
 
   func reload() {
     events.append("reload")
+  }
+
+  func reloadAndSuspend() async {
+    events.append("reload")
+    isReloading = true
+    await withCheckedContinuation { reloadContinuation = $0 }
+  }
+
+  func waitUntilReloading() async {
+    while !isReloading { await Task.yield() }
+  }
+
+  func resumeReload() {
+    reloadContinuation?.resume()
+    reloadContinuation = nil
   }
 
   func installRuntime() {

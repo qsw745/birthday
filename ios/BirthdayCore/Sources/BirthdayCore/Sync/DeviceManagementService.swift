@@ -209,9 +209,11 @@ public actor DeviceManagementService {
     }
   }
 
-  public func cancelPendingLocalUnlink() async {
-    guard case .awaitingConfirmation(let token) = unlinkPauseState else { return }
+  @discardableResult
+  public func cancelPendingLocalUnlink() async -> Bool {
+    guard case .awaitingConfirmation(let token) = unlinkPauseState else { return false }
     await releaseUnlinkPause(token)
+    return true
   }
 
   public func resumeSyncAfterPendingLocalCleanup() async throws {

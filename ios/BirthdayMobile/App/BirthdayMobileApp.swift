@@ -53,8 +53,12 @@ private struct BirthdayAppBootstrapView: View {
         .modelContainer(container)
         .task {
           await SyncRootRuntimeBootstrapper(policy: syncRuntimePolicy).bootstrap(
+            runtimeGeneration: { model.currentSyncRuntimeLifecycleGeneration },
             reload: { await model.reload() },
-            installRuntime: { await AppSyncRuntime.shared.install(model: model) },
+            runtimeStillPermitted: { model.permitsSyncRuntimeLifecycle($0) },
+            installRuntime: {
+              await AppSyncRuntime.shared.install(model: model, lifecycleGeneration: $0)
+            },
             sceneIsActive: { scenePhase == .active },
             activateOrdinaryTriggers: {
               startActiveSceneSync(
@@ -84,10 +88,17 @@ private struct BirthdayAppBootstrapView: View {
           }
         }
         .onChange(of: model.isSyncRuntimeEnabled) { _, enabled in
-          if enabled {
+          if enabled, let lifecycleGeneration = model.currentSyncRuntimeLifecycleGeneration {
             Task {
-              let installed = await AppSyncRuntime.shared.install(model: model)
-              guard installed, model.isSyncRuntimeEnabled, scenePhase == .active else { return }
+              let installed = await AppSyncRuntime.shared.install(
+                model: model,
+                lifecycleGeneration: lifecycleGeneration
+              )
+              guard
+                installed,
+                model.permitsSyncRuntimeLifecycle(lifecycleGeneration),
+                scenePhase == .active
+              else { return }
               startActiveSceneSync(for: model, trigger: .foreground)
             }
           } else {

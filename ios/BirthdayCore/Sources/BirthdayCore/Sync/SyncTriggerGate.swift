@@ -52,6 +52,10 @@ public struct SyncPresentationRequest: Equatable, Sendable {
   fileprivate let generation: UInt64
 }
 
+public struct SyncRuntimeLifecycleGeneration: Equatable, Sendable {
+  fileprivate let value: UInt64
+}
+
 /// Reduces lifecycle, local facts, and one generation-scoped request into one presentation value.
 public struct SyncPresentationReducer: Equatable, Sendable {
   private enum Lifecycle: Equatable, Sendable {
@@ -70,6 +74,7 @@ public struct SyncPresentationReducer: Equatable, Sendable {
   private var lifecycle: Lifecycle = .localOnly
   private var transient: Transient = .stable
   private var generation: UInt64 = 0
+  private var runtimeLifecycleGeneration: UInt64 = 0
   private var pendingCount = 0
   private var conflictCount = 0
   private var lastSuccess: Date?
@@ -78,6 +83,15 @@ public struct SyncPresentationReducer: Equatable, Sendable {
   public init() {}
 
   public var isRemoteSyncEnabled: Bool { remoteSyncEnabled }
+
+  public var currentRuntimeLifecycleGeneration: SyncRuntimeLifecycleGeneration? {
+    guard remoteSyncEnabled else { return nil }
+    return SyncRuntimeLifecycleGeneration(value: runtimeLifecycleGeneration)
+  }
+
+  public func permitsRuntimeLifecycle(_ candidate: SyncRuntimeLifecycleGeneration) -> Bool {
+    remoteSyncEnabled && candidate.value == runtimeLifecycleGeneration
+  }
 
   public var presentation: SyncPresentationState {
     switch lifecycle {
@@ -102,6 +116,7 @@ public struct SyncPresentationReducer: Equatable, Sendable {
 
   public mutating func bind() {
     advanceGeneration()
+    advanceRuntimeLifecycleGeneration()
     lifecycle = .bound
     transient = .stable
     remoteSyncEnabled = true
@@ -109,6 +124,7 @@ public struct SyncPresentationReducer: Equatable, Sendable {
 
   public mutating func configureRemoteRuntime(initiallyBound: Bool) {
     advanceGeneration()
+    advanceRuntimeLifecycleGeneration()
     lifecycle = initiallyBound ? .bound : .localOnly
     transient = .stable
     remoteSyncEnabled = true
@@ -116,6 +132,7 @@ public struct SyncPresentationReducer: Equatable, Sendable {
 
   public mutating func useLocalOnly() {
     advanceGeneration()
+    advanceRuntimeLifecycleGeneration()
     lifecycle = .localOnly
     transient = .stable
     lastSuccess = nil
@@ -128,6 +145,7 @@ public struct SyncPresentationReducer: Equatable, Sendable {
 
   public mutating func requireRebind() {
     advanceGeneration()
+    advanceRuntimeLifecycleGeneration()
     lifecycle = .rebindRequired
     transient = .stable
     remoteSyncEnabled = false
@@ -135,6 +153,7 @@ public struct SyncPresentationReducer: Equatable, Sendable {
 
   public mutating func failClosed(message: String) {
     advanceGeneration()
+    advanceRuntimeLifecycleGeneration()
     lifecycle = .bound
     transient = .failed(message: message)
     remoteSyncEnabled = false
@@ -158,11 +177,28 @@ public struct SyncPresentationReducer: Equatable, Sendable {
     transient = .offline
   }
 
-  public mutating func pauseForUnlink() {
+  public mutating func pauseForUnlink() -> SyncRuntimeLifecycleGeneration? {
+    guard lifecycle == .bound, remoteSyncEnabled else { return nil }
     advanceGeneration()
+    advanceRuntimeLifecycleGeneration()
     lifecycle = .bound
     transient = .offline
     remoteSyncEnabled = false
+    return SyncRuntimeLifecycleGeneration(value: runtimeLifecycleGeneration)
+  }
+
+  @discardableResult
+  public mutating func restoreAfterUnlink(
+    _ candidate: SyncRuntimeLifecycleGeneration
+  ) -> Bool {
+    guard canRestoreAfterUnlink(candidate) else { return false }
+    bind()
+    return true
+  }
+
+  public func canRestoreAfterUnlink(_ candidate: SyncRuntimeLifecycleGeneration) -> Bool {
+    !remoteSyncEnabled && lifecycle == .bound && transient == .offline
+      && candidate.value == runtimeLifecycleGeneration
   }
 
   public mutating func finishSync(
@@ -185,6 +221,10 @@ public struct SyncPresentationReducer: Equatable, Sendable {
 
   private mutating func advanceGeneration() {
     generation &+= 1
+  }
+
+  private mutating func advanceRuntimeLifecycleGeneration() {
+    runtimeLifecycleGeneration &+= 1
   }
 }
 
@@ -222,6 +262,7 @@ public final class RuntimeInstallationCoordinator<Model: AnyObject> {
   public func install(
     model: Model,
     prepare: @escaping @MainActor @Sendable () async -> Void,
+    stillPermitted: @escaping @MainActor @Sendable () -> Bool = { true },
     commit: @escaping @MainActor @Sendable (Model) -> Void,
     schedule: @escaping @MainActor @Sendable () -> Void
   ) async -> Bool {
@@ -229,10 +270,17 @@ public final class RuntimeInstallationCoordinator<Model: AnyObject> {
     let generation = lifecycle.beginInstall()
     let candidate = Task { @MainActor [weak self, weak model] in
       guard let self, let model else { return false }
+      guard lifecycle.permits(generation), stillPermitted(), !Task.isCancelled else {
+        return false
+      }
       await prepare()
-      guard lifecycle.permits(generation), !Task.isCancelled else { return false }
+      guard lifecycle.permits(generation), stillPermitted(), !Task.isCancelled else {
+        return false
+      }
       commit(model)
-      guard lifecycle.permits(generation), !Task.isCancelled else { return false }
+      guard lifecycle.permits(generation), stillPermitted(), !Task.isCancelled else {
+        return false
+      }
       schedule()
       return true
     }
@@ -766,15 +814,25 @@ public struct SyncRootRuntimeBootstrapper {
   }
 
   public func bootstrap(
+    runtimeGeneration: @escaping @MainActor @Sendable () -> SyncRuntimeLifecycleGeneration?,
     reload: @escaping @MainActor @Sendable () async -> Void,
-    installRuntime: @escaping @MainActor @Sendable () async -> Void,
+    runtimeStillPermitted:
+      @escaping @MainActor @Sendable (
+        SyncRuntimeLifecycleGeneration
+      ) -> Bool,
+    installRuntime: @escaping @MainActor @Sendable (SyncRuntimeLifecycleGeneration) async -> Void,
     sceneIsActive: @escaping @MainActor @Sendable () -> Bool,
     activateOrdinaryTriggers: @escaping @MainActor @Sendable () -> Void
   ) async {
+    let generation = runtimeGeneration()
     await reload()
-    guard policy.allowsRemoteSyncComposition else { return }
-    await installRuntime()
-    guard sceneIsActive() else { return }
+    guard
+      policy.allowsRemoteSyncComposition,
+      let generation,
+      runtimeStillPermitted(generation)
+    else { return }
+    await installRuntime(generation)
+    guard runtimeStillPermitted(generation), sceneIsActive() else { return }
     activateOrdinaryTriggers()
   }
 }

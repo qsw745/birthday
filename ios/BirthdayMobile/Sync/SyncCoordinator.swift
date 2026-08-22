@@ -211,10 +211,16 @@ final class AppSyncRuntime {
   }
 
   @discardableResult
-  func install(model: AppModel) async -> Bool {
+  func install(
+    model: AppModel,
+    lifecycleGeneration: SyncRuntimeLifecycleGeneration
+  ) async -> Bool {
     await installer.install(
       model: model,
       prepare: { [readiness] in await readiness.markReady() },
+      stillPermitted: {
+        model.permitsSyncRuntimeLifecycle(lifecycleGeneration)
+      },
       commit: { [weak self] candidate in
         self?.model = candidate
         self?.backgroundRefreshCoordinator.activateRuntime()

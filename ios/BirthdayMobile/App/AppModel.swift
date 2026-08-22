@@ -245,6 +245,15 @@ final class AppModel {
   private var deviceManagementService: DeviceManagementService?
   private var syncPresentationReducer = SyncPresentationReducer()
   private var activeSyncPresentationRequest: SyncPresentationRequest?
+  private var pendingUnlinkLifecycleGeneration: SyncRuntimeLifecycleGeneration?
+
+  var currentSyncRuntimeLifecycleGeneration: SyncRuntimeLifecycleGeneration? {
+    syncPresentationReducer.currentRuntimeLifecycleGeneration
+  }
+
+  func permitsSyncRuntimeLifecycle(_ generation: SyncRuntimeLifecycleGeneration) -> Bool {
+    syncPresentationReducer.permitsRuntimeLifecycle(generation)
+  }
 
   var isLoading: Bool {
     loadState == .loading
@@ -484,6 +493,7 @@ final class AppModel {
         await deviceManagementService?.resumeAfterBinding()
         syncPresentationReducer.bind()
         pendingLocalCleanup = nil
+        pendingUnlinkLifecycleGeneration = nil
       }
       serverBindingState = .credentialsSavedAwaitingSnapshotPreview
       return true
@@ -811,16 +821,25 @@ final class AppModel {
   }
 
   func beginStopSync() async -> UnlinkOutcome? {
-    guard !isManagingDevice, let deviceManagementService else { return nil }
+    guard
+      !isManagingDevice,
+      pendingUnlinkLifecycleGeneration == nil,
+      let deviceManagementService,
+      let unlinkLifecycle = syncPresentationReducer.pauseForUnlink()
+    else { return nil }
     isManagingDevice = true
     deviceManagementMessage = nil
+    pendingUnlinkLifecycleGeneration = unlinkLifecycle
     defer { isManagingDevice = false }
-    syncPresentationReducer.pauseForUnlink()
 
     do {
       let outcome = try await deviceManagementService.beginUnlinkCurrent()
       if outcome == .unlinked {
         disableSyncRuntimeAfterUnlink()
+      } else if !syncPresentationReducer.canRestoreAfterUnlink(unlinkLifecycle) {
+        _ = await deviceManagementService.cancelPendingLocalUnlink()
+        pendingUnlinkLifecycleGeneration = nil
+        return nil
       }
       return outcome
     } catch DeviceManagementError.credentialClearFailedAfterServerRevoke {
@@ -831,6 +850,8 @@ final class AppModel {
       return nil
     } catch {
       await applyDeviceManagementError(error)
+      _ = syncPresentationReducer.restoreAfterUnlink(unlinkLifecycle)
+      pendingUnlinkLifecycleGeneration = nil
       return nil
     }
   }
@@ -973,17 +994,10 @@ final class AppModel {
     case DeviceManagementError.operationInProgress:
       deviceManagementMessage = "另一项设备操作正在进行，请稍候。"
     case MobileAPIError.transport:
-      if !isSyncRuntimeEnabled { syncPresentationReducer.pauseOffline() }
       deviceManagementMessage = "暂时无法连接服务器，本机资料未改变。"
     case MobileAPIError.server:
-      if !isSyncRuntimeEnabled {
-        syncPresentationReducer.bind()
-      }
       deviceManagementMessage = "服务器未能完成设备操作，本机资料未改变。"
     default:
-      if !isSyncRuntimeEnabled {
-        syncPresentationReducer.bind()
-      }
       deviceManagementMessage = "设备操作未完成，本机资料未改变。"
     }
   }
@@ -993,6 +1007,7 @@ final class AppModel {
     syncStatus = .unbound
     managedDevices = []
     pendingLocalCleanup = nil
+    pendingUnlinkLifecycleGeneration = nil
     deviceManagementMessage = nil
   }
 
@@ -1000,29 +1015,39 @@ final class AppModel {
     syncStatus = .failed
     managedDevices = []
     pendingLocalCleanup = .serverRevoked
+    pendingUnlinkLifecycleGeneration = nil
     syncPresentationReducer.failClosed(message: message)
     deviceManagementMessage = message
   }
 
   func cancelPendingLocalStopSync() async {
-    await deviceManagementService?.cancelPendingLocalUnlink()
-    syncPresentationReducer.bind()
+    guard
+      let deviceManagementService,
+      let unlinkLifecycle = pendingUnlinkLifecycleGeneration,
+      await deviceManagementService.cancelPendingLocalUnlink()
+    else { return }
+    pendingUnlinkLifecycleGeneration = nil
+    let restored = syncPresentationReducer.restoreAfterUnlink(unlinkLifecycle)
     pendingLocalCleanup = nil
-    deviceManagementMessage = nil
+    if restored { deviceManagementMessage = nil }
   }
 
   func resumeSyncAfterLocalCleanupFailure() async -> Bool {
     guard
       let deviceManagementService,
-      pendingLocalCleanup == .transportUnknown
+      pendingLocalCleanup == .transportUnknown,
+      let unlinkLifecycle = pendingUnlinkLifecycleGeneration
     else { return false }
     do {
       try await deviceManagementService.resumeSyncAfterPendingLocalCleanup()
       pendingLocalCleanup = nil
-      syncPresentationReducer.bind()
-      deviceManagementMessage =
-        "已保留本机同步凭据并恢复同步；若服务器已撤销此设备，下次同步会要求重新绑定。"
-      return true
+      pendingUnlinkLifecycleGeneration = nil
+      let restored = syncPresentationReducer.restoreAfterUnlink(unlinkLifecycle)
+      if restored {
+        deviceManagementMessage =
+          "已保留本机同步凭据并恢复同步；若服务器已撤销此设备，下次同步会要求重新绑定。"
+      }
+      return restored
     } catch {
       pendingLocalCleanup = await deviceManagementService.pendingLocalCleanup
       deviceManagementMessage = cleanupMessage(for: pendingLocalCleanup)

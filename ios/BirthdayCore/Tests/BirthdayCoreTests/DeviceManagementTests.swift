@@ -345,7 +345,7 @@ private actor RemoteLeaseSuspension {
       try await remoteAccessGate.perform { _ in true }
     }
 
-    await service.cancelPendingLocalUnlink()
+    #expect(await service.cancelPendingLocalUnlink())
 
     #expect(await remoteAccessGate.paused() == false)
     #expect(await remoteAccessGate.currentGeneration() > initialGeneration)
