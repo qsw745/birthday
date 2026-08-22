@@ -8,6 +8,7 @@ func makeSyncContainer() throws -> ModelContainer {
     for: BirthdayEntity.self,
     SyncOperationEntity.self,
     SyncMetadataEntity.self,
+    SyncConflictEntity.self,
     configurations: ModelConfiguration(isStoredInMemoryOnly: true)
   )
 }

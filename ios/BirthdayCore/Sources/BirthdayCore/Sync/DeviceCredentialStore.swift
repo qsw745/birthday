@@ -134,6 +134,14 @@ public final class DeviceCredentialStore: @unchecked Sendable {
     }
   }
 
+  /// Persists a complete rotated bundle only when it belongs to the already-bound device.
+  public func replaceAfterRefresh(_ value: DeviceCredentials, expectedDeviceID: UUID) throws {
+    guard value.deviceId == expectedDeviceID else {
+      throw DeviceCredentialStoreError.deviceIdentityMismatch
+    }
+    try save(value)
+  }
+
   public func clearCredentials() throws {
     try withLock {
       try secure.delete(account: Self.credentialsAccount)
