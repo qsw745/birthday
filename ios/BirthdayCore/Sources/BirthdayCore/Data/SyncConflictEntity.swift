@@ -1,34 +1,38 @@
 import Foundation
 import SwiftData
 
-@Model
-public final class SyncConflictEntity {
-  @Attribute(.unique) public var entityId: UUID
-  public var operationId: UUID?
-  public var localSnapshotJSON: Data
-  public var remoteSnapshotJSON: Data
-  public var createdAt: Date
-  public var updatedAt: Date
-  public var kindRaw: String = "editEdit"
+extension BirthdaySchemaV2 {
+  @Model
+  public final class SyncConflictEntity {
+    @Attribute(.unique) public var entityId: UUID
+    public var operationId: UUID?
+    public var localSnapshotJSON: Data
+    public var remoteSnapshotJSON: Data
+    public var createdAt: Date
+    public var updatedAt: Date
+    public var kindRaw: String = "editEdit"
 
-  public init(
-    entityId: UUID,
-    operationId: UUID?,
-    localSnapshotJSON: Data,
-    remoteSnapshotJSON: Data,
-    createdAt: Date,
-    updatedAt: Date,
-    kindRaw: String = SyncConflictKind.editEdit.rawValue
-  ) {
-    self.entityId = entityId
-    self.operationId = operationId
-    self.localSnapshotJSON = localSnapshotJSON
-    self.remoteSnapshotJSON = remoteSnapshotJSON
-    self.createdAt = createdAt
-    self.updatedAt = updatedAt
-    self.kindRaw = kindRaw
+    public init(
+      entityId: UUID,
+      operationId: UUID?,
+      localSnapshotJSON: Data,
+      remoteSnapshotJSON: Data,
+      createdAt: Date,
+      updatedAt: Date,
+      kindRaw: String = SyncConflictKind.editEdit.rawValue
+    ) {
+      self.entityId = entityId
+      self.operationId = operationId
+      self.localSnapshotJSON = localSnapshotJSON
+      self.remoteSnapshotJSON = remoteSnapshotJSON
+      self.createdAt = createdAt
+      self.updatedAt = updatedAt
+      self.kindRaw = kindRaw
+    }
   }
 }
+
+public typealias SyncConflictEntity = BirthdaySchemaV2.SyncConflictEntity
 
 public enum SyncConflictKind: String, Codable, Equatable, Sendable {
   case editEdit

@@ -3,7 +3,6 @@ import Foundation
 import SwiftData
 import SwiftUI
 import UIKit
-@preconcurrency import UserNotifications
 
 @main
 struct BirthdayMobileApp: App {
@@ -292,79 +291,10 @@ private struct BirthdayAppBootstrapView: View {
       return model
     }
 
-    guard
-      syncRuntimePolicy.allowsRemoteSyncComposition,
-      let remoteBaseURL = appConfiguration.remoteBaseURL
-    else {
-      return makeOfflineAppModel(container: container)
-    }
-
-    let notificationCenter = UNUserNotificationCenter.current()
-    let notificationClient = SystemNotificationCenterClient(center: notificationCenter)
-    let credentials = DeviceCredentialStore(secure: KeychainStore())
-    let mobileAPI = MobileAPIClient(
-      baseURL: remoteBaseURL
-    )
-    let store = BirthdayStore(modelContainer: container)
-    let notificationScheduler = UserNotificationScheduler(center: notificationClient)
-    let reminderPlanner = ReminderPlanner()
-    let remoteAccessGate = RemoteSyncAccessGate()
-    let model = AppModel(
-      store: store,
-      preferences: .standard,
-      authenticator: LocalAuthenticationService(),
-      serverDeviceBinder: ServerDeviceBinder(api: mobileAPI, credentials: credentials),
-      notificationScheduler: notificationScheduler,
-      oneShotNotificationScheduler: OneShotNotificationScheduler(center: notificationClient),
-      reminderPlanner: reminderPlanner,
-      requestNotificationAuthorization: {
-        try await notificationCenter.requestAuthorization(options: [.alert, .sound, .badge])
-      }
-    )
-    let syncEngine = SyncEngine(
-      api: mobileAPI,
-      store: store,
-      credentials: credentials,
-      remoteAccessGate: remoteAccessGate
-    )
-    let initiallyBound = (try? credentials.load()).map { $0.refreshExpiresAt > Date() } ?? false
-    model.configureSyncCoordinator(
-      SyncCoordinator(
-        syncEngine: syncEngine,
-        remoteAccessGate: remoteAccessGate,
-        store: store,
-        credentials: credentials,
-        notificationScheduler: notificationScheduler,
-        reminderPlanner: reminderPlanner,
-        publish: { [weak model] outcome in
-          await model?.publishCompletedSync(outcome)
-        }
-      ),
-      initiallyBound: initiallyBound
-    )
-    model.configureDeviceManagement(
-      DeviceManagementService(
-        api: mobileAPI,
-        credentials: credentials,
-        remoteAccessGate: remoteAccessGate
-      )
-    )
-    return model
-  }
-
-  private func makeOfflineAppModel(container: ModelContainer) -> AppModel {
-    AppModel(
-      store: BirthdayStore(modelContainer: container),
-      preferences: .standard,
-      localOnlyStatusDetail: appConfiguration.localOnlyMessage
-        ?? "生日与提醒只保存在这台设备上。",
-      authenticator: LocalAuthenticationService(),
-      serverDeviceBinder: OfflineServerDeviceBinder(),
-      notificationScheduler: OfflineNotificationScheduler(),
-      oneShotNotificationScheduler: OfflineOneShotNotificationScheduler(),
-      reminderPlanner: ReminderPlanner(),
-      requestNotificationAuthorization: { false }
-    )
+    return ProductionAppModelFactory(
+      appConfiguration: appConfiguration,
+      syncRuntimePolicy: syncRuntimePolicy
+    ).make(container: container)
   }
 
   private func configureTransportCleanupFailureFixture(model: AppModel, store: BirthdayStore) {
@@ -613,26 +543,6 @@ private struct UITestOneShotNotificationScheduler: OneShotNotificationScheduling
 }
 
 private struct UITestNotificationScheduler: NotificationScheduling {
-  func apply(_ plan: ReminderPlan) async throws -> NotificationHealth {
-    let scheduledCount =
-      plan.birthdayNotifications.count
-      + (plan.maintenanceNotification == nil ? 0 : 1)
-    return NotificationHealth(
-      state: .scheduled,
-      scheduledCount: scheduledCount,
-      coverageEnd: plan.coverageEnd,
-      errorCategory: nil
-    )
-  }
-}
-
-private struct OfflineOneShotNotificationScheduler: OneShotNotificationScheduling {
-  func schedule(birthdayID: UUID, name: String, now: Date) async -> OneShotNotificationResult {
-    .scheduled
-  }
-}
-
-private struct OfflineNotificationScheduler: NotificationScheduling {
   func apply(_ plan: ReminderPlan) async throws -> NotificationHealth {
     let scheduledCount =
       plan.birthdayNotifications.count

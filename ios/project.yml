@@ -49,3 +49,10 @@ targets:
       - BirthdayMobileUITests
     dependencies:
       - target: BirthdayMobile
+  BirthdayMobileTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - BirthdayMobileTests
+    dependencies:
+      - target: BirthdayMobile

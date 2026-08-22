@@ -1,5 +1,7 @@
 # 首个 TestFlight 构建验收
 
+> 当前未上传，未验证，也未在任何测试员组可见。
+
 ## 本地准备
 
 - [ ] 从 `ios/Config/Signing.xcconfig.example` 复制本地 `ios/Config/Signing.xcconfig`，只填写正确的 Apple Developer Team；确认该文件未被 Git 跟踪
