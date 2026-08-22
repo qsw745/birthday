@@ -505,23 +505,14 @@ test('a clean child process can import the verifier silently and exit immediatel
   assert.equal(child.stderr, '')
 })
 
-test('an independent child runner reports sanitized CLI query failure with exit code 1', () => {
-  const modulePath = require.resolve('../../scripts/verify_mobile_sync_schema')
-  const runner = `
-    const { runCli } = require(${JSON.stringify(modulePath)})
-    runCli({
-      loadDb: () => ({
-        query: async () => { throw new Error('password=hunter2 host=secret.example') },
-        pool: { end: async () => {} },
-      }),
-      stdout: line => console.log(line),
-      stderr: line => console.error(line),
-    }).then(code => { process.exitCode = code })
-  `
-  const child = spawnSync(process.execPath, ['-e', runner], {
+test('the real CLI entrypoint sanitizes query failure, closes the pool, and exits 1', () => {
+  const scriptPath = require.resolve('../../scripts/verify_mobile_sync_schema')
+  const preloadPath = path.resolve(__dirname, '../fixtures/schemaVerifierDbFailurePreload.js')
+  const child = spawnSync(process.execPath, ['--require', preloadPath, scriptPath], {
     cwd: path.resolve(__dirname, '../..'),
     encoding: 'utf8',
     timeout: 2000,
+    stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
   })
 
   assert.equal(child.error, undefined)
@@ -530,4 +521,5 @@ test('an independent child runner reports sanitized CLI query failure with exit 
   assert.equal(child.stdout, '')
   assert.match(child.stderr, /^MOBILE_SYNC_SCHEMA=FAIL schema query failed \(tables\)\n$/)
   assert.doesNotMatch(child.stderr, /hunter2|secret\.example|password/i)
+  assert.equal(child.output[3], 'POOL_END=CALLED\n')
 })
