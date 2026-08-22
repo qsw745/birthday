@@ -17,7 +17,7 @@ struct SyncSettingsView: View {
           .listRowInsets(EdgeInsets())
           .listRowBackground(Color.clear)
 
-        if case .conflicts = model.syncPresentation {
+        if !model.conflicts.isEmpty {
           Button {
             model.selectedTab = .conflicts
           } label: {
@@ -124,6 +124,7 @@ struct SyncSettingsView: View {
         ScrollView {
           ServerBindingView(
             model: model,
+            presentsSnapshotPreview: false,
             onSkip: { isPresentingBinding = false },
             onBound: {
               isPresentingBinding = false
@@ -173,7 +174,9 @@ struct SyncSettingsView: View {
       Text("将先联系服务器撤销这台设备，再清除本机同步凭据。本机生日资料不会删除。")
     }
     .alert("服务器暂时不可达", isPresented: $isConfirmingLocalStop) {
-      Button("保留同步", role: .cancel) {}
+      Button("保留同步", role: .cancel) {
+        Task { await model.cancelPendingLocalStopSync() }
+      }
       Button("仍要停止本机同步", role: .destructive) {
         Task { _ = await model.confirmLocalStopSync() }
       }

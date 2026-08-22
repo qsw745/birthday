@@ -115,6 +115,7 @@ public actor SyncEngine {
   private let api: any MobileAPI
   private let store: BirthdayStore
   private let credentials: DeviceCredentialStore
+  private let remoteAccessGate: RemoteSyncAccessGate
   private let now: @Sendable () -> Date
   private let timeZone: TimeZone
 
@@ -122,17 +123,30 @@ public actor SyncEngine {
     api: any MobileAPI,
     store: BirthdayStore,
     credentials: DeviceCredentialStore,
+    remoteAccessGate: RemoteSyncAccessGate = RemoteSyncAccessGate(),
     now: @escaping @Sendable () -> Date = Date.init,
     timeZone: TimeZone = .current
   ) {
     self.api = api
     self.store = store
     self.credentials = credentials
+    self.remoteAccessGate = remoteAccessGate
     self.now = now
     self.timeZone = timeZone
   }
 
   public func syncNow() async throws -> SyncSummary {
+    try await remoteAccessGate.perform { [self] permit in
+      try await runSyncNow(remoteAccess: permit)
+    }
+  }
+
+  public func syncNow(withRemoteAccess permit: RemoteSyncAccessPermit) async throws -> SyncSummary {
+    try await remoteAccessGate.validate(permit)
+    return try await runSyncNow(remoteAccess: permit)
+  }
+
+  private func runSyncNow(remoteAccess: RemoteSyncAccessPermit) async throws -> SyncSummary {
     var uploaded = 0
     var conflicts = 0
 
@@ -154,7 +168,7 @@ public actor SyncEngine {
 
       for batch in batches {
         do {
-          let response = try await authorized { accessToken in
+          let response = try await authorized(remoteAccess: remoteAccess) { accessToken in
             try await self.api.push(PushRequest(operations: batch), accessToken: accessToken)
           }
           try await store.applyPushResults(
@@ -186,7 +200,7 @@ public actor SyncEngine {
     var downloaded = 0
     while true {
       let pageCursor = cursor
-      let page = try await authorized { accessToken in
+      let page = try await authorized(remoteAccess: remoteAccess) { accessToken in
         try await self.api.pull(cursor: pageCursor, accessToken: accessToken)
       }
       try await store.applyPull(page, now: now(), timeZone: timeZone)
@@ -199,12 +213,13 @@ public actor SyncEngine {
   }
 
   private func authorized<Value: Sendable>(
+    remoteAccess: RemoteSyncAccessPermit,
     _ action: @Sendable (String) async throws -> Value
   ) async throws -> Value {
     var current = try loadCredentialsForSync()
     var refreshed = false
     if current.accessExpiresAt.timeIntervalSince(now()) < 60 {
-      current = try await refresh(current)
+      current = try await refresh(current, remoteAccess: remoteAccess)
       refreshed = true
     }
 
@@ -212,7 +227,7 @@ public actor SyncEngine {
       return try await action(current.accessToken)
     } catch MobileAPIError.accessExpired {
       guard !refreshed else { throw SyncError.rebindRequired }
-      current = try await refresh(current)
+      current = try await refresh(current, remoteAccess: remoteAccess)
       refreshed = true
       do {
         return try await action(current.accessToken)
@@ -233,11 +248,15 @@ public actor SyncEngine {
     return saved
   }
 
-  private func refresh(_ current: DeviceCredentials) async throws -> DeviceCredentials {
+  private func refresh(
+    _ current: DeviceCredentials,
+    remoteAccess: RemoteSyncAccessPermit
+  ) async throws -> DeviceCredentials {
     do {
       let response = try await api.refresh(RefreshRequest(refreshToken: current.refreshToken))
       guard response.deviceId == current.deviceId else { throw SyncError.rebindRequired }
       let rotated = DeviceCredentials(response, username: current.username)
+      try await remoteAccessGate.validate(remoteAccess)
       try credentials.replaceAfterRefresh(rotated, expectedDeviceID: current.deviceId)
       return rotated
     } catch MobileAPIError.refreshInvalid {

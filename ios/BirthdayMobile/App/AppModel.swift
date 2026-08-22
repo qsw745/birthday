@@ -170,15 +170,7 @@ final class AppModel {
     case failed
   }
 
-  enum SyncPresentation: Equatable {
-    case localOnly
-    case idle(lastSuccess: Date?)
-    case syncing
-    case offline(pendingCount: Int)
-    case failed(message: String, pendingCount: Int)
-    case rebindRequired(pendingCount: Int)
-    case conflicts(count: Int)
-  }
+  typealias SyncPresentation = SyncPresentationState
 
   private enum PreferenceKey {
     static let hasCompletedOnboarding = "top.qisw.birthday.hasCompletedOnboarding"
@@ -214,7 +206,7 @@ final class AppModel {
   )
   private(set) var syncStatus: SyncStatus = .idle
   private(set) var isManualSyncing = false
-  private(set) var syncPresentation: SyncPresentation = .localOnly
+  var syncPresentation: SyncPresentation { syncPresentationReducer.presentation }
   private(set) var syncPendingCount = 0
   private(set) var managedDevices: [ManagedDevice] = []
   private(set) var isLoadingManagedDevices = false
@@ -241,7 +233,8 @@ final class AppModel {
   private let reminderRebuildCoordinator: ReminderRebuildCoordinator
   private var syncCoordinator: SyncCoordinator?
   private var deviceManagementService: DeviceManagementService?
-  private var lastSyncSuccess: Date?
+  private var syncPresentationReducer = SyncPresentationReducer()
+  private var activeSyncPresentationRequest: SyncPresentationRequest?
 
   var isLoading: Bool {
     loadState == .loading
@@ -395,6 +388,7 @@ final class AppModel {
       conflicts = []
       conflictErrorMessage = "同步冲突资料无法安全读取，未执行任何更改。请重新载入后再试。"
     }
+    updateSyncPresentationLocalFacts()
   }
 
   func completeOnboarding(requestNotifications: Bool) async {
@@ -477,8 +471,9 @@ final class AppModel {
         deviceName: normalizedDeviceName
       )
       if syncCoordinator != nil {
+        await deviceManagementService?.resumeAfterBinding()
+        syncPresentationReducer.bind()
         isSyncRuntimeEnabled = true
-        syncPresentation = .idle(lastSuccess: lastSyncSuccess)
       }
       serverBindingState = .credentialsSavedAwaitingSnapshotPreview
       return true
@@ -743,9 +738,10 @@ final class AppModel {
     await rebuildFreshSnapshot(generation: generation, reportReadFailure: true)
   }
 
-  func configureSyncCoordinator(_ coordinator: SyncCoordinator) {
+  func configureSyncCoordinator(_ coordinator: SyncCoordinator, initiallyBound: Bool) {
     syncCoordinator = coordinator
     isSyncRuntimeEnabled = true
+    if initiallyBound { syncPresentationReducer.bind() }
   }
 
   func configureDeviceManagement(_ service: DeviceManagementService) {
@@ -756,7 +752,6 @@ final class AppModel {
     await refreshSyncCounts()
     guard let deviceManagementService else {
       managedDevices = []
-      syncPresentation = .localOnly
       return
     }
 
@@ -765,22 +760,18 @@ final class AppModel {
     do {
       managedDevices = try await deviceManagementService.listDevices()
       deviceManagementMessage = nil
-      applyStableSyncPresentation()
     } catch DeviceManagementError.credentialsUnavailable {
       managedDevices = []
-      syncPresentation = .localOnly
+      deviceManagementMessage = nil
     } catch DeviceManagementError.rebindRequired {
       managedDevices = []
-      syncPresentation = .rebindRequired(pendingCount: syncPendingCount)
+      deviceManagementMessage = "设备列表认证已失效；同步状态将在下次请求时要求重新绑定。"
     } catch MobileAPIError.transport {
       managedDevices = []
-      syncPresentation = .offline(pendingCount: syncPendingCount)
+      deviceManagementMessage = "暂时无法读取设备列表；同步状态未改变。"
     } catch {
       managedDevices = []
-      syncPresentation = .failed(
-        message: "无法读取设备列表，请稍后重试。",
-        pendingCount: syncPendingCount
-      )
+      deviceManagementMessage = "无法读取设备列表，请稍后重试；同步状态未改变。"
     }
   }
 
@@ -796,7 +787,7 @@ final class AppModel {
       await refreshSyncSettings()
       return true
     } catch {
-      applyDeviceManagementError(error)
+      await applyDeviceManagementError(error)
       return false
     }
   }
@@ -806,6 +797,8 @@ final class AppModel {
     isManagingDevice = true
     deviceManagementMessage = nil
     defer { isManagingDevice = false }
+    isSyncRuntimeEnabled = false
+    syncPresentationReducer.pauseOffline()
 
     do {
       let outcome = try await deviceManagementService.beginUnlinkCurrent()
@@ -819,7 +812,7 @@ final class AppModel {
       )
       return nil
     } catch {
-      applyDeviceManagementError(error)
+      await applyDeviceManagementError(error)
       return nil
     }
   }
@@ -848,22 +841,66 @@ final class AppModel {
   func performSync(_ trigger: SyncTrigger) async throws -> SyncRequestOutcome {
     guard isSyncRuntimeEnabled, let syncCoordinator else {
       syncStatus = .unbound
-      syncPresentation = .localOnly
       return .unbound
     }
 
-    let outcome = try await syncCoordinator.request(trigger)
-    switch outcome {
-    case .completed:
-      // The coordinator publishes a completed outcome while it still owns the sync gate.
-      break
-    case .unbound:
-      syncStatus = .unbound
-      syncPresentation = .localOnly
-    case .coalesced:
-      break
+    let request = syncPresentationReducer.beginSync()
+    if let request { activeSyncPresentationRequest = request }
+    syncStatus = .syncing
+    do {
+      let outcome = try await syncCoordinator.request(trigger)
+      switch outcome {
+      case .completed:
+        // Publication completes this generation while both sync gates remain leased.
+        break
+      case .unbound:
+        syncStatus = .unbound
+        if let request { finishSyncPresentation(request, result: .coalesced) }
+      case .coalesced:
+        if let request { finishSyncPresentation(request, result: .coalesced) }
+      }
+      return outcome
+    } catch is CancellationError {
+      syncStatus = .idle
+      if let request { finishSyncPresentation(request, result: .cancelled) }
+      throw CancellationError()
+    } catch SyncError.rebindRequired {
+      syncStatus = .failed
+      await enterRebindRequired()
+      throw SyncError.rebindRequired
+    } catch let error as MobileAPIError {
+      switch error {
+      case .transport:
+        syncStatus = .failed
+        await refreshSyncCounts()
+        if let request { finishSyncPresentation(request, result: .offline) }
+      default:
+        syncStatus = .failed
+        await refreshSyncCounts()
+        if let request {
+          finishSyncPresentation(
+            request,
+            result: .failed(message: "服务器同步未完成；本地资料未回退。")
+          )
+        }
+      }
+      throw error
+    } catch SyncError.retryPersistenceFailed(let category) where category == .transport {
+      syncStatus = .failed
+      await refreshSyncCounts()
+      if let request { finishSyncPresentation(request, result: .offline) }
+      throw SyncError.retryPersistenceFailed(originalCategory: category)
+    } catch {
+      syncStatus = .failed
+      await refreshSyncCounts()
+      if let request {
+        finishSyncPresentation(
+          request,
+          result: .failed(message: "服务器同步未完成；本地资料未回退。")
+        )
+      }
+      throw error
     }
-    return outcome
   }
 
   func publishCompletedSync(_ outcome: SyncRequestOutcome) async {
@@ -871,10 +908,11 @@ final class AppModel {
     records = activeBirthdays
     notificationHealth = health
     syncStatus = .synchronized(summary)
-    lastSyncSuccess = now()
     await reloadConflicts()
     await refreshSyncCounts()
-    applyStableSyncPresentation()
+    if let request = activeSyncPresentationRequest {
+      finishSyncPresentation(request, result: .completed(at: now()))
+    }
   }
 
   func requestSync(_ trigger: SyncTrigger) async {
@@ -888,33 +926,9 @@ final class AppModel {
       }
     }
 
-    syncStatus = .syncing
-    syncPresentation = .syncing
     do {
       _ = try await performSync(trigger)
-    } catch is CancellationError {
-      syncStatus = .idle
-      applyStableSyncPresentation()
-    } catch SyncError.rebindRequired {
-      syncStatus = .failed
-      await refreshSyncCounts()
-      syncPresentation = .rebindRequired(pendingCount: syncPendingCount)
-    } catch MobileAPIError.transport {
-      syncStatus = .failed
-      await refreshSyncCounts()
-      syncPresentation = .offline(pendingCount: syncPendingCount)
-    } catch SyncError.retryPersistenceFailed(let category) where category == .transport {
-      syncStatus = .failed
-      await refreshSyncCounts()
-      syncPresentation = .offline(pendingCount: syncPendingCount)
-    } catch {
-      syncStatus = .failed
-      await refreshSyncCounts()
-      syncPresentation = .failed(
-        message: "服务器同步未完成；本地资料未回退。",
-        pendingCount: syncPendingCount
-      )
-    }
+    } catch {}
   }
 
   private func refreshSyncCounts() async {
@@ -923,44 +937,42 @@ final class AppModel {
     } catch {
       syncPendingCount = 0
     }
+    updateSyncPresentationLocalFacts()
   }
 
-  private func applyStableSyncPresentation() {
-    if !isSyncRuntimeEnabled {
-      syncPresentation = .localOnly
-    } else if !conflicts.isEmpty {
-      syncPresentation = .conflicts(count: conflicts.count)
-    } else {
-      syncPresentation = .idle(lastSuccess: lastSyncSuccess)
-    }
-  }
-
-  private func applyDeviceManagementError(_ error: any Error) {
+  private func applyDeviceManagementError(_ error: any Error) async {
     switch error {
     case DeviceManagementError.confirmationMismatch:
       deviceManagementMessage = "管理员用户名不匹配，未发送撤销请求。"
     case DeviceManagementError.rebindRequired,
       DeviceManagementError.credentialsUnavailable:
-      syncPresentation = .rebindRequired(pendingCount: syncPendingCount)
+      await enterRebindRequired()
       deviceManagementMessage = "需要重新绑定后才能管理设备。"
     case DeviceManagementError.operationInProgress:
       deviceManagementMessage = "另一项设备操作正在进行，请稍候。"
     case MobileAPIError.transport:
-      syncPresentation = .offline(pendingCount: syncPendingCount)
+      if !isSyncRuntimeEnabled { syncPresentationReducer.pauseOffline() }
       deviceManagementMessage = "暂时无法连接服务器，本机资料未改变。"
     case MobileAPIError.server:
+      if !isSyncRuntimeEnabled {
+        syncPresentationReducer.bind()
+        isSyncRuntimeEnabled = true
+      }
       deviceManagementMessage = "服务器未能完成设备操作，本机资料未改变。"
     default:
+      if !isSyncRuntimeEnabled {
+        syncPresentationReducer.bind()
+        isSyncRuntimeEnabled = true
+      }
       deviceManagementMessage = "设备操作未完成，本机资料未改变。"
     }
   }
 
   private func disableSyncRuntimeAfterUnlink() {
     isSyncRuntimeEnabled = false
-    syncPresentation = .localOnly
+    syncPresentationReducer.useLocalOnly()
     syncStatus = .unbound
     managedDevices = []
-    lastSyncSuccess = nil
     needsRevokedCredentialCleanup = false
     deviceManagementMessage = nil
   }
@@ -970,8 +982,39 @@ final class AppModel {
     syncStatus = .failed
     managedDevices = []
     needsRevokedCredentialCleanup = true
-    syncPresentation = .failed(message: message, pendingCount: syncPendingCount)
+    syncPresentationReducer.failClosed(message: message)
     deviceManagementMessage = message
+  }
+
+  func cancelPendingLocalStopSync() async {
+    await deviceManagementService?.cancelPendingLocalUnlink()
+    syncPresentationReducer.bind()
+    isSyncRuntimeEnabled = true
+    deviceManagementMessage = nil
+  }
+
+  private func enterRebindRequired() async {
+    isSyncRuntimeEnabled = false
+    syncPresentationReducer.requireRebind()
+    activeSyncPresentationRequest = nil
+    await deviceManagementService?.pauseForRebind()
+  }
+
+  private func finishSyncPresentation(
+    _ request: SyncPresentationRequest,
+    result: SyncPresentationCompletion
+  ) {
+    syncPresentationReducer.finishSync(request, result: result)
+    if activeSyncPresentationRequest == request {
+      activeSyncPresentationRequest = nil
+    }
+  }
+
+  private func updateSyncPresentationLocalFacts() {
+    syncPresentationReducer.updateLocalFacts(
+      pendingCount: syncPendingCount,
+      conflictCount: conflicts.count
+    )
   }
 
   private func rebuildFreshSnapshot(generation: UInt64, reportReadFailure: Bool) async {

@@ -136,6 +136,115 @@ import Testing
   #expect(await probe.events() == ["sync", "sync", "load", "schedule"])
 }
 
+@Test func presentationReducerIgnoresStaleCompletionsAndAlwaysLeavesSyncing() throws {
+  var reducer = SyncPresentationReducer()
+  #expect(reducer.presentation == .localOnly)
+
+  reducer.bind()
+  reducer.updateLocalFacts(pendingCount: 3, conflictCount: 2)
+  #expect(reducer.presentation == .conflicts(count: 2))
+
+  let pendingStale = reducer.beginSync()
+  let stale = try #require(pendingStale)
+  #expect(reducer.presentation == .syncing)
+  reducer.updateLocalFacts(pendingCount: 5, conflictCount: 4)
+  #expect(reducer.presentation == .syncing)
+  reducer.requireRebind()
+  reducer.finishSync(stale, result: .offline)
+  #expect(reducer.presentation == .rebindRequired(pendingCount: 5))
+
+  reducer.bind()
+  for result in [
+    SyncPresentationCompletion.coalesced,
+    .cancelled,
+    .failed(message: "safe"),
+    .offline,
+    .completed(at: Date(timeIntervalSince1970: 1_800_000_000)),
+  ] {
+    let pendingRequest = reducer.beginSync()
+    let request = try #require(pendingRequest)
+    reducer.finishSync(request, result: result)
+    #expect(reducer.presentation != .syncing)
+  }
+}
+
+@Test func rebindPauseBlocksFutureForegroundAndBackgroundCoordinatorRequests() async throws {
+  let remoteAccessGate = RemoteSyncAccessGate()
+  let probe = SyncTriggerProbe()
+  let coordinator = SyncRequestCoordinator(
+    remoteAccessGate: remoteAccessGate,
+    isBound: { true },
+    synchronizeWithAccess: { _ in try await probe.synchronize() },
+    loadActiveBirthdays: { await probe.loadActiveBirthdays() },
+    planner: ReminderPlanner(calculator: SyncTriggerCalculator()),
+    notificationScheduler: SyncTriggerNotificationScheduler(probe: probe),
+    now: { syncTriggerNow },
+    timeZone: { syncTriggerTimeZone }
+  )
+  let service = DeviceManagementService(
+    api: SyncTriggerPausedMobileAPI(),
+    credentials: DeviceCredentialStore(secure: InMemorySecureTokenStore()),
+    remoteAccessGate: remoteAccessGate
+  )
+  await service.pauseForRebind()
+
+  for trigger in [SyncTrigger.foreground, .backgroundRefresh] {
+    await #expect(throws: RemoteSyncAccessError.paused) {
+      try await coordinator.request(trigger)
+    }
+  }
+  #expect(await probe.events().isEmpty)
+
+  await service.resumeAfterBinding()
+  #expect(try await coordinator.request(.foreground).summary == syncTriggerSummary)
+}
+
+@Test func runtimeInstallGenerationRejectsEveryOlderInstallAfterInvalidation() {
+  var lifecycle = RuntimeInstallGenerationLifecycle()
+  let first = lifecycle.beginInstall()
+  #expect(lifecycle.permits(first))
+
+  lifecycle.invalidate()
+  #expect(lifecycle.permits(first) == false)
+
+  let second = lifecycle.beginInstall()
+  #expect(first != second)
+  #expect(lifecycle.permits(second))
+}
+
+@Test
+@MainActor
+func invalidatedRuntimeInstallCannotCommitOrScheduleAndANewInstallCan() async {
+  let installer = RuntimeInstallationCoordinator<RuntimeInstallTestModel>()
+  let model = RuntimeInstallTestModel()
+  let probe = RuntimeInstallProbe()
+  let stale = Task { @MainActor in
+    await installer.install(
+      model: model,
+      prepare: { await probe.prepareAndSuspend() },
+      commit: { _ in probe.commit() },
+      schedule: { probe.schedule() }
+    )
+  }
+  await probe.waitUntilPreparing()
+
+  installer.invalidate()
+  probe.resumePreparation()
+
+  #expect(await stale.value == false)
+  #expect(probe.events == ["prepare"])
+
+  #expect(
+    await installer.install(
+      model: model,
+      prepare: { probe.prepareWithoutSuspending() },
+      commit: { _ in probe.commit() },
+      schedule: { probe.schedule() }
+    )
+  )
+  #expect(probe.events == ["prepare", "prepare", "commit", "schedule"])
+}
+
 @Test func networkRestorationRequiresAnAdjacentUnsatisfiedToSatisfiedTransition() {
   var transition = NetworkRestorationTransition()
 
@@ -426,6 +535,43 @@ private let syncTriggerNow = Date(timeIntervalSince1970: 1_800_000_000)
 private let syncTriggerTimeZone = TimeZone(identifier: "Asia/Shanghai")!
 private let syncTriggerSummary = SyncSummary(uploaded: 2, downloaded: 3, conflicts: 1, cursor: 7)
 
+@MainActor
+private final class RuntimeInstallTestModel {}
+
+@MainActor
+private final class RuntimeInstallProbe {
+  private(set) var events: [String] = []
+  private var isPreparing = false
+  private var preparationContinuation: CheckedContinuation<Void, Never>?
+
+  func prepareAndSuspend() async {
+    events.append("prepare")
+    isPreparing = true
+    await withCheckedContinuation { preparationContinuation = $0 }
+  }
+
+  func prepareWithoutSuspending() {
+    events.append("prepare")
+  }
+
+  func commit() {
+    events.append("commit")
+  }
+
+  func schedule() {
+    events.append("schedule")
+  }
+
+  func waitUntilPreparing() async {
+    while !isPreparing { await Task.yield() }
+  }
+
+  func resumePreparation() {
+    preparationContinuation?.resume()
+    preparationContinuation = nil
+  }
+}
+
 private enum SyncTriggerTestError: Error, Equatable {
   case syncFailed
   case notificationFailed
@@ -452,6 +598,32 @@ private struct SyncTriggerFailingCalculator: LunarBirthdayCalculating {
   ) throws -> Date {
     throw SyncTriggerTestError.plannerFailed
   }
+}
+
+private struct SyncTriggerPausedMobileAPI: MobileAPI {
+  func login(_ request: LoginRequest) async throws -> TokenResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func refresh(_ request: RefreshRequest) async throws -> TokenResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func snapshot(accessToken: String) async throws -> SnapshotResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func push(_ request: PushRequest, accessToken: String) async throws -> PushResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func pull(cursor: Int64, accessToken: String) async throws -> PullResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func revoke(deviceId: UUID, accessToken: String) async throws {}
+
+  func devices(accessToken: String) async throws -> [MobileDevice] { [] }
 }
 
 private actor SyncTriggerProbe {

@@ -33,12 +33,20 @@ public actor DeviceManagementService {
 
   private let api: any MobileAPI
   private let credentials: DeviceCredentialStore
+  private let remoteAccessGate: RemoteSyncAccessGate
   private var operationInProgress = false
   private var serverRevokedButCredentialClearFailed = false
+  private var pauseToken: RemoteSyncPauseToken?
+  private var awaitingLocalUnlinkConfirmation = false
 
-  public init(api: any MobileAPI, credentials: DeviceCredentialStore) {
+  public init(
+    api: any MobileAPI,
+    credentials: DeviceCredentialStore,
+    remoteAccessGate: RemoteSyncAccessGate = RemoteSyncAccessGate()
+  ) {
     self.api = api
     self.credentials = credentials
+    self.remoteAccessGate = remoteAccessGate
   }
 
   public var isFailClosedAfterServerRevoke: Bool {
@@ -48,8 +56,10 @@ public actor DeviceManagementService {
   public func listDevices() async throws -> [ManagedDevice] {
     let current = try requireUsableCredentials()
     do {
-      return try await api.devices(accessToken: current.accessToken).map {
-        ManagedDevice(device: $0, isCurrent: $0.deviceId == current.deviceId)
+      return try await remoteAccessGate.perform { _ in
+        try await self.api.devices(accessToken: current.accessToken).map {
+          ManagedDevice(device: $0, isCurrent: $0.deviceId == current.deviceId)
+        }
       }
     } catch MobileAPIError.accessExpired {
       throw DeviceManagementError.rebindRequired
@@ -74,7 +84,9 @@ public actor DeviceManagementService {
     }
     try Task.checkCancellation()
     do {
-      try await api.revoke(deviceId: device.deviceId, accessToken: current.accessToken)
+      try await remoteAccessGate.perform { _ in
+        try await self.api.revoke(deviceId: device.deviceId, accessToken: current.accessToken)
+      }
     } catch MobileAPIError.accessExpired {
       throw DeviceManagementError.rebindRequired
     } catch MobileAPIError.refreshInvalid {
@@ -86,6 +98,8 @@ public actor DeviceManagementService {
     try beginOperation()
     defer { operationInProgress = false }
 
+    try Task.checkCancellation()
+    await pauseRemoteAccess()
     let current = try requireUsableCredentials()
     guard let username = current.username, !username.isEmpty else {
       throw DeviceManagementError.rebindRequired
@@ -95,11 +109,18 @@ public actor DeviceManagementService {
     do {
       try await api.revoke(deviceId: current.deviceId, accessToken: current.accessToken)
     } catch MobileAPIError.transport {
+      awaitingLocalUnlinkConfirmation = true
       return .needsLocalConfirmation(message: Self.localUnlinkWarning)
     } catch MobileAPIError.accessExpired {
       throw DeviceManagementError.rebindRequired
     } catch MobileAPIError.refreshInvalid {
       throw DeviceManagementError.rebindRequired
+    } catch is CancellationError {
+      await resumeRemoteAccess()
+      throw CancellationError()
+    } catch {
+      await resumeRemoteAccess()
+      throw error
     }
 
     do {
@@ -118,9 +139,26 @@ public actor DeviceManagementService {
     do {
       try credentials.clearCredentials()
       serverRevokedButCredentialClearFailed = false
+      awaitingLocalUnlinkConfirmation = false
     } catch {
       throw DeviceManagementError.credentialClearFailed
     }
+  }
+
+  public func cancelPendingLocalUnlink() async {
+    guard awaitingLocalUnlinkConfirmation else { return }
+    awaitingLocalUnlinkConfirmation = false
+    await resumeRemoteAccess()
+  }
+
+  public func pauseForRebind() async {
+    await pauseRemoteAccess()
+  }
+
+  public func resumeAfterBinding() async {
+    serverRevokedButCredentialClearFailed = false
+    awaitingLocalUnlinkConfirmation = false
+    await resumeRemoteAccess()
   }
 
   private func beginOperation() throws {
@@ -139,5 +177,15 @@ public actor DeviceManagementService {
       throw DeviceManagementError.credentialsUnavailable
     }
     return current
+  }
+
+  private func pauseRemoteAccess() async {
+    guard pauseToken == nil else { return }
+    pauseToken = await remoteAccessGate.pauseAndDrain()
+  }
+
+  private func resumeRemoteAccess() async {
+    _ = await remoteAccessGate.resume(after: pauseToken)
+    pauseToken = nil
   }
 }

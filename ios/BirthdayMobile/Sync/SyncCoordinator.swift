@@ -9,6 +9,7 @@ final class SyncCoordinator {
 
   init(
     syncEngine: SyncEngine,
+    remoteAccessGate: RemoteSyncAccessGate,
     store: BirthdayStore,
     credentials: DeviceCredentialStore,
     notificationScheduler: any NotificationScheduling,
@@ -18,11 +19,14 @@ final class SyncCoordinator {
     publish: @escaping @MainActor @Sendable (SyncRequestOutcome) async -> Void
   ) {
     coordinator = SyncRequestCoordinator(
+      remoteAccessGate: remoteAccessGate,
       isBound: {
         guard let saved = try credentials.load() else { return false }
         return saved.refreshExpiresAt > now()
       },
-      synchronize: { try await syncEngine.syncNow() },
+      synchronizeWithAccess: { permit in
+        try await syncEngine.syncNow(withRemoteAccess: permit)
+      },
       loadActiveBirthdays: { try await store.activeBirthdays() },
       planner: reminderPlanner,
       notificationScheduler: notificationScheduler,
@@ -163,6 +167,7 @@ final class AppSyncRuntime {
   static let shared = AppSyncRuntime()
 
   private weak var model: AppModel?
+  private let installer = RuntimeInstallationCoordinator<AppModel>()
   private let readiness = BackgroundRefreshReadiness()
   private lazy var backgroundRefreshCoordinator = BackgroundRefreshCoordinator(
     readiness: readiness
@@ -177,15 +182,20 @@ final class AppSyncRuntime {
     backgroundRefreshCoordinator.registerAndSchedule()
   }
 
-  func install(model: AppModel) async {
-    self.model = model
-    await readiness.markReady()
-    backgroundRefreshCoordinator.scheduleNext()
+  @discardableResult
+  func install(model: AppModel) async -> Bool {
+    await installer.install(
+      model: model,
+      prepare: { [readiness] in await readiness.markReady() },
+      commit: { [weak self] candidate in self?.model = candidate },
+      schedule: { [weak self] in self?.backgroundRefreshCoordinator.scheduleNext() }
+    )
   }
 
   func uninstall(model: AppModel) {
+    installer.invalidate()
+    backgroundRefreshCoordinator.cancelPending()
     guard self.model === model else { return }
     self.model = nil
-    backgroundRefreshCoordinator.cancelPending()
   }
 }

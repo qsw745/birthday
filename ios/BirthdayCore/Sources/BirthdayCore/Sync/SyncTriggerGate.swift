@@ -30,6 +30,200 @@ public enum SyncRequestOutcome: Equatable, Sendable {
   }
 }
 
+public enum SyncPresentationState: Equatable, Sendable {
+  case localOnly
+  case idle(lastSuccess: Date?)
+  case syncing
+  case offline(pendingCount: Int)
+  case failed(message: String, pendingCount: Int)
+  case rebindRequired(pendingCount: Int)
+  case conflicts(count: Int)
+}
+
+public enum SyncPresentationCompletion: Equatable, Sendable {
+  case completed(at: Date)
+  case coalesced
+  case cancelled
+  case offline
+  case failed(message: String)
+}
+
+public struct SyncPresentationRequest: Equatable, Sendable {
+  fileprivate let generation: UInt64
+}
+
+/// Reduces lifecycle, local facts, and one generation-scoped request into one presentation value.
+public struct SyncPresentationReducer: Equatable, Sendable {
+  private enum Lifecycle: Equatable, Sendable {
+    case localOnly
+    case bound
+    case rebindRequired
+  }
+
+  private enum Transient: Equatable, Sendable {
+    case stable
+    case syncing
+    case offline
+    case failed(message: String)
+  }
+
+  private var lifecycle: Lifecycle = .localOnly
+  private var transient: Transient = .stable
+  private var generation: UInt64 = 0
+  private var pendingCount = 0
+  private var conflictCount = 0
+  private var lastSuccess: Date?
+
+  public init() {}
+
+  public var presentation: SyncPresentationState {
+    switch lifecycle {
+    case .localOnly:
+      return .localOnly
+    case .rebindRequired:
+      return .rebindRequired(pendingCount: pendingCount)
+    case .bound:
+      switch transient {
+      case .syncing:
+        return .syncing
+      case .offline:
+        return .offline(pendingCount: pendingCount)
+      case .failed(let message):
+        return .failed(message: message, pendingCount: pendingCount)
+      case .stable:
+        if conflictCount > 0 { return .conflicts(count: conflictCount) }
+        return .idle(lastSuccess: lastSuccess)
+      }
+    }
+  }
+
+  public mutating func bind() {
+    advanceGeneration()
+    lifecycle = .bound
+    transient = .stable
+  }
+
+  public mutating func useLocalOnly() {
+    advanceGeneration()
+    lifecycle = .localOnly
+    transient = .stable
+    lastSuccess = nil
+  }
+
+  public mutating func requireRebind() {
+    advanceGeneration()
+    lifecycle = .rebindRequired
+    transient = .stable
+  }
+
+  public mutating func failClosed(message: String) {
+    advanceGeneration()
+    lifecycle = .bound
+    transient = .failed(message: message)
+  }
+
+  public mutating func updateLocalFacts(pendingCount: Int, conflictCount: Int) {
+    self.pendingCount = max(0, pendingCount)
+    self.conflictCount = max(0, conflictCount)
+  }
+
+  public mutating func beginSync() -> SyncPresentationRequest? {
+    guard lifecycle == .bound, transient != .syncing else { return nil }
+    advanceGeneration()
+    transient = .syncing
+    return SyncPresentationRequest(generation: generation)
+  }
+
+  public mutating func pauseOffline() {
+    advanceGeneration()
+    lifecycle = .bound
+    transient = .offline
+  }
+
+  public mutating func finishSync(
+    _ request: SyncPresentationRequest,
+    result: SyncPresentationCompletion
+  ) {
+    guard lifecycle == .bound, request.generation == generation else { return }
+    switch result {
+    case .completed(let date):
+      lastSuccess = date
+      transient = .stable
+    case .coalesced, .cancelled:
+      transient = .stable
+    case .offline:
+      transient = .offline
+    case .failed(let message):
+      transient = .failed(message: message)
+    }
+  }
+
+  private mutating func advanceGeneration() {
+    generation &+= 1
+  }
+}
+
+public struct RuntimeInstallGeneration: Equatable, Sendable {
+  fileprivate let value: UInt64
+}
+
+public struct RuntimeInstallGenerationLifecycle: Equatable, Sendable {
+  private var generation: UInt64 = 0
+
+  public init() {}
+
+  public mutating func beginInstall() -> RuntimeInstallGeneration {
+    generation &+= 1
+    return RuntimeInstallGeneration(value: generation)
+  }
+
+  public mutating func invalidate() {
+    generation &+= 1
+  }
+
+  public func permits(_ candidate: RuntimeInstallGeneration) -> Bool {
+    candidate.value == generation
+  }
+}
+
+@MainActor
+public final class RuntimeInstallationCoordinator<Model: AnyObject> {
+  private var lifecycle = RuntimeInstallGenerationLifecycle()
+  private var task: Task<Bool, Never>?
+
+  public init() {}
+
+  @discardableResult
+  public func install(
+    model: Model,
+    prepare: @escaping @MainActor @Sendable () async -> Void,
+    commit: @escaping @MainActor @Sendable (Model) -> Void,
+    schedule: @escaping @MainActor @Sendable () -> Void
+  ) async -> Bool {
+    task?.cancel()
+    let generation = lifecycle.beginInstall()
+    let candidate = Task { @MainActor [weak self, weak model] in
+      guard let self, let model else { return false }
+      await prepare()
+      guard lifecycle.permits(generation), !Task.isCancelled else { return false }
+      commit(model)
+      guard lifecycle.permits(generation), !Task.isCancelled else { return false }
+      schedule()
+      return true
+    }
+    task = candidate
+    let installed = await candidate.value
+    if lifecycle.permits(generation) { task = nil }
+    return installed
+  }
+
+  public func invalidate() {
+    lifecycle.invalidate()
+    task?.cancel()
+    task = nil
+  }
+}
+
 /// Holds the single in-process lease for work that may start a sync request.
 public actor SyncTriggerGate {
   private var running = false
@@ -56,6 +250,105 @@ public actor SyncTriggerGate {
   }
 }
 
+public enum RemoteSyncAccessError: Error, Equatable, Sendable {
+  case paused
+  case staleGeneration
+}
+
+public struct RemoteSyncAccessPermit: Equatable, Sendable {
+  fileprivate let gateID: UUID
+  fileprivate let generation: UInt64
+}
+
+public struct RemoteSyncPauseToken: Equatable, Sendable {
+  fileprivate let generation: UInt64
+}
+
+/// Owns the credential-sensitive remote boundary shared by sync and device management.
+///
+/// Pausing advances the generation, prevents new work, cancels every tracked lease, and does not
+/// return until even cancellation-insensitive work has left the boundary. Credential deletion or
+/// replacement can therefore happen only after older refresh writes are impossible.
+public actor RemoteSyncAccessGate {
+  private let gateID = UUID()
+  private var generation: UInt64 = 0
+  private var isPaused = false
+  private var cancellations: [UUID: @Sendable () -> Void] = [:]
+  private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+
+  public init() {}
+
+  public func perform<Value: Sendable>(
+    _ operation: @escaping @Sendable (RemoteSyncAccessPermit) async throws -> Value
+  ) async throws -> Value {
+    guard !isPaused else { throw RemoteSyncAccessError.paused }
+    let operationID = UUID()
+    let permit = RemoteSyncAccessPermit(gateID: gateID, generation: generation)
+    let task = Task { try await operation(permit) }
+    cancellations[operationID] = { task.cancel() }
+
+    do {
+      let value = try await withTaskCancellationHandler {
+        try await task.value
+      } onCancel: {
+        task.cancel()
+      }
+      finish(operationID)
+      return value
+    } catch {
+      finish(operationID)
+      throw error
+    }
+  }
+
+  @discardableResult
+  public func pauseAndDrain() async -> RemoteSyncPauseToken {
+    if !isPaused {
+      generation &+= 1
+      isPaused = true
+    }
+    let token = RemoteSyncPauseToken(generation: generation)
+    for cancel in cancellations.values {
+      cancel()
+    }
+    guard !cancellations.isEmpty else { return token }
+    await withCheckedContinuation { drainWaiters.append($0) }
+    return token
+  }
+
+  @discardableResult
+  public func resume(after token: RemoteSyncPauseToken?) -> UInt64 {
+    guard isPaused else {
+      generation &+= 1
+      return generation
+    }
+    guard token?.generation == generation else { return generation }
+    generation &+= 1
+    isPaused = false
+    return generation
+  }
+
+  public func paused() -> Bool { isPaused }
+
+  public func currentGeneration() -> UInt64 { generation }
+
+  public func validate(_ permit: RemoteSyncAccessPermit) throws {
+    guard !isPaused, permit.gateID == gateID, permit.generation == generation else {
+      throw RemoteSyncAccessError.staleGeneration
+    }
+  }
+
+  private func finish(_ operationID: UUID) {
+    cancellations.removeValue(forKey: operationID)
+    guard cancellations.isEmpty else { return }
+    let waiters = drainWaiters
+    drainWaiters.removeAll()
+    for waiter in waiters {
+      waiter.resume()
+    }
+  }
+}
+
 /// Coordinates the side-effect order shared by foreground and background triggers.
 ///
 /// The mobile target supplies the concrete `SyncEngine`, `BirthdayStore`, and system
@@ -63,8 +356,9 @@ public actor SyncTriggerGate {
 /// cancellation, and notification ordering independently testable.
 public actor SyncRequestCoordinator {
   private let gate: SyncTriggerGate
+  private let remoteAccessGate: RemoteSyncAccessGate?
   private let isBound: @Sendable () async throws -> Bool
-  private let synchronize: @Sendable () async throws -> SyncSummary
+  private let synchronize: @Sendable (RemoteSyncAccessPermit?) async throws -> SyncSummary
   private let loadActiveBirthdays: @Sendable () async throws -> [BirthdayRecord]
   private let planner: ReminderPlanner
   private let notificationScheduler: any NotificationScheduling
@@ -84,8 +378,36 @@ public actor SyncRequestCoordinator {
     publish: @escaping @Sendable (SyncRequestOutcome) async -> Void = { _ in }
   ) {
     self.gate = gate
+    remoteAccessGate = nil
     self.isBound = isBound
-    self.synchronize = synchronize
+    self.synchronize = { _ in try await synchronize() }
+    self.loadActiveBirthdays = loadActiveBirthdays
+    self.planner = planner
+    self.notificationScheduler = notificationScheduler
+    self.now = now
+    self.timeZone = timeZone
+    self.publish = publish
+  }
+
+  public init(
+    gate: SyncTriggerGate = SyncTriggerGate(),
+    remoteAccessGate: RemoteSyncAccessGate,
+    isBound: @escaping @Sendable () async throws -> Bool,
+    synchronizeWithAccess: @escaping @Sendable (RemoteSyncAccessPermit) async throws -> SyncSummary,
+    loadActiveBirthdays: @escaping @Sendable () async throws -> [BirthdayRecord],
+    planner: ReminderPlanner,
+    notificationScheduler: any NotificationScheduling,
+    now: @escaping @Sendable () -> Date = Date.init,
+    timeZone: @escaping @Sendable () -> TimeZone = { .current },
+    publish: @escaping @Sendable (SyncRequestOutcome) async -> Void = { _ in }
+  ) {
+    self.gate = gate
+    self.remoteAccessGate = remoteAccessGate
+    self.isBound = isBound
+    synchronize = { permit in
+      guard let permit else { throw RemoteSyncAccessError.staleGeneration }
+      return try await synchronizeWithAccess(permit)
+    }
     self.loadActiveBirthdays = loadActiveBirthdays
     self.planner = planner
     self.notificationScheduler = notificationScheduler
@@ -97,8 +419,8 @@ public actor SyncRequestCoordinator {
   public func request(_ trigger: SyncTrigger) async throws -> SyncRequestOutcome {
     _ = trigger
     try Task.checkCancellation()
-    guard try await isBound() else { return .unbound }
-
+    let remoteAccessGate = remoteAccessGate
+    let isBound = isBound
     let synchronize = synchronize
     let loadActiveBirthdays = loadActiveBirthdays
     let planner = planner
@@ -108,36 +430,49 @@ public actor SyncRequestCoordinator {
     let publish = publish
     guard
       let outcome = try await gate.perform({
-        try Task.checkCancellation()
-        let summary = try await synchronize()
-        try Task.checkCancellation()
-        let records = try await loadActiveBirthdays()
-        try Task.checkCancellation()
+        let performRequest: @Sendable (RemoteSyncAccessPermit?) async throws -> SyncRequestOutcome =
+          { permit in
+            try Task.checkCancellation()
+            guard try await isBound() else { return .unbound }
+            let summary = try await synchronize(permit)
+            try Task.checkCancellation()
+            let records = try await loadActiveBirthdays()
+            try Task.checkCancellation()
 
-        let plan: ReminderPlan?
-        do {
-          plan = try planner.makePlan(records: records, now: now(), timeZone: timeZone())
-        } catch {
-          plan = nil
-        }
+            let plan: ReminderPlan?
+            do {
+              plan = try planner.makePlan(records: records, now: now(), timeZone: timeZone())
+            } catch {
+              plan = nil
+            }
 
-        let health: NotificationHealth
-        if let plan {
-          try Task.checkCancellation()
-          do {
-            health = try await notificationScheduler.apply(plan)
-          } catch {
-            health = Self.failedNotificationHealth(category: "schedule_failed")
+            let health: NotificationHealth
+            if let plan {
+              try Task.checkCancellation()
+              do {
+                health = try await notificationScheduler.apply(plan)
+              } catch {
+                health = Self.failedNotificationHealth(category: "schedule_failed")
+              }
+            } else {
+              health = Self.failedNotificationHealth(category: "plan_failed")
+            }
+
+            try Task.checkCancellation()
+            let outcome = SyncRequestOutcome.completed(summary, records, health)
+            await publish(outcome)
+            try Task.checkCancellation()
+            return outcome
+          }
+
+        if let remoteAccessGate {
+          return try await remoteAccessGate.perform { permit in
+            try await performRequest(permit)
           }
         } else {
-          health = Self.failedNotificationHealth(category: "plan_failed")
+          try Task.checkCancellation()
+          return try await performRequest(nil)
         }
-
-        try Task.checkCancellation()
-        let outcome = SyncRequestOutcome.completed(summary, records, health)
-        await publish(outcome)
-        try Task.checkCancellation()
-        return outcome
       })
     else {
       return .coalesced

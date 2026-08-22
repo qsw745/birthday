@@ -6,6 +6,7 @@ struct ServerBindingView: View {
   @Bindable var model: AppModel
   let onSkip: () -> Void
   let onBound: () -> Void
+  let presentsSnapshotPreview: Bool
 
   @State private var username = ""
   @State private var password = ""
@@ -21,12 +22,14 @@ struct ServerBindingView: View {
   init(
     model: AppModel,
     defaultDeviceName: String = UIDevice.current.name,
+    presentsSnapshotPreview: Bool = true,
     onSkip: @escaping () -> Void,
     onBound: @escaping () -> Void
   ) {
     self.model = model
     self.onSkip = onSkip
     self.onBound = onBound
+    self.presentsSnapshotPreview = presentsSnapshotPreview
     _deviceName = State(initialValue: defaultDeviceName)
   }
 
@@ -58,7 +61,11 @@ struct ServerBindingView: View {
               Image(systemName: "arrow.triangle.2.circlepath.icloud.fill")
                 .accessibilityHidden(true)
             }
-            Text(isBinding ? "正在安全绑定" : "绑定并查看预览")
+            Text(
+              isBinding
+                ? "正在安全绑定"
+                : (presentsSnapshotPreview ? "绑定并查看预览" : "重新绑定并恢复同步")
+            )
           }
           .frame(maxWidth: .infinity, minHeight: 44)
         }
@@ -67,7 +74,11 @@ struct ServerBindingView: View {
         .tint(ModernAirTheme.tide)
         .disabled(isBinding)
         .accessibilityIdentifier("bindServerButton")
-        .accessibilityHint("使用当前填写的账号绑定此设备，成功后查看首次导入预览")
+        .accessibilityHint(
+          presentsSnapshotPreview
+            ? "使用当前填写的账号绑定此设备，成功后查看首次导入预览"
+            : "使用当前填写的账号重新绑定此设备并恢复同步"
+        )
 
         Button("暂不绑定", action: skip)
           .buttonStyle(.bordered)
@@ -94,16 +105,20 @@ struct ServerBindingView: View {
         .accessibilityHidden(true)
 
       VStack(spacing: 10) {
-        Text("连接服务器（可选）")
+        Text(presentsSnapshotPreview ? "连接服务器（可选）" : "重新绑定服务器")
           .font(.system(.largeTitle, design: .rounded, weight: .bold))
           .multilineTextAlignment(.center)
           .foregroundStyle(ModernAirTheme.ink)
 
-        Text("绑定后会先进入导入预览；确认前不会改动本机生日资料，也不会推进同步游标。跳过后仍可完整离线使用。")
-          .font(.body)
-          .multilineTextAlignment(.center)
-          .foregroundStyle(ModernAirTheme.secondaryInk)
-          .fixedSize(horizontal: false, vertical: true)
+        Text(
+          presentsSnapshotPreview
+            ? "绑定后会先进入导入预览；确认前不会改动本机生日资料，也不会推进同步游标。跳过后仍可完整离线使用。"
+            : "重新绑定只更新这台设备的同步凭据并恢复同步，不会删除或重新导入本机生日资料。"
+        )
+        .font(.body)
+        .multilineTextAlignment(.center)
+        .foregroundStyle(ModernAirTheme.secondaryInk)
+        .fixedSize(horizontal: false, vertical: true)
       }
     }
   }

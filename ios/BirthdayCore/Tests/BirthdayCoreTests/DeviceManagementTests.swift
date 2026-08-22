@@ -65,6 +65,62 @@ private actor DeviceManagementAPI: MobileAPI {
   }
 }
 
+private actor RefreshUnlinkRaceAPI: MobileAPI {
+  private let deviceID: UUID
+  private var refreshStarted = false
+  private var refreshContinuation: CheckedContinuation<Void, Never>?
+  private var revokeCount = 0
+
+  init(deviceID: UUID) {
+    self.deviceID = deviceID
+  }
+
+  func login(_ request: LoginRequest) async throws -> TokenResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func refresh(_ request: RefreshRequest) async throws -> TokenResponse {
+    refreshStarted = true
+    await withCheckedContinuation { refreshContinuation = $0 }
+    return TokenResponse(
+      deviceId: deviceID,
+      accessToken: "stale-refreshed-access",
+      accessExpiresAt: Date(timeIntervalSince1970: 1_800_003_600),
+      refreshToken: "stale-refreshed-refresh",
+      refreshExpiresAt: Date(timeIntervalSince1970: 1_900_000_000)
+    )
+  }
+
+  func snapshot(accessToken: String) async throws -> SnapshotResponse {
+    throw MobileAPIError.invalidResponse
+  }
+
+  func push(_ request: PushRequest, accessToken: String) async throws -> PushResponse {
+    PushResponse(results: [])
+  }
+
+  func pull(cursor: Int64, accessToken: String) async throws -> PullResponse {
+    PullResponse(changes: [], nextCursor: cursor, hasMore: false)
+  }
+
+  func revoke(deviceId: UUID, accessToken: String) async throws {
+    revokeCount += 1
+  }
+
+  func devices(accessToken: String) async throws -> [MobileDevice] { [] }
+
+  func waitForRefresh() async {
+    while !refreshStarted { await Task.yield() }
+  }
+
+  func resumeRefresh() {
+    refreshContinuation?.resume()
+    refreshContinuation = nil
+  }
+
+  func recordedRevokeCount() -> Int { revokeCount }
+}
+
 private enum DeleteFailure: Error, Equatable { case denied }
 
 private final class DeleteFailingSecureTokenStore: SecureTokenStore, @unchecked Sendable {
@@ -203,7 +259,12 @@ private final class DeleteFailingSecureTokenStore: SecureTokenStore, @unchecked 
   @Test func transportFailurePreservesCredentialsUntilExplicitLocalConfirmation() async throws {
     let credentials = try makeCredentialStore()
     let api = DeviceManagementAPI(revokeMode: .failure(.transport("url_error_-1009")))
-    let service = DeviceManagementService(api: api, credentials: credentials)
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let service = DeviceManagementService(
+      api: api,
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
 
     let outcome = try await service.beginUnlinkCurrent()
 
@@ -212,10 +273,59 @@ private final class DeleteFailingSecureTokenStore: SecureTokenStore, @unchecked 
         == .needsLocalConfirmation(message: "服务器可能仍保留此设备，可在重新绑定后撤销")
     )
     #expect(try credentials.load() != nil)
+    #expect(await remoteAccessGate.paused())
 
     try await service.confirmLocalUnlink()
 
     #expect(try credentials.load() == nil)
+    #expect(await remoteAccessGate.paused())
+  }
+
+  @Test func cancellingTransportFallbackResumesOnlyWithANewRemoteGeneration() async throws {
+    let credentials = try makeCredentialStore()
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let service = DeviceManagementService(
+      api: DeviceManagementAPI(revokeMode: .failure(.transport("offline"))),
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+    let initialGeneration = await remoteAccessGate.currentGeneration()
+
+    #expect(
+      try await service.beginUnlinkCurrent()
+        == .needsLocalConfirmation(message: DeviceManagementService.localUnlinkWarning)
+    )
+    await #expect(throws: RemoteSyncAccessError.paused) {
+      try await remoteAccessGate.perform { _ in true }
+    }
+
+    await service.cancelPendingLocalUnlink()
+
+    #expect(await remoteAccessGate.paused() == false)
+    #expect(await remoteAccessGate.currentGeneration() > initialGeneration)
+    #expect(try await remoteAccessGate.perform { _ in true })
+    #expect(try credentials.load() != nil)
+  }
+
+  @Test func rebindPauseRejectsFutureRemoteWorkUntilBindingStartsANewGeneration() async throws {
+    let credentials = try makeCredentialStore()
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let service = DeviceManagementService(
+      api: DeviceManagementAPI(),
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+
+    await service.pauseForRebind()
+    let pausedGeneration = await remoteAccessGate.currentGeneration()
+    await #expect(throws: RemoteSyncAccessError.paused) {
+      try await remoteAccessGate.perform { _ in true }
+    }
+
+    await service.resumeAfterBinding()
+
+    #expect(await remoteAccessGate.currentGeneration() > pausedGeneration)
+    #expect(try await remoteAccessGate.perform { _ in true })
   }
 
   @Test(arguments: [MobileAPIError.accessExpired, MobileAPIError.refreshInvalid])
@@ -304,6 +414,55 @@ private final class DeleteFailingSecureTokenStore: SecureTokenStore, @unchecked 
 
     #expect(await api.revokeRequests.isEmpty)
     #expect(try credentials.load() != nil)
+  }
+
+  @Test func unlinkCannotBeUndoneByAnOlderInFlightCredentialRefresh() async throws {
+    let secure = InMemorySecureTokenStore()
+    let credentials = DeviceCredentialStore(secure: secure, makeDeviceID: { self.currentID })
+    try credentials.save(
+      DeviceCredentials(
+        deviceId: currentID,
+        accessToken: "expiring-access",
+        accessExpiresAt: Date(timeIntervalSince1970: 1_800_000_030),
+        refreshToken: "refresh-current",
+        refreshExpiresAt: Date(timeIntervalSince1970: 1_900_000_000),
+        username: "admin"
+      ))
+    let api = RefreshUnlinkRaceAPI(deviceID: currentID)
+    let remoteAccessGate = RemoteSyncAccessGate()
+    let engine = SyncEngine(
+      api: api,
+      store: try makeSyncStore(),
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate,
+      now: { Date(timeIntervalSince1970: 1_800_000_000) }
+    )
+    let service = DeviceManagementService(
+      api: api,
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+    let sync = Task { try await engine.syncNow() }
+    await api.waitForRefresh()
+
+    let unlink = Task { try await service.beginUnlinkCurrent() }
+    for _ in 0..<100 { await Task.yield() }
+    #expect(await api.recordedRevokeCount() == 0)
+    #expect(try credentials.load() != nil)
+
+    await api.resumeRefresh()
+    do {
+      _ = try await sync.value
+    } catch RemoteSyncAccessError.staleGeneration {
+      // The pause generation fences the old refresh before its Keychain write.
+    } catch is CancellationError {
+      // Cooperative APIs may observe the gate's cancellation before returning a response.
+    }
+    #expect(try await unlink.value == .unlinked)
+
+    #expect(try credentials.load() == nil)
+    let restartedStore = DeviceCredentialStore(secure: secure)
+    #expect(try restartedStore.load() == nil)
   }
 
   private func makeCredentialStore(username: String? = "admin") throws -> DeviceCredentialStore {

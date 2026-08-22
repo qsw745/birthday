@@ -85,8 +85,8 @@ private struct BirthdayAppBootstrapView: View {
         .onChange(of: model.isSyncRuntimeEnabled) { _, enabled in
           if enabled {
             Task {
-              await AppSyncRuntime.shared.install(model: model)
-              guard scenePhase == .active else { return }
+              let installed = await AppSyncRuntime.shared.install(model: model)
+              guard installed, model.isSyncRuntimeEnabled, scenePhase == .active else { return }
               startActiveSceneSync(for: model, trigger: .foreground)
             }
           } else {
@@ -163,6 +163,7 @@ private struct BirthdayAppBootstrapView: View {
     trigger: SyncTrigger,
     reloadBeforeRequest: Bool = true
   ) {
+    guard model.isSyncRuntimeEnabled else { return }
     stopNetworkRestorationMonitoring()
     sceneSyncRequests.activate(
       reload: {
@@ -171,7 +172,10 @@ private struct BirthdayAppBootstrapView: View {
       configure: { generation in
         configureOrdinarySyncTriggers(for: model, generation: generation)
       },
-      request: { await model.requestSync(trigger) }
+      request: {
+        guard model.isSyncRuntimeEnabled else { return }
+        await model.requestSync(trigger)
+      }
     )
   }
 
@@ -181,6 +185,7 @@ private struct BirthdayAppBootstrapView: View {
   ) {
     guard
       syncRuntimeEnabled,
+      model.isSyncRuntimeEnabled,
       sceneSyncRequests.permits(generation),
       !Task.isCancelled
     else { return }
@@ -191,6 +196,7 @@ private struct BirthdayAppBootstrapView: View {
     case .startNewMonitor:
       let monitor = NetworkRestorationMonitor {
         sceneSyncRequests.enqueueNetworkRestoration(for: generation) {
+          guard model.isSyncRuntimeEnabled else { return }
           await model.requestSync(.networkRestored)
         }
       }
@@ -282,6 +288,7 @@ private struct BirthdayAppBootstrapView: View {
     let store = BirthdayStore(modelContainer: container)
     let notificationScheduler = UserNotificationScheduler(center: notificationClient)
     let reminderPlanner = ReminderPlanner()
+    let remoteAccessGate = RemoteSyncAccessGate()
     let model = AppModel(
       store: store,
       preferences: .standard,
@@ -294,10 +301,17 @@ private struct BirthdayAppBootstrapView: View {
         try await notificationCenter.requestAuthorization(options: [.alert, .sound, .badge])
       }
     )
-    let syncEngine = SyncEngine(api: mobileAPI, store: store, credentials: credentials)
+    let syncEngine = SyncEngine(
+      api: mobileAPI,
+      store: store,
+      credentials: credentials,
+      remoteAccessGate: remoteAccessGate
+    )
+    let initiallyBound = (try? credentials.load()).map { $0.refreshExpiresAt > Date() } ?? false
     model.configureSyncCoordinator(
       SyncCoordinator(
         syncEngine: syncEngine,
+        remoteAccessGate: remoteAccessGate,
         store: store,
         credentials: credentials,
         notificationScheduler: notificationScheduler,
@@ -305,10 +319,15 @@ private struct BirthdayAppBootstrapView: View {
         publish: { [weak model] outcome in
           await model?.publishCompletedSync(outcome)
         }
-      )
+      ),
+      initiallyBound: initiallyBound
     )
     model.configureDeviceManagement(
-      DeviceManagementService(api: mobileAPI, credentials: credentials)
+      DeviceManagementService(
+        api: mobileAPI,
+        credentials: credentials,
+        remoteAccessGate: remoteAccessGate
+      )
     )
     return model
   }
