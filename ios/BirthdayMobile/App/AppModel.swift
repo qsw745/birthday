@@ -134,6 +134,13 @@ final class AppModel {
     case failed(message: String)
   }
 
+  enum ServerBindingState: Equatable {
+    case idle
+    case binding
+    case failed(message: String)
+    case credentialsSavedAwaitingSnapshotPreview
+  }
+
   private enum PreferenceKey {
     static let hasCompletedOnboarding = "top.qisw.birthday.hasCompletedOnboarding"
     static let lockEnabled = "top.qisw.birthday.lockEnabled"
@@ -151,6 +158,7 @@ final class AppModel {
   private(set) var unlockState: UnlockState = .idle
   private(set) var isCompletingOnboarding = false
   private(set) var onboardingErrorMessage: String?
+  private(set) var serverBindingState: ServerBindingState = .idle
   private(set) var isRequestingNotificationAuthorization = false
   private(set) var notificationHealth = NotificationHealth(
     state: .notRequested,
@@ -167,6 +175,7 @@ final class AppModel {
   private var reminderOperationsInFlight = 0
   private let preferences: UserDefaults
   private let authenticator: any AppLockAuthenticating
+  private let serverDeviceBinder: any ServerDeviceBinding
   private let requestNotificationAuthorization: @MainActor () async throws -> Bool
   private let now: @Sendable () -> Date
   private let timeZone: @Sendable () -> TimeZone
@@ -214,6 +223,7 @@ final class AppModel {
     initiallyLoaded: Bool = false,
     preferences: UserDefaults = .standard,
     authenticator: any AppLockAuthenticating = LocalAuthenticationService(),
+    serverDeviceBinder: any ServerDeviceBinding,
     notificationScheduler: any NotificationScheduling = UserNotificationScheduler(
       center: SystemNotificationCenterClient()
     ),
@@ -231,6 +241,7 @@ final class AppModel {
     loadState = initiallyLoaded ? .loaded : .idle
     self.preferences = preferences
     self.authenticator = authenticator
+    self.serverDeviceBinder = serverDeviceBinder
     self.oneShotNotificationScheduler = oneShotNotificationScheduler
     self.requestNotificationAuthorization = requestNotificationAuthorization
     self.now = now
@@ -276,11 +287,18 @@ final class AppModel {
   }
 
   func completeOnboarding(requestNotifications: Bool) async {
+    guard await prepareOnboardingNotifications(requestNotifications: requestNotifications) else {
+      return
+    }
+    finishOnboarding()
+  }
+
+  func prepareOnboardingNotifications(requestNotifications: Bool) async -> Bool {
     guard
       !hasCompletedOnboarding,
       !isCompletingOnboarding,
       !isRequestingNotificationAuthorization
-    else { return }
+    else { return false }
 
     isCompletingOnboarding = true
     onboardingErrorMessage = nil
@@ -299,10 +317,9 @@ final class AppModel {
         onboardingErrorMessage = "通知权限请求未完成。请重试，或选择暂不开启。"
         isRequestingNotificationAuthorization = false
         isCompletingOnboarding = false
-        return
+        return false
       }
 
-      completeOnboardingState()
       if isAuthorized {
         await rebuildKnownSnapshot(records, generation: generation)
       } else if generation == reminderGeneration {
@@ -310,11 +327,50 @@ final class AppModel {
       }
       isRequestingNotificationAuthorization = false
       isCompletingOnboarding = false
-      return
+      return true
     }
 
-    completeOnboardingState()
     isCompletingOnboarding = false
+    return true
+  }
+
+  func finishOnboarding() {
+    guard !hasCompletedOnboarding, !isCompletingOnboarding else { return }
+    completeOnboardingState()
+  }
+
+  @discardableResult
+  func bindServer(username: String, password: String, deviceName: String) async -> Bool {
+    guard serverBindingState != .binding else { return false }
+
+    let normalizedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalizedDeviceName = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedUsername.isEmpty else {
+      serverBindingState = .failed(message: "请输入管理员用户名。")
+      return false
+    }
+    guard !password.isEmpty else {
+      serverBindingState = .failed(message: "请输入管理员密码。")
+      return false
+    }
+    guard !normalizedDeviceName.isEmpty, normalizedDeviceName.utf16.count <= 100 else {
+      serverBindingState = .failed(message: "设备名称需为 1 到 100 个字符。")
+      return false
+    }
+
+    serverBindingState = .binding
+    do {
+      try await serverDeviceBinder.bind(
+        username: normalizedUsername,
+        password: password,
+        deviceName: normalizedDeviceName
+      )
+      serverBindingState = .credentialsSavedAwaitingSnapshotPreview
+      return true
+    } catch {
+      serverBindingState = .failed(message: serverBindingMessage(for: error))
+      return false
+    }
   }
 
   func requestNotificationAuthorizationFromSettings() async {
@@ -340,6 +396,35 @@ final class AppModel {
     preferences.set(true, forKey: PreferenceKey.hasCompletedOnboarding)
     hasCompletedOnboarding = true
     onboardingErrorMessage = nil
+  }
+
+  private func serverBindingMessage(for error: any Error) -> String {
+    if let mobileError = error as? MobileAPIError {
+      switch mobileError {
+      case .server(code: "mobile_login_invalid", status: 401):
+        return "用户名或密码错误。"
+      case .server(code: "mobile_device_ownership_conflict", status: 409):
+        return "此设备标识已绑定到其他账号，请联系管理员处理；本地功能仍可使用。"
+      case .server(code: "api_rate_limited", status: 429),
+        .server(code: "mobile_login_rate_limited", status: 429):
+        return "尝试次数较多，请稍后再试；本地功能仍可使用。"
+      case .server(code: "mobile_auth_unconfigured", status: 503):
+        return "服务器暂未配置手机绑定，请稍后再试；本地功能仍可使用。"
+      case .transport:
+        return "暂时无法连接服务器，本地功能仍可使用。"
+      case .invalidResponse:
+        return "服务器返回的数据无法验证，本地功能仍可使用。"
+      default:
+        return "服务器暂时无法完成绑定，本地功能仍可使用。"
+      }
+    }
+    if error is ServerDeviceBindingError {
+      return "服务器返回的数据无法验证，本地功能仍可使用。"
+    }
+    if error is DeviceCredentialStoreError || error is KeychainError {
+      return "无法安全读取或保存同步凭据，本地功能仍可使用。"
+    }
+    return "服务器暂时无法完成绑定，本地功能仍可使用。"
   }
 
   func unlock() async {

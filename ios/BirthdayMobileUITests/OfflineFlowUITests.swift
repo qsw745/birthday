@@ -13,6 +13,15 @@ final class OfflineFlowUITests: XCTestCase {
     app.buttons["继续"].tap()
     app.buttons["暂不开启"].tap()
 
+    XCTAssertTrue(
+      app.staticTexts["连接服务器（可选）"].waitForExistence(timeout: 3),
+      "通知选择后必须进入可跳过的服务器绑定步骤"
+    )
+    XCTAssertTrue(app.textFields["serverUsernameField"].exists)
+    XCTAssertTrue(app.secureTextFields["serverPasswordField"].exists)
+    XCTAssertTrue(app.textFields["serverDeviceNameField"].exists)
+    app.buttons["skipServerBindingButton"].tap()
+
     let unlockButton = app.buttons["unlockButton"]
     if unlockButton.waitForExistence(timeout: 2) {
       unlockButton.tap()

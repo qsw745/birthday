@@ -103,8 +103,8 @@ private struct BirthdayAppBootstrapView: View {
       let preferences = UserDefaults(suiteName: suiteName)!
       preferences.removePersistentDomain(forName: suiteName)
 
-      // The offline milestone has no mobile API to construct. Parsing
-      // networkDisabled keeps that boundary explicit without inventing one.
+      // The UI-test composition injects an offline binder, so no view can
+      // accidentally turn the offline regression flow into a network test.
       precondition(
         uiTestBootstrap.networkDisabled,
         "UI tests must opt into the no-network composition"
@@ -114,6 +114,7 @@ private struct BirthdayAppBootstrapView: View {
         store: BirthdayStore(modelContainer: container),
         preferences: preferences,
         authenticator: UITestAppLockAuthenticator(),
+        serverDeviceBinder: OfflineServerDeviceBinder(),
         notificationScheduler: UITestNotificationScheduler(),
         oneShotNotificationScheduler: UITestOneShotNotificationScheduler(),
         reminderPlanner: ReminderPlanner(),
@@ -123,10 +124,15 @@ private struct BirthdayAppBootstrapView: View {
 
     let notificationCenter = UNUserNotificationCenter.current()
     let notificationClient = SystemNotificationCenterClient(center: notificationCenter)
+    let credentials = DeviceCredentialStore(secure: KeychainStore())
+    let mobileAPI = MobileAPIClient(
+      baseURL: URL(string: "https://qisw.top/api/mobile")!
+    )
     return AppModel(
       store: BirthdayStore(modelContainer: container),
       preferences: .standard,
       authenticator: LocalAuthenticationService(),
+      serverDeviceBinder: ServerDeviceBinder(api: mobileAPI, credentials: credentials),
       notificationScheduler: UserNotificationScheduler(
         center: notificationClient
       ),
@@ -136,6 +142,12 @@ private struct BirthdayAppBootstrapView: View {
         try await notificationCenter.requestAuthorization(options: [.alert, .sound, .badge])
       }
     )
+  }
+}
+
+struct OfflineServerDeviceBinder: ServerDeviceBinding {
+  func bind(username: String, password: String, deviceName: String) async throws {
+    throw MobileAPIError.transport("network_disabled")
   }
 }
 

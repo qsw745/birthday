@@ -23,7 +23,7 @@ struct OnboardingView: View {
           .controlSize(.large)
           .tint(ModernAirTheme.tide)
           .frame(maxWidth: .infinity, minHeight: 44)
-        } else {
+        } else if page == 1 {
           introduction(
             systemImage: "bell.badge.fill",
             title: "由 iPhone 按时提醒",
@@ -43,7 +43,7 @@ struct OnboardingView: View {
 
           VStack(spacing: 12) {
             Button {
-              complete(requestNotifications: true)
+              continueAfterNotifications(requestNotifications: true)
             } label: {
               onboardingActionLabel("开启通知", systemImage: "bell.badge")
             }
@@ -52,13 +52,25 @@ struct OnboardingView: View {
             .tint(ModernAirTheme.tide)
 
             Button("暂不开启") {
-              complete(requestNotifications: false)
+              continueAfterNotifications(requestNotifications: false)
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
             .tint(ModernAirTheme.tide)
           }
           .disabled(model.isCompletingOnboarding)
+        } else if page == 2 {
+          ServerBindingView(
+            model: model,
+            onSkip: {
+              model.finishOnboarding()
+            },
+            onBound: {
+              page = 3
+            }
+          )
+        } else {
+          snapshotPreviewHook
         }
       }
       .frame(maxWidth: 560)
@@ -78,10 +90,13 @@ struct OnboardingView: View {
       Capsule()
         .fill(page == 1 ? ModernAirTheme.tide : ModernAirTheme.outline)
         .frame(width: page == 1 ? 32 : 12, height: 6)
+      Capsule()
+        .fill(page >= 2 ? ModernAirTheme.tide : ModernAirTheme.outline)
+        .frame(width: page >= 2 ? 32 : 12, height: 6)
     }
     .accessibilityElement(children: .ignore)
     .accessibilityLabel("引导进度")
-    .accessibilityValue("第 \(page + 1) 页，共 2 页")
+    .accessibilityValue("第 \(min(page, 2) + 1) 页，共 3 页")
   }
 
   private func introduction(systemImage: String, title: String, message: String) -> some View {
@@ -127,10 +142,42 @@ struct OnboardingView: View {
     .frame(maxWidth: .infinity, minHeight: 44)
   }
 
-  private func complete(requestNotifications: Bool) {
+  private var snapshotPreviewHook: some View {
+    VStack(spacing: 22) {
+      introduction(
+        systemImage: "checkmark.icloud.fill",
+        title: "设备已绑定，尚未导入",
+        message: "同步凭据已安全保存。首次快照预览将在下一步提供；目前没有写入服务器生日资料，也没有推进同步游标。"
+      )
+
+      Label("你可以先继续使用本地模式，查看、添加和提醒都不依赖服务器。", systemImage: "iphone.gen3")
+        .font(.subheadline)
+        .foregroundStyle(ModernAirTheme.secondaryInk)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(ModernAirTheme.glacier, in: RoundedRectangle(cornerRadius: 18))
+        .accessibilityElement(children: .combine)
+
+      Button("先使用本地模式") {
+        model.finishOnboarding()
+      }
+      .buttonStyle(.borderedProminent)
+      .controlSize(.large)
+      .tint(ModernAirTheme.tide)
+      .frame(maxWidth: .infinity, minHeight: 44)
+      .accessibilityIdentifier("continueLocalAfterBindingButton")
+    }
+  }
+
+  private func continueAfterNotifications(requestNotifications: Bool) {
     guard !model.isCompletingOnboarding else { return }
     Task {
-      await model.completeOnboarding(requestNotifications: requestNotifications)
+      if await model.prepareOnboardingNotifications(
+        requestNotifications: requestNotifications
+      ) {
+        page = 2
+      }
     }
   }
 }

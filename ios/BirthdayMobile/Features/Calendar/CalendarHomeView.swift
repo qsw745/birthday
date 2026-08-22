@@ -512,7 +512,8 @@ private struct CalendarHomePreviewHost: View {
           store: BirthdayStore(modelContainer: container),
           initialRecords: records,
           selectedMonth: selectedMonth,
-          initiallyLoaded: true
+          initiallyLoaded: true,
+          serverDeviceBinder: OfflineServerDeviceBinder()
         )
       )
     } else {
