@@ -9,6 +9,7 @@ struct UITestBootstrap: Equatable, Sendable {
   let snapshotFirstLoadFails: Bool
   let snapshotFirstRefreshFails: Bool
   let transportCleanupFailure: Bool
+  let storeReleaseLocalOnly: Bool
 
   init(arguments: [String] = ProcessInfo.processInfo.arguments) {
     isEnabled = arguments.contains("-ui-testing")
@@ -17,6 +18,7 @@ struct UITestBootstrap: Equatable, Sendable {
     snapshotFirstLoadFails = arguments.contains("-snapshot-first-load-fails")
     snapshotFirstRefreshFails = arguments.contains("-snapshot-first-refresh-fails")
     transportCleanupFailure = arguments.contains("-transport-cleanup-failure")
+    storeReleaseLocalOnly = arguments.contains("-store-release-local-only")
   }
 
   var isSnapshotImportFixtureEnabled: Bool {
@@ -215,6 +217,7 @@ final class AppModel {
   private(set) var isManagingDevice = false
   private(set) var deviceManagementMessage: String?
   var isSyncRuntimeEnabled: Bool { syncPresentationReducer.isRemoteSyncEnabled }
+  let isServerBindingAvailable: Bool
   private(set) var pendingLocalCleanup: PendingLocalCleanup?
   let localOnlyStatusDetail: String
 
@@ -305,6 +308,7 @@ final class AppModel {
     initiallyLoaded: Bool = false,
     preferences: UserDefaults = .standard,
     localOnlyStatusDetail: String = "生日与提醒只保存在这台设备上。",
+    isServerBindingAvailable: Bool = false,
     authenticator: any AppLockAuthenticating = LocalAuthenticationService(),
     serverDeviceBinder: any ServerDeviceBinding,
     notificationScheduler: any NotificationScheduling = UserNotificationScheduler(
@@ -327,6 +331,7 @@ final class AppModel {
     loadState = initiallyLoaded ? .loaded : .idle
     self.preferences = preferences
     self.localOnlyStatusDetail = localOnlyStatusDetail
+    self.isServerBindingAvailable = isServerBindingAvailable
     let syncLastSuccessStore = SyncLastSuccessStore(preferences: preferences)
     self.syncLastSuccessStore = syncLastSuccessStore
     syncPresentationReducer = SyncPresentationReducer(lastSuccess: syncLastSuccessStore.load())

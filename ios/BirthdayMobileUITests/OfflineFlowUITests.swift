@@ -2,6 +2,34 @@ import XCTest
 
 @MainActor
 final class OfflineFlowUITests: XCTestCase {
+  func testStoreReleaseIsLocalOnlyFromOnboardingThroughSettings() {
+    let app = XCUIApplication()
+    app.launchArguments = [
+      "-ui-testing",
+      "-network-disabled",
+      "-store-release-local-only",
+    ]
+    app.launch()
+
+    XCTAssertTrue(app.staticTexts["离线也能完整使用"].waitForExistence(timeout: 5))
+    app.buttons["继续"].tap()
+    app.buttons["暂不开启"].tap()
+
+    if app.buttons["unlockButton"].waitForExistence(timeout: 2) {
+      app.buttons["unlockButton"].tap()
+    }
+    XCTAssertTrue(app.buttons["addBirthdayButton"].waitForExistence(timeout: 5))
+    XCTAssertFalse(app.tabBars.buttons["冲突"].exists)
+
+    app.tabBars.buttons["设置"].tap()
+    XCTAssertTrue(
+      app.descendants(matching: .any)["localOnlyStorageRow"].waitForExistence(timeout: 3)
+    )
+    XCTAssertFalse(app.buttons["bindFromSettingsButton"].exists)
+    XCTAssertFalse(app.buttons["manualSyncButton"].exists)
+    XCTAssertFalse(app.buttons["stopSyncButton"].exists)
+  }
+
   func testTransportCleanupFailureKeepsRetryAndExplicitResumeActionsVisible() {
     let app = XCUIApplication()
     app.launchArguments = [
@@ -261,7 +289,7 @@ final class OfflineFlowUITests: XCTestCase {
     XCTAssertTrue(deleteButton.waitForExistence(timeout: 3))
     deleteButton.tap()
     XCTAssertTrue(
-      app.staticTexts["确定删除“妈妈更新”吗？删除后只会从本机隐藏。服务器同步尚未启用。"]
+      app.staticTexts["确定删除“妈妈更新”吗？删除后将从本机生日列表移除。"]
         .waitForExistence(timeout: 3)
     )
     app.buttons["确认删除"].tap()

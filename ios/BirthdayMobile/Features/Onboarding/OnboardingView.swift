@@ -95,13 +95,17 @@ struct OnboardingView: View {
       Capsule()
         .fill(page == 1 ? ModernAirTheme.tide : ModernAirTheme.outline)
         .frame(width: page == 1 ? 32 : 12, height: 6)
-      Capsule()
-        .fill(page >= 2 ? ModernAirTheme.tide : ModernAirTheme.outline)
-        .frame(width: page >= 2 ? 32 : 12, height: 6)
+      if model.isServerBindingAvailable {
+        Capsule()
+          .fill(page >= 2 ? ModernAirTheme.tide : ModernAirTheme.outline)
+          .frame(width: page >= 2 ? 32 : 12, height: 6)
+      }
     }
     .accessibilityElement(children: .ignore)
     .accessibilityLabel("引导进度")
-    .accessibilityValue("第 \(min(page, 2) + 1) 页，共 3 页")
+    .accessibilityValue(
+      "第 \(min(page, model.isServerBindingAvailable ? 2 : 1) + 1) 页，共 \(model.isServerBindingAvailable ? 3 : 2) 页"
+    )
   }
 
   private func introduction(systemImage: String, title: String, message: String) -> some View {
@@ -153,7 +157,11 @@ struct OnboardingView: View {
       if await model.prepareOnboardingNotifications(
         requestNotifications: requestNotifications
       ) {
-        page = 2
+        if model.isServerBindingAvailable {
+          page = 2
+        } else {
+          model.finishOnboarding()
+        }
       }
     }
   }

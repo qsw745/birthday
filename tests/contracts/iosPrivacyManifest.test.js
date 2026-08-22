@@ -18,7 +18,7 @@ function readManifest() {
   ))
 }
 
-test('iOS privacy manifest declares tracking, collected data, and required-reason APIs', () => {
+test('iOS privacy manifest declares no collection and the required-reason API', () => {
   const manifest = readManifest()
 
   assert.equal(manifest.NSPrivacyTracking, false)
@@ -30,28 +30,7 @@ test('iOS privacy manifest declares tracking, collected data, and required-reaso
     },
   ])
 
-  const expectedDataTypes = [
-    'NSPrivacyCollectedDataTypeDeviceID',
-    'NSPrivacyCollectedDataTypeEmailAddress',
-    'NSPrivacyCollectedDataTypeEmailsOrTextMessages',
-    'NSPrivacyCollectedDataTypeName',
-    'NSPrivacyCollectedDataTypeOtherDataTypes',
-    'NSPrivacyCollectedDataTypeOtherUserContent',
-    'NSPrivacyCollectedDataTypeProductInteraction',
-    'NSPrivacyCollectedDataTypeUserID',
-  ]
-  const declarations = manifest.NSPrivacyCollectedDataTypes
-  assert.deepEqual(
-    declarations.map((entry) => entry.NSPrivacyCollectedDataType).sort(),
-    expectedDataTypes,
-  )
-  for (const declaration of declarations) {
-    assert.equal(declaration.NSPrivacyCollectedDataTypeLinked, true)
-    assert.equal(declaration.NSPrivacyCollectedDataTypeTracking, false)
-    assert.deepEqual(declaration.NSPrivacyCollectedDataTypePurposes, [
-      'NSPrivacyCollectedDataTypePurposeAppFunctionality',
-    ])
-  }
+  assert.deepEqual(manifest.NSPrivacyCollectedDataTypes, [])
 })
 
 test('XcodeGen classifies the privacy manifest as an application resource', () => {

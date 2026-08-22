@@ -128,7 +128,7 @@ struct BirthdayEditorView: View {
               .disabled(isInteractionLocked)
               .accessibilityIdentifier("deleteBirthdayButton")
             } footer: {
-              Text("删除后只会从本机立即隐藏。服务器同步尚未启用。")
+              Text("删除后将从本机生日列表移除。")
             }
           }
         }
@@ -291,7 +291,7 @@ struct BirthdayEditorView: View {
     if let record {
       return LocalOnlyStatusPresentation.deletionConfirmation(name: record.name)
     }
-    return "删除后只会从本机隐藏。服务器同步尚未启用。"
+    return "删除后将从本机生日列表移除。"
   }
 }
 

@@ -55,6 +55,8 @@ test('App Store zh-Hans metadata stays inside field limits and points to prepare
   assert.equal(metadata.privacyPolicyURL, 'https://qisw.top/birthday/privacy.html')
   assert.equal(metadata.requiresDemoAccount, false)
   assert.equal(Object.hasOwn(metadata, 'whatsNew'), false)
+  assert.doesNotMatch(metadata.description, /连接服务器|多设备同步|可选同步/)
+  assert.doesNotMatch(metadata.reviewNotes, /连接服务器|多设备同步|可选同步|账号密码/)
 })
 
 test('public privacy and support pages expose matching navigation and support contact', () => {
@@ -69,11 +71,28 @@ test('public privacy and support pages expose matching navigation and support co
   assert.match(privacy, /不用于跨应用跟踪/)
   assert.match(privacy, /不集成第三方广告或分析 SDK/)
   assert.match(privacy, /不低于本政策的隐私保护义务/)
-  assert.match(privacy, /设置 → 同步 → 停止同步/)
+  assert.match(privacy, /不包含账号登录或服务器同步入口/)
   assert.match(privacy, /支持邮件会保留到问题解决或数据请求完成后最多 12 个月/)
   assert.match(support, /发件邮箱仅用于答复与排查/)
   assert.match(stylesheet, /prefers-reduced-motion/)
   assert.doesNotMatch(`${privacy}\n${support}\n${stylesheet}`, /__[A-Z0-9_]+__/)
+})
+
+test('App Store Release composition is local-only and has no background sync entitlement', () => {
+  const releaseConfiguration = readFileSync(
+    path.join(repositoryRoot, 'ios/BirthdayMobile/Config/Release.xcconfig'),
+    'utf8',
+  )
+  const project = readFileSync(path.join(repositoryRoot, 'ios/project.yml'), 'utf8')
+  const info = readFileSync(
+    path.join(repositoryRoot, 'ios/BirthdayMobile/Info.plist'),
+    'utf8',
+  )
+
+  assert.match(releaseConfiguration, /^BIRTHDAY_API_BASE_URL\s*=\s*$/m)
+  assert.doesNotMatch(releaseConfiguration, /https?:/)
+  assert.doesNotMatch(project, /BGTaskSchedulerPermittedIdentifiers|UIBackgroundModes/)
+  assert.doesNotMatch(info, /BGTaskSchedulerPermittedIdentifiers|UIBackgroundModes/)
 })
 
 test('iOS settings exposes the public privacy and support pages', () => {

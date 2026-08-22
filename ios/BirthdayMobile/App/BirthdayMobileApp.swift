@@ -273,6 +273,7 @@ private struct BirthdayAppBootstrapView: View {
         store: store,
         selectedMonth: selectedMonth,
         preferences: preferences,
+        isServerBindingAvailable: !uiTestBootstrap.storeReleaseLocalOnly,
         authenticator: UITestAppLockAuthenticator(),
         serverDeviceBinder: serverDeviceBinder,
         notificationScheduler: UITestNotificationScheduler(),
@@ -613,14 +614,16 @@ struct RootTabView: View {
       }
       .tag(AppModel.Tab.birthdays)
 
-      NavigationStack {
-        ConflictListView(model: model)
+      if model.isServerBindingAvailable {
+        NavigationStack {
+          ConflictListView(model: model)
+        }
+        .tabItem {
+          Label("冲突", systemImage: "arrow.triangle.2.circlepath")
+        }
+        .badge(model.conflicts.count)
+        .tag(AppModel.Tab.conflicts)
       }
-      .tabItem {
-        Label("冲突", systemImage: "arrow.triangle.2.circlepath")
-      }
-      .badge(model.conflicts.count)
-      .tag(AppModel.Tab.conflicts)
 
       NavigationStack {
         SettingsView(model: model)

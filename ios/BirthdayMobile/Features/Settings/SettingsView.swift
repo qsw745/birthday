@@ -91,7 +91,29 @@ struct SettingsView: View {
         }
       }
 
-      SyncSettingsView(model: model)
+      if model.isServerBindingAvailable {
+        SyncSettingsView(model: model)
+      } else {
+        Section {
+          Label {
+            VStack(alignment: .leading, spacing: 3) {
+              Text("仅保存在此 iPhone")
+              Text("无需账号，也不依赖服务器")
+                .font(.caption)
+                .foregroundStyle(ModernAirTheme.secondaryInk)
+            }
+          } icon: {
+            Image(systemName: "iphone.and.arrow.forward")
+              .foregroundStyle(ModernAirTheme.tide)
+          }
+          .frame(minHeight: 44)
+          .accessibilityIdentifier("localOnlyStorageRow")
+        } header: {
+          Text("数据存储")
+        } footer: {
+          Text("生日资料、提醒设置和农历日期均在本机处理；删除 App 会同时移除本机资料。")
+        }
+      }
 
       Section("关于与支持") {
         Link(destination: Self.privacyPolicyURL) {

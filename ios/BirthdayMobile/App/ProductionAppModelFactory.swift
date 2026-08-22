@@ -63,6 +63,7 @@ struct ProductionAppModelFactory {
         preferences: preferences,
         localOnlyStatusDetail: appConfiguration.localOnlyMessage
           ?? "生日与提醒只保存在这台设备上。",
+        isServerBindingAvailable: false,
         authenticator: LocalAuthenticationService(),
         serverDeviceBinder: OfflineServerDeviceBinder(),
         notificationScheduler: composition.notificationScheduler,
@@ -77,6 +78,7 @@ struct ProductionAppModelFactory {
     let model = AppModel(
       store: store,
       preferences: preferences,
+      isServerBindingAvailable: true,
       authenticator: LocalAuthenticationService(),
       serverDeviceBinder: ServerDeviceBinder(api: mobileAPI, credentials: credentials),
       notificationScheduler: composition.notificationScheduler,
