@@ -26,7 +26,11 @@ targets:
       Debug: BirthdayMobile/Config/Debug.xcconfig
       Release: BirthdayMobile/Config/Release.xcconfig
     sources:
-      - BirthdayMobile
+      - path: BirthdayMobile
+        excludes:
+          - PrivacyInfo.xcprivacy
+      - path: BirthdayMobile/PrivacyInfo.xcprivacy
+        buildPhase: resources
     info:
       path: BirthdayMobile/Info.plist
       properties:
