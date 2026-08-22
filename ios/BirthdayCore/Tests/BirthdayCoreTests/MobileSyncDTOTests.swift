@@ -85,7 +85,7 @@ private struct DateBox: Codable, Equatable {
         PullChange(
           seq: Int64.max,
           operation: .delete,
-          record: try makeAPIBirthday(
+          record: try makeDTOAPIBirthday(
             version: Int64.max, deletedAt: Date(timeIntervalSince1970: 100))
         )
       ],
@@ -443,7 +443,7 @@ private struct DateBox: Codable, Equatable {
     let record = try makeRecord(emailEnabled: true)
 
     let payload = BirthdayPayloadDTO(record: record)
-    let api = try makeAPIBirthday(
+    let api = try makeDTOAPIBirthday(
       id: record.id,
       name: record.name,
       lunarMonth: record.lunarBirthday.month,
@@ -542,7 +542,7 @@ private func makeRecord(emailEnabled: Bool) throws -> BirthdayRecord {
   )
 }
 
-private func makeAPIBirthday(
+private func makeDTOAPIBirthday(
   id: UUID = birthdayID,
   name: String = "妈妈",
   lunarMonth: Int = 8,

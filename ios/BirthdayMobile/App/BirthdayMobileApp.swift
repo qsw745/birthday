@@ -88,8 +88,12 @@ private struct BirthdayAppBootstrapView: View {
       let container = try ModelContainer(
         for: BirthdayEntity.self,
         SyncOperationEntity.self,
+        SyncMetadataEntity.self,
         configurations: configuration
       )
+      if uiTestBootstrap.snapshotImportPreviewEnabled {
+        try seedSnapshotImportPreview(in: container)
+      }
       self.container = container
       model = makeAppModel(container: container)
     } catch {
@@ -112,11 +116,18 @@ private struct BirthdayAppBootstrapView: View {
         "UI tests must opt into the no-network composition"
       )
 
+      let serverDeviceBinder: any ServerDeviceBinding =
+        uiTestBootstrap.snapshotImportPreviewEnabled
+        ? UITestSnapshotServerDeviceBinder(
+          firstLoadFails: uiTestBootstrap.snapshotFirstLoadFails
+        )
+        : OfflineServerDeviceBinder()
+
       return AppModel(
         store: BirthdayStore(modelContainer: container),
         preferences: preferences,
         authenticator: UITestAppLockAuthenticator(),
-        serverDeviceBinder: OfflineServerDeviceBinder(),
+        serverDeviceBinder: serverDeviceBinder,
         notificationScheduler: UITestNotificationScheduler(),
         oneShotNotificationScheduler: UITestOneShotNotificationScheduler(),
         reminderPlanner: ReminderPlanner(),
@@ -145,11 +156,95 @@ private struct BirthdayAppBootstrapView: View {
       }
     )
   }
+
+  private func seedSnapshotImportPreview(in container: ModelContainer) throws {
+    let context = ModelContext(container)
+    let date = Date(timeIntervalSince1970: 1_788_000_000)
+    let entity = BirthdayEntity(
+      id: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
+      draft: BirthdayDraft(
+        name: "妈妈",
+        lunarBirthday: LunarBirthday(month: 8, day: 15, isLeapMonth: false),
+        reminder: .defaults
+      ),
+      nextSolarDate: date,
+      now: date
+    )
+    entity.syncStateRaw = SyncState.synced.rawValue
+    context.insert(entity)
+    try context.save()
+  }
 }
 
 struct OfflineServerDeviceBinder: ServerDeviceBinding {
   func bind(username: String, password: String, deviceName: String) async throws {
     throw MobileAPIError.transport("network_disabled")
+  }
+
+  func loadSnapshot() async throws -> SnapshotResponse {
+    throw MobileAPIError.transport("network_disabled")
+  }
+}
+
+private struct UITestSnapshotServerDeviceBinder: ServerDeviceBinding {
+  private let scenario: UITestSnapshotLoadScenario
+
+  init(firstLoadFails: Bool) {
+    scenario = UITestSnapshotLoadScenario(firstLoadFails: firstLoadFails)
+  }
+
+  func bind(username: String, password: String, deviceName: String) async throws {}
+
+  func loadSnapshot() async throws -> SnapshotResponse {
+    try await scenario.loadSnapshot()
+  }
+}
+
+private actor UITestSnapshotLoadScenario {
+  private var firstLoadFails: Bool
+
+  init(firstLoadFails: Bool) {
+    self.firstLoadFails = firstLoadFails
+  }
+
+  func loadSnapshot() throws -> SnapshotResponse {
+    if firstLoadFails {
+      firstLoadFails = false
+      throw MobileAPIError.transport("ui_test_snapshot_failure")
+    }
+
+    let date = Date(timeIntervalSince1970: 1_788_000_000)
+    return SnapshotResponse(
+      cursor: 41,
+      birthdays: [
+        APIBirthday(
+          id: UUID(uuidString: "22222222-2222-4222-8222-222222222222")!,
+          name: "妈妈",
+          lunarMonth: 8,
+          lunarDay: 15,
+          isLeapMonth: false,
+          reminder: .defaults,
+          nextSolarDate: nil,
+          version: 3,
+          createdAt: date,
+          updatedAt: date,
+          deletedAt: nil
+        ),
+        APIBirthday(
+          id: UUID(uuidString: "33333333-3333-4333-8333-333333333333")!,
+          name: "爸爸",
+          lunarMonth: 2,
+          lunarDay: 2,
+          isLeapMonth: false,
+          reminder: .defaults,
+          nextSolarDate: nil,
+          version: 2,
+          createdAt: date,
+          updatedAt: date,
+          deletedAt: nil
+        ),
+      ]
+    )
   }
 }
 

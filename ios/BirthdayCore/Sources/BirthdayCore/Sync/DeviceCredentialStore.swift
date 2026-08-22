@@ -39,10 +39,12 @@ public enum DeviceCredentialStoreError: Error, Equatable, Sendable {
 
 public enum ServerDeviceBindingError: Error, Equatable, Sendable {
   case responseDeviceIDMismatch
+  case credentialsUnavailable
 }
 
 public protocol ServerDeviceBinding: Sendable {
   func bind(username: String, password: String, deviceName: String) async throws
+  func loadSnapshot() async throws -> SnapshotResponse
 }
 
 public struct ServerDeviceBinder: ServerDeviceBinding {
@@ -68,6 +70,13 @@ public struct ServerDeviceBinder: ServerDeviceBinding {
       throw ServerDeviceBindingError.responseDeviceIDMismatch
     }
     try credentials.save(DeviceCredentials(response))
+  }
+
+  public func loadSnapshot() async throws -> SnapshotResponse {
+    guard let saved = try credentials.load() else {
+      throw ServerDeviceBindingError.credentialsUnavailable
+    }
+    return try await api.snapshot(accessToken: saved.accessToken)
   }
 }
 

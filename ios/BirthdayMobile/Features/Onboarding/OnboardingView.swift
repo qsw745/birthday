@@ -70,7 +70,12 @@ struct OnboardingView: View {
             }
           )
         } else {
-          snapshotPreviewHook
+          SnapshotImportPreviewView(
+            model: model,
+            onContinueLocal: {
+              model.finishOnboarding()
+            }
+          )
         }
       }
       .frame(maxWidth: 560)
@@ -140,34 +145,6 @@ struct OnboardingView: View {
       Text(model.isCompletingOnboarding ? "正在设置" : title)
     }
     .frame(maxWidth: .infinity, minHeight: 44)
-  }
-
-  private var snapshotPreviewHook: some View {
-    VStack(spacing: 22) {
-      introduction(
-        systemImage: "checkmark.icloud.fill",
-        title: "设备已绑定，尚未导入",
-        message: "同步凭据已安全保存。首次快照预览将在下一步提供；目前没有写入服务器生日资料，也没有推进同步游标。"
-      )
-
-      Label("你可以先继续使用本地模式，查看、添加和提醒都不依赖服务器。", systemImage: "iphone.gen3")
-        .font(.subheadline)
-        .foregroundStyle(ModernAirTheme.secondaryInk)
-        .fixedSize(horizontal: false, vertical: true)
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(ModernAirTheme.glacier, in: RoundedRectangle(cornerRadius: 18))
-        .accessibilityElement(children: .combine)
-
-      Button("先使用本地模式") {
-        model.finishOnboarding()
-      }
-      .buttonStyle(.borderedProminent)
-      .controlSize(.large)
-      .tint(ModernAirTheme.tide)
-      .frame(maxWidth: .infinity, minHeight: 44)
-      .accessibilityIdentifier("continueLocalAfterBindingButton")
-    }
   }
 
   private func continueAfterNotifications(requestNotifications: Bool) {

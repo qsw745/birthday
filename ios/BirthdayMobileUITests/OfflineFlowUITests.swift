@@ -1,6 +1,88 @@
 import XCTest
 
 final class OfflineFlowUITests: XCTestCase {
+  func testBoundDeviceReviewsEveryDuplicateBeforeAtomicSnapshotImport() {
+    let app = XCUIApplication()
+    app.launchArguments = [
+      "-ui-testing",
+      "-network-disabled",
+      "-snapshot-import-preview",
+    ]
+    app.launch()
+
+    XCTAssertTrue(app.staticTexts["离线也能完整使用"].waitForExistence(timeout: 5))
+    app.buttons["继续"].tap()
+    app.buttons["暂不开启"].tap()
+
+    app.textFields["serverUsernameField"].tap()
+    app.textFields["serverUsernameField"].typeText("admin")
+    app.secureTextFields["serverPasswordField"].tap()
+    app.secureTextFields["serverPasswordField"].typeText("ui-test-secret")
+    app.buttons["bindServerButton"].tap()
+
+    XCTAssertTrue(
+      app.staticTexts["首次导入预览"].waitForExistence(timeout: 5),
+      "凭据保存后应独立读取快照并进入预览"
+    )
+    XCTAssertTrue(app.staticTexts["服务器中有 2 条生日"].exists)
+    XCTAssertTrue(app.staticTexts["发现 1 组可能重复"].exists)
+
+    let importButton = app.buttons["importSnapshotButton"]
+    XCTAssertTrue(importButton.exists)
+    XCTAssertEqual(importButton.label, "导入 2 条生日")
+    XCTAssertFalse(importButton.isEnabled, "所有重复项未决策前禁止写入")
+
+    let keepBoth = app.buttons["keepBothDuplicateButton"].firstMatch
+    XCTAssertTrue(keepBoth.exists)
+    XCTAssertTrue(app.buttons["useRemoteDuplicateButton"].firstMatch.exists)
+    keepBoth.tap()
+    XCTAssertTrue(importButton.isEnabled)
+    importButton.tap()
+
+    let unlockButton = app.buttons["unlockButton"]
+    if unlockButton.waitForExistence(timeout: 2) {
+      unlockButton.tap()
+    }
+    XCTAssertTrue(
+      app.buttons["addBirthdayButton"].waitForExistence(timeout: 5),
+      "原子导入成功后应完成引导并打开月历"
+    )
+    app.tabBars.buttons["全部"].tap()
+    XCTAssertTrue(app.staticTexts["妈妈"].waitForExistence(timeout: 3))
+    XCTAssertTrue(app.staticTexts["爸爸"].waitForExistence(timeout: 3))
+  }
+
+  func testSnapshotFailureRetriesAfterBindingWithoutPasswordOrLocalWrites() {
+    let app = XCUIApplication()
+    app.launchArguments = [
+      "-ui-testing",
+      "-network-disabled",
+      "-snapshot-import-preview",
+      "-snapshot-first-load-fails",
+    ]
+    app.launch()
+
+    XCTAssertTrue(app.staticTexts["离线也能完整使用"].waitForExistence(timeout: 5))
+    app.buttons["继续"].tap()
+    app.buttons["暂不开启"].tap()
+    app.textFields["serverUsernameField"].tap()
+    app.textFields["serverUsernameField"].typeText("admin")
+    app.secureTextFields["serverPasswordField"].tap()
+    app.secureTextFields["serverPasswordField"].typeText("ui-test-secret")
+    app.buttons["bindServerButton"].tap()
+
+    XCTAssertTrue(
+      app.staticTexts["暂时无法读取服务器快照，本机资料未改变。"]
+        .waitForExistence(timeout: 5)
+    )
+    XCTAssertFalse(app.secureTextFields["serverPasswordField"].exists)
+    app.buttons["retrySnapshotPreviewButton"].tap()
+
+    XCTAssertTrue(app.staticTexts["首次导入预览"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["发现 1 组可能重复"].exists)
+    XCTAssertFalse(app.buttons["importSnapshotButton"].isEnabled)
+  }
+
   func testCreateSearchEditAndDeleteWithoutNetwork() {
     let app = XCUIApplication()
     app.launchArguments = ["-ui-testing", "-network-disabled"]

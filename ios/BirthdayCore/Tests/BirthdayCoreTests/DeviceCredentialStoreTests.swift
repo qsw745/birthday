@@ -56,9 +56,12 @@ private actor BindingMobileAPI: MobileAPI {
 
   private var replies: [Reply]
   private(set) var loginRequests: [LoginRequest] = []
+  private(set) var snapshotTokens: [String] = []
+  private let snapshotResponse: SnapshotResponse?
 
-  init(replies: [Reply]) {
+  init(replies: [Reply], snapshotResponse: SnapshotResponse? = nil) {
     self.replies = replies
+    self.snapshotResponse = snapshotResponse
   }
 
   func login(_ request: LoginRequest) async throws -> TokenResponse {
@@ -77,7 +80,9 @@ private actor BindingMobileAPI: MobileAPI {
   }
 
   func snapshot(accessToken: String) async throws -> SnapshotResponse {
-    throw MobileAPIError.invalidResponse
+    snapshotTokens.append(accessToken)
+    guard let snapshotResponse else { throw MobileAPIError.invalidResponse }
+    return snapshotResponse
   }
 
   func push(_ request: PushRequest, accessToken: String) async throws -> PushResponse {
@@ -304,6 +309,39 @@ private actor BindingMobileAPI: MobileAPI {
     #expect(requests[0].username == "admin")
     #expect(requests[0].deviceName == "iPhone")
     #expect(try credentials.load() == DeviceCredentials(response))
+  }
+
+  @Test func snapshotAfterBindingReloadsSavedCredentialsWithoutSubmittingPasswordAgain()
+    async throws
+  {
+    let secure = InMemorySecureTokenStore()
+    let credentials = DeviceCredentialStore(
+      secure: secure,
+      makeDeviceID: { self.firstDeviceID }
+    )
+    let response = makeTokenResponse(deviceID: firstDeviceID, tokenSuffix: "bound")
+    let snapshot = SnapshotResponse(cursor: 41, birthdays: [makeAPIBirthday()])
+    let api = BindingMobileAPI(replies: [.success(response)], snapshotResponse: snapshot)
+    let binder = ServerDeviceBinder(api: api, credentials: credentials)
+
+    try await binder.bind(username: "admin", password: "secret", deviceName: "iPhone")
+    let loaded = try await binder.loadSnapshot()
+
+    #expect(loaded == snapshot)
+    #expect(await api.loginRequests.count == 1)
+    #expect(await api.snapshotTokens == ["access-bound"])
+  }
+
+  @Test func snapshotWithoutSavedCredentialsFailsBeforeNetwork() async throws {
+    let credentials = DeviceCredentialStore(secure: InMemorySecureTokenStore())
+    let api = BindingMobileAPI(replies: [])
+    let binder = ServerDeviceBinder(api: api, credentials: credentials)
+
+    await #expect(throws: ServerDeviceBindingError.credentialsUnavailable) {
+      try await binder.loadSnapshot()
+    }
+
+    #expect(await api.snapshotTokens.isEmpty)
   }
 
   @Test func retryAfterALostResponseReusesTheSameStableIdentity() async throws {

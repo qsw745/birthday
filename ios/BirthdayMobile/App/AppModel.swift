@@ -5,10 +5,14 @@ import Observation
 struct UITestBootstrap: Equatable, Sendable {
   let isEnabled: Bool
   let networkDisabled: Bool
+  let snapshotImportPreviewEnabled: Bool
+  let snapshotFirstLoadFails: Bool
 
   init(arguments: [String] = ProcessInfo.processInfo.arguments) {
     isEnabled = arguments.contains("-ui-testing")
     networkDisabled = arguments.contains("-network-disabled")
+    snapshotImportPreviewEnabled = arguments.contains("-snapshot-import-preview")
+    snapshotFirstLoadFails = arguments.contains("-snapshot-first-load-fails")
   }
 }
 
@@ -141,6 +145,15 @@ final class AppModel {
     case credentialsSavedAwaitingSnapshotPreview
   }
 
+  enum SnapshotImportState: Equatable {
+    case idle
+    case loading
+    case ready
+    case importing
+    case failed
+    case completed
+  }
+
   private enum PreferenceKey {
     static let hasCompletedOnboarding = "top.qisw.birthday.hasCompletedOnboarding"
     static let lockEnabled = "top.qisw.birthday.lockEnabled"
@@ -159,6 +172,10 @@ final class AppModel {
   private(set) var isCompletingOnboarding = false
   private(set) var onboardingErrorMessage: String?
   private(set) var serverBindingState: ServerBindingState = .idle
+  private(set) var snapshotImportState: SnapshotImportState = .idle
+  private(set) var snapshotImportPreview: SnapshotImportPreview?
+  private(set) var snapshotImportErrorMessage: String?
+  private(set) var snapshotDuplicateDecisions: [DuplicateCandidate.ID: DuplicateDecision] = [:]
   private(set) var isRequestingNotificationAuthorization = false
   private(set) var notificationHealth = NotificationHealth(
     state: .notRequested,
@@ -173,6 +190,7 @@ final class AppModel {
   private var appLockSession: AppLockSessionState
   private var reminderGeneration: UInt64 = 0
   private var reminderOperationsInFlight = 0
+  private var pendingInitialSnapshot: SnapshotResponse?
   private let preferences: UserDefaults
   private let authenticator: any AppLockAuthenticating
   private let serverDeviceBinder: any ServerDeviceBinding
@@ -373,6 +391,88 @@ final class AppModel {
     }
   }
 
+  func loadInitialSnapshotPreview() async {
+    guard
+      serverBindingState == .credentialsSavedAwaitingSnapshotPreview,
+      snapshotImportState != .loading,
+      snapshotImportState != .importing,
+      snapshotImportState != .completed
+    else { return }
+
+    snapshotImportState = .loading
+    snapshotImportErrorMessage = nil
+
+    do {
+      let snapshot = try await serverDeviceBinder.loadSnapshot()
+      let localRecords = try await store.activeBirthdays()
+      pendingInitialSnapshot = snapshot
+      snapshotImportPreview = SnapshotImporter.preview(
+        local: localRecords,
+        remote: snapshot.birthdays
+      )
+      snapshotDuplicateDecisions = [:]
+      snapshotImportState = .ready
+    } catch {
+      pendingInitialSnapshot = nil
+      snapshotImportPreview = nil
+      snapshotDuplicateDecisions = [:]
+      snapshotImportErrorMessage = snapshotImportMessage(for: error)
+      snapshotImportState = .failed
+    }
+  }
+
+  func chooseSnapshotDuplicate(
+    _ decision: DuplicateDecision,
+    candidateID: DuplicateCandidate.ID
+  ) {
+    guard
+      snapshotImportState == .ready,
+      snapshotImportPreview?.duplicates.contains(where: { $0.id == candidateID }) == true
+    else { return }
+    snapshotDuplicateDecisions[candidateID] = decision
+    snapshotImportErrorMessage = nil
+  }
+
+  func snapshotDecision(for candidateID: DuplicateCandidate.ID) -> DuplicateDecision? {
+    snapshotDuplicateDecisions[candidateID]
+  }
+
+  var canImportInitialSnapshot: Bool {
+    guard snapshotImportState == .ready, let preview = snapshotImportPreview else { return false }
+    return preview.duplicates.allSatisfy { snapshotDuplicateDecisions[$0.id] != nil }
+  }
+
+  @discardableResult
+  func importInitialSnapshot() async -> Bool {
+    guard
+      canImportInitialSnapshot,
+      let snapshot = pendingInitialSnapshot,
+      let preview = snapshotImportPreview,
+      preview.duplicates.allSatisfy({ snapshotDuplicateDecisions[$0.id] != nil })
+    else { return false }
+
+    snapshotImportState = .importing
+    snapshotImportErrorMessage = nil
+    do {
+      try await store.applySnapshot(snapshot, decisions: snapshotDuplicateDecisions)
+      let importedRecords = try await store.activeBirthdays()
+      records = importedRecords
+      loadState = .loaded
+      selectedTab = .calendar
+      pendingInitialSnapshot = nil
+      snapshotImportState = .completed
+      completeOnboardingState()
+
+      let generation = nextReminderGeneration()
+      await rebuildKnownSnapshot(importedRecords, generation: generation)
+      return true
+    } catch {
+      snapshotImportState = .ready
+      snapshotImportErrorMessage = "未能导入服务器快照，本机资料未改变，请重试。"
+      return false
+    }
+  }
+
   func requestNotificationAuthorizationFromSettings() async {
     guard !isRequestingNotificationAuthorization else { return }
     isRequestingNotificationAuthorization = true
@@ -425,6 +525,27 @@ final class AppModel {
       return "无法安全读取或保存同步凭据，本地功能仍可使用。"
     }
     return "服务器暂时无法完成绑定，本地功能仍可使用。"
+  }
+
+  private func snapshotImportMessage(for error: any Error) -> String {
+    if let mobileError = error as? MobileAPIError {
+      switch mobileError {
+      case .transport:
+        return "暂时无法读取服务器快照，本机资料未改变。"
+      case .accessExpired, .refreshInvalid:
+        return "同步凭据已失效，本机资料未改变。请返回后重新绑定。"
+      case .invalidResponse:
+        return "服务器快照无法验证，本机资料未改变。"
+      default:
+        return "服务器暂时无法提供快照，本机资料未改变。"
+      }
+    }
+    if error is DeviceCredentialStoreError || error is KeychainError
+      || error is ServerDeviceBindingError
+    {
+      return "无法安全读取已保存的同步凭据，本机资料未改变。"
+    }
+    return "暂时无法准备导入预览，本机资料未改变。"
   }
 
   func unlock() async {

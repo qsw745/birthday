@@ -1,3 +1,4 @@
+import BirthdayCore
 import SwiftUI
 import UIKit
 
@@ -190,5 +191,247 @@ struct ServerBindingView: View {
   private func clearSensitiveInput() {
     password = ""
     focusedField = nil
+  }
+}
+
+struct SnapshotImportPreviewView: View {
+  @Bindable var model: AppModel
+  let onContinueLocal: () -> Void
+
+  var body: some View {
+    VStack(spacing: 22) {
+      header
+
+      switch model.snapshotImportState {
+      case .idle, .loading:
+        ProgressView("正在读取服务器快照")
+          .tint(ModernAirTheme.tide)
+          .frame(maxWidth: .infinity, minHeight: 120)
+          .modernAirSurface(radius: 24)
+      case .failed:
+        failureContent
+      case .ready, .importing:
+        if let preview = model.snapshotImportPreview {
+          previewContent(preview)
+        }
+      case .completed:
+        ProgressView("正在打开月历")
+          .tint(ModernAirTheme.tide)
+      }
+    }
+    .task {
+      if model.snapshotImportState == .idle {
+        await model.loadInitialSnapshotPreview()
+      }
+    }
+  }
+
+  private var header: some View {
+    VStack(spacing: 16) {
+      Image(systemName: "tray.and.arrow.down.fill")
+        .font(.system(size: 42, weight: .medium))
+        .foregroundStyle(ModernAirTheme.dusk)
+        .frame(width: 86, height: 86)
+        .background(ModernAirTheme.glacier, in: RoundedRectangle(cornerRadius: 26))
+        .accessibilityHidden(true)
+
+      Text("首次导入预览")
+        .font(.system(.largeTitle, design: .rounded, weight: .bold))
+        .multilineTextAlignment(.center)
+        .foregroundStyle(ModernAirTheme.ink)
+
+      Text("先核对可能重复的生日。在你为每一项做出选择前，不会写入本机资料或推进同步游标。")
+        .font(.body)
+        .multilineTextAlignment(.center)
+        .foregroundStyle(ModernAirTheme.secondaryInk)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+  }
+
+  private var failureContent: some View {
+    VStack(spacing: 16) {
+      Label(
+        model.snapshotImportErrorMessage ?? "暂时无法准备导入预览，本机资料未改变。",
+        systemImage: "exclamationmark.icloud.fill"
+      )
+      .font(.subheadline)
+      .foregroundStyle(ModernAirTheme.ink)
+      .fixedSize(horizontal: false, vertical: true)
+      .padding(18)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(ModernAirTheme.glacier, in: RoundedRectangle(cornerRadius: 20))
+
+      Button("重试预览") {
+        Task { await model.loadInitialSnapshotPreview() }
+      }
+      .buttonStyle(.borderedProminent)
+      .controlSize(.large)
+      .tint(ModernAirTheme.tide)
+      .frame(maxWidth: .infinity, minHeight: 44)
+      .accessibilityIdentifier("retrySnapshotPreviewButton")
+
+      Button("先使用本地模式", action: onContinueLocal)
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .tint(ModernAirTheme.tide)
+    }
+  }
+
+  @ViewBuilder
+  private func previewContent(_ preview: SnapshotImportPreview) -> some View {
+    VStack(spacing: 14) {
+      Text("服务器中有 \(preview.remoteCount) 条生日")
+        .font(.title3.weight(.semibold))
+        .foregroundStyle(ModernAirTheme.ink)
+
+      if preview.duplicates.isEmpty {
+        Label("未发现可能重复，可以安全导入。", systemImage: "checkmark.seal.fill")
+          .font(.subheadline)
+          .foregroundStyle(ModernAirTheme.secondaryInk)
+      } else {
+        Text("发现 \(preview.duplicates.count) 组可能重复")
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(ModernAirTheme.secondaryInk)
+      }
+    }
+    .padding(18)
+    .frame(maxWidth: .infinity)
+    .modernAirSurface(radius: 24)
+
+    ForEach(preview.duplicates) { candidate in
+      duplicateCard(candidate)
+    }
+
+    if let error = model.snapshotImportErrorMessage {
+      Label(error, systemImage: "exclamationmark.circle.fill")
+        .font(.subheadline)
+        .foregroundStyle(ModernAirTheme.ink)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(ModernAirTheme.glacier, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    Button {
+      Task { await model.importInitialSnapshot() }
+    } label: {
+      HStack(spacing: 9) {
+        if model.snapshotImportState == .importing {
+          ProgressView()
+            .tint(.white)
+            .accessibilityHidden(true)
+        } else {
+          Image(systemName: "tray.and.arrow.down.fill")
+            .accessibilityHidden(true)
+        }
+        Text(
+          model.snapshotImportState == .importing
+            ? "正在原子导入" : "导入 \(preview.remoteCount) 条生日"
+        )
+      }
+      .frame(maxWidth: .infinity, minHeight: 44)
+    }
+    .buttonStyle(.borderedProminent)
+    .controlSize(.large)
+    .tint(ModernAirTheme.tide)
+    .disabled(!model.canImportInitialSnapshot || model.snapshotImportState == .importing)
+    .accessibilityIdentifier("importSnapshotButton")
+    .accessibilityHint("所有重复项都做出选择后，才会一次性导入")
+
+    Button("取消导入，先使用本地模式", action: onContinueLocal)
+      .buttonStyle(.bordered)
+      .controlSize(.large)
+      .tint(ModernAirTheme.tide)
+      .disabled(model.snapshotImportState == .importing)
+  }
+
+  private func duplicateCard(_ candidate: DuplicateCandidate) -> some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Label("可能是同一个生日", systemImage: "rectangle.on.rectangle.angled")
+        .font(.headline)
+        .foregroundStyle(ModernAirTheme.ink)
+
+      HStack(alignment: .top, spacing: 12) {
+        duplicateSummary(
+          title: "本机",
+          name: candidate.local.name,
+          month: candidate.local.lunarBirthday.month,
+          day: candidate.local.lunarBirthday.day
+        )
+        duplicateSummary(
+          title: "服务器",
+          name: candidate.remote.name,
+          month: candidate.remote.lunarMonth,
+          day: candidate.remote.lunarDay
+        )
+      }
+
+      HStack(spacing: 10) {
+        decisionButton(
+          "保留两条",
+          decision: .keepBoth,
+          candidate: candidate,
+          identifier: "keepBothDuplicateButton"
+        )
+        decisionButton(
+          "采用服务器版本",
+          decision: .useRemote,
+          candidate: candidate,
+          identifier: "useRemoteDuplicateButton"
+        )
+      }
+    }
+    .padding(18)
+    .modernAirSurface(radius: 24)
+  }
+
+  private func duplicateSummary(
+    title: String,
+    name: String,
+    month: Int,
+    day: Int
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Text(title)
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(ModernAirTheme.secondaryInk)
+      Text(name)
+        .font(.body.weight(.semibold))
+        .foregroundStyle(ModernAirTheme.ink)
+      Text("农历 \(month) 月 \(day) 日")
+        .font(.caption)
+        .foregroundStyle(ModernAirTheme.secondaryInk)
+    }
+    .padding(12)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(ModernAirTheme.glacier, in: RoundedRectangle(cornerRadius: 16))
+  }
+
+  private func decisionButton(
+    _ title: String,
+    decision: DuplicateDecision,
+    candidate: DuplicateCandidate,
+    identifier: String
+  ) -> some View {
+    let isSelected = model.snapshotDecision(for: candidate.id) == decision
+    return Button(title) {
+      model.chooseSnapshotDuplicate(decision, candidateID: candidate.id)
+    }
+    .buttonStyle(.plain)
+    .font(.subheadline.weight(.semibold))
+    .foregroundStyle(isSelected ? .white : ModernAirTheme.ink)
+    .padding(.horizontal, 12)
+    .frame(maxWidth: .infinity, minHeight: 44)
+    .background(
+      isSelected ? ModernAirTheme.tide : ModernAirTheme.glacier,
+      in: RoundedRectangle(cornerRadius: 14)
+    )
+    .overlay {
+      RoundedRectangle(cornerRadius: 14)
+        .stroke(isSelected ? ModernAirTheme.tide : ModernAirTheme.outline, lineWidth: 1)
+    }
+    .frame(maxWidth: .infinity, minHeight: 44)
+    .accessibilityIdentifier(identifier)
+    .accessibilityValue(isSelected ? "已选择" : "未选择")
   }
 }

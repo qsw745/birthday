@@ -6,6 +6,8 @@ public enum BirthdayStoreError: Error, Equatable, Sendable {
 }
 
 public actor BirthdayStore: ModelActor {
+  private static let primarySyncMetadataKey = "primary"
+
   nonisolated public let modelContainer: ModelContainer
   nonisolated public let modelExecutor: any ModelExecutor
 
@@ -175,6 +177,151 @@ public actor BirthdayStore: ModelActor {
       ]
     )
     return try modelContext.fetch(descriptor).map(map)
+  }
+
+  public func syncCursor() throws -> Int64 {
+    let key = Self.primarySyncMetadataKey
+    let descriptor = FetchDescriptor<SyncMetadataEntity>(
+      predicate: #Predicate { $0.key == key }
+    )
+    return try modelContext.fetch(descriptor).first?.cursor ?? 0
+  }
+
+  public func applySnapshot(
+    _ snapshot: SnapshotResponse,
+    decisions: [DuplicateCandidate.ID: DuplicateDecision]
+  ) throws {
+    do {
+      try validateSnapshot(snapshot)
+      let birthdayEntities = try modelContext.fetch(FetchDescriptor<BirthdayEntity>())
+      let operationEntities = try modelContext.fetch(FetchDescriptor<SyncOperationEntity>())
+      let localRecords = try birthdayEntities.map(map)
+      let preview = SnapshotImporter.preview(local: localRecords, remote: snapshot.birthdays)
+      guard preview.duplicates.allSatisfy({ decisions[$0.id] != nil }) else {
+        throw SnapshotImportError.missingDuplicateDecision
+      }
+
+      let pendingIDs = try pendingEntityIDs(
+        birthdays: birthdayEntities,
+        operations: operationEntities
+      )
+      let discardedLocalIDs = Set(
+        preview.duplicates.compactMap { candidate in
+          decisions[candidate.id] == .useRemote ? candidate.local.id : nil
+        }
+      )
+
+      for localID in discardedLocalIDs {
+        guard let entity = birthdayEntities.first(where: { $0.id == localID }) else { continue }
+        let matchingRemote = preview.duplicates.first {
+          $0.local.id == localID && decisions[$0.id] == .useRemote
+        }?.remote
+        let discardedAt = max(entity.updatedAt, matchingRemote?.updatedAt ?? entity.updatedAt)
+        entity.deletedAt = discardedAt
+        entity.updatedAt = discardedAt
+        entity.syncStateRaw = SyncState.synced.rawValue
+        for operation in operationEntities where operation.entityId == localID {
+          modelContext.delete(operation)
+        }
+      }
+
+      for remote in snapshot.birthdays {
+        guard !pendingIDs.contains(remote.id) else { continue }
+
+        if let existing = birthdayEntities.first(where: { $0.id == remote.id }) {
+          apply(remote, to: existing)
+        } else {
+          modelContext.insert(makeEntity(remote))
+        }
+      }
+
+      let key = Self.primarySyncMetadataKey
+      let metadataDescriptor = FetchDescriptor<SyncMetadataEntity>(
+        predicate: #Predicate { $0.key == key }
+      )
+      if let metadata = try modelContext.fetch(metadataDescriptor).first {
+        metadata.cursor = snapshot.cursor
+      } else {
+        modelContext.insert(SyncMetadataEntity(key: key, cursor: snapshot.cursor))
+      }
+
+      try transactionCommitter(modelContext)
+    } catch {
+      modelContext.rollback()
+      throw error
+    }
+  }
+
+  private func validateSnapshot(_ snapshot: SnapshotResponse) throws {
+    var remoteIDs = Set<UUID>()
+    for remote in snapshot.birthdays {
+      guard remoteIDs.insert(remote.id).inserted else {
+        throw SnapshotImportError.duplicateRemoteID(remote.id)
+      }
+      try BirthdayValidator.validate(
+        BirthdayDraft(
+          name: remote.name,
+          lunarBirthday: LunarBirthday(
+            month: remote.lunarMonth,
+            day: remote.lunarDay,
+            isLeapMonth: remote.isLeapMonth
+          ),
+          reminder: remote.reminder
+        )
+      )
+    }
+  }
+
+  private func pendingEntityIDs(
+    birthdays: [BirthdayEntity],
+    operations: [SyncOperationEntity]
+  ) throws -> Set<UUID> {
+    var pending = Set(operations.map(\.entityId))
+    for birthday in birthdays {
+      let state = try requireKnownSyncState(birthday.syncStateRaw)
+      if state != .synced {
+        pending.insert(birthday.id)
+      }
+    }
+    return pending
+  }
+
+  private func makeEntity(_ remote: APIBirthday) -> BirthdayEntity {
+    let entity = BirthdayEntity(
+      id: remote.id,
+      draft: BirthdayDraft(
+        name: remote.name,
+        lunarBirthday: LunarBirthday(
+          month: remote.lunarMonth,
+          day: remote.lunarDay,
+          isLeapMonth: remote.isLeapMonth
+        ),
+        reminder: remote.reminder
+      ),
+      nextSolarDate: remote.nextSolarDate ?? remote.updatedAt,
+      now: remote.createdAt
+    )
+    apply(remote, to: entity)
+    return entity
+  }
+
+  private func apply(_ remote: APIBirthday, to entity: BirthdayEntity) {
+    entity.name = remote.name.trimmingCharacters(in: .whitespacesAndNewlines)
+    entity.lunarMonth = remote.lunarMonth
+    entity.lunarDay = remote.lunarDay
+    entity.isLeapMonth = remote.isLeapMonth
+    entity.reminderTimeMinutes = remote.reminder.timeMinutes
+    entity.notifyDayBefore = remote.reminder.notifyDayBefore
+    entity.notifySameDay = remote.reminder.notifySameDay
+    entity.emailEnabled = remote.reminder.emailEnabled
+    entity.emailAddress = remote.reminder.emailAddress
+    entity.emailMessage = remote.reminder.emailMessage
+    entity.nextSolarDate = remote.nextSolarDate
+    entity.version = remote.version
+    entity.createdAt = remote.createdAt
+    entity.updatedAt = remote.updatedAt
+    entity.deletedAt = remote.deletedAt
+    entity.syncStateRaw = SyncState.synced.rawValue
   }
 
   private func apply(

@@ -492,6 +492,7 @@ private struct CalendarHomePreviewHost: View {
     let container = try? ModelContainer(
       for: BirthdayEntity.self,
       SyncOperationEntity.self,
+      SyncMetadataEntity.self,
       configurations: configuration
     )
     self.container = container
