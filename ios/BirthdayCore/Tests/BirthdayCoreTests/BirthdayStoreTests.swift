@@ -94,6 +94,48 @@ private func insertSyncedBirthday(
 
 @Suite(.serialized) struct BirthdayStoreTests {
 
+@Test func readyOperationsReturnsOldestFirstEvenWhenReaderIsUnordered() async throws {
+  let earlierID = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+  let laterID = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
+  let entityID = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
+  let earlier = Date(timeIntervalSince1970: 1_700_000_000)
+  let later = earlier.addingTimeInterval(60)
+  let store = BirthdayStore(
+    modelContainer: try makeContainer(),
+    transactionCommitter: { try $0.save() },
+    operationReader: { _ in
+      [
+        SyncOperationEntity(
+          operationId: laterID,
+          entityId: entityID,
+          operationType: "upsert",
+          baseVersion: 0,
+          payloadJSON: Data(),
+          createdAt: later,
+          attemptCount: 0,
+          nextRetryAt: nil,
+          lastErrorCategory: nil
+        ),
+        SyncOperationEntity(
+          operationId: earlierID,
+          entityId: entityID,
+          operationType: "upsert",
+          baseVersion: 0,
+          payloadJSON: Data(),
+          createdAt: earlier,
+          attemptCount: 0,
+          nextRetryAt: nil,
+          lastErrorCategory: nil
+        ),
+      ]
+    }
+  )
+
+  let ready = try await store.readyOperations(limit: 1, now: later)
+
+  #expect(ready.map(\.operationId) == [earlierID])
+}
+
 @Test func savePersistsBirthdayAndOutboxAtomically() async throws {
   let store = makeStore(try makeContainer())
 

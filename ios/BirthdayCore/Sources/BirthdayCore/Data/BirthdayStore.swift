@@ -204,6 +204,10 @@ public actor BirthdayStore: ModelActor {
           && operation.lastErrorCategory != "conflict_blocked"
           && (operation.nextRetryAt == nil || operation.nextRetryAt! <= now)
       }
+      .sorted { lhs, rhs in
+        if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+        return lhs.operationId.uuidString < rhs.operationId.uuidString
+      }
       .prefix(limit)
       .map(map)
   }

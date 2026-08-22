@@ -216,6 +216,7 @@ final class AppModel {
   private(set) var deviceManagementMessage: String?
   var isSyncRuntimeEnabled: Bool { syncPresentationReducer.isRemoteSyncEnabled }
   private(set) var pendingLocalCleanup: PendingLocalCleanup?
+  let localOnlyStatusDetail: String
 
   var needsRevokedCredentialCleanup: Bool {
     pendingLocalCleanup == .serverRevoked
@@ -238,6 +239,7 @@ final class AppModel {
   private var reminderOperationsInFlight = 0
   private var pendingInitialSnapshot: SnapshotResponse?
   private let preferences: UserDefaults
+  private let syncLastSuccessStore: SyncLastSuccessStore
   private let authenticator: any AppLockAuthenticating
   private let serverDeviceBinder: any ServerDeviceBinding
   private let requestNotificationAuthorization: @MainActor () async throws -> Bool
@@ -248,7 +250,7 @@ final class AppModel {
   private let reminderRebuildCoordinator: ReminderRebuildCoordinator
   private var syncCoordinator: SyncCoordinator?
   private var deviceManagementService: DeviceManagementService?
-  private var syncPresentationReducer = SyncPresentationReducer()
+  private var syncPresentationReducer: SyncPresentationReducer
   private var activeSyncPresentationRequest: SyncPresentationRequest?
   private var pendingUnlinkLifecycleGeneration: SyncRuntimeLifecycleGeneration?
   private var lifecyclePauseAcquisitionCount = 0
@@ -302,6 +304,7 @@ final class AppModel {
     selectedMonth: Date = Date(),
     initiallyLoaded: Bool = false,
     preferences: UserDefaults = .standard,
+    localOnlyStatusDetail: String = "生日与提醒只保存在这台设备上。",
     authenticator: any AppLockAuthenticating = LocalAuthenticationService(),
     serverDeviceBinder: any ServerDeviceBinding,
     notificationScheduler: any NotificationScheduling = UserNotificationScheduler(
@@ -323,6 +326,10 @@ final class AppModel {
     self.selectedMonth = selectedMonth
     loadState = initiallyLoaded ? .loaded : .idle
     self.preferences = preferences
+    self.localOnlyStatusDetail = localOnlyStatusDetail
+    let syncLastSuccessStore = SyncLastSuccessStore(preferences: preferences)
+    self.syncLastSuccessStore = syncLastSuccessStore
+    syncPresentationReducer = SyncPresentationReducer(lastSuccess: syncLastSuccessStore.load())
     self.authenticator = authenticator
     self.serverDeviceBinder = serverDeviceBinder
     self.oneShotNotificationScheduler = oneShotNotificationScheduler
@@ -778,6 +785,7 @@ final class AppModel {
   func configureSyncCoordinator(_ coordinator: SyncCoordinator, initiallyBound: Bool) {
     syncCoordinator = coordinator
     syncPresentationReducer.configureRemoteRuntime(initiallyBound: initiallyBound)
+    if !initiallyBound { syncLastSuccessStore.clear() }
   }
 
   func configureDeviceManagement(_ service: DeviceManagementService) {
@@ -1022,6 +1030,7 @@ final class AppModel {
 
   private func disableSyncRuntimeAfterUnlink() {
     syncPresentationReducer.useLocalOnly()
+    syncLastSuccessStore.clear()
     syncStatus = .unbound
     managedDevices = []
     pendingLocalCleanup = nil
@@ -1083,6 +1092,7 @@ final class AppModel {
 
   private func enterMissingCredentials() async {
     syncPresentationReducer.transitionToMissingCredentials()
+    syncLastSuccessStore.clear()
     activeSyncPresentationRequest = nil
     lifecyclePauseAcquisitionCount += 1
     defer { lifecyclePauseAcquisitionCount -= 1 }
@@ -1104,7 +1114,10 @@ final class AppModel {
     _ request: SyncPresentationRequest,
     result: SyncPresentationCompletion
   ) {
-    syncPresentationReducer.finishSync(request, result: result)
+    let accepted = syncPresentationReducer.finishSync(request, result: result)
+    if accepted, case .completed(let date) = result {
+      syncLastSuccessStore.save(date)
+    }
     if activeSyncPresentationRequest == request {
       activeSyncPresentationRequest = nil
     }

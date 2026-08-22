@@ -1,0 +1,3 @@
+// Copy this file to Signing.xcconfig and replace the placeholder locally.
+// Signing.xcconfig is ignored and must never be committed.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID

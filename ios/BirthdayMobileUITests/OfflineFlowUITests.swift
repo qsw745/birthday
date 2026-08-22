@@ -1,5 +1,6 @@
 import XCTest
 
+@MainActor
 final class OfflineFlowUITests: XCTestCase {
   func testTransportCleanupFailureKeepsRetryAndExplicitResumeActionsVisible() {
     let app = XCUIApplication()

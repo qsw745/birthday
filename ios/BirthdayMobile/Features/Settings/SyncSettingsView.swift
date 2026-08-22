@@ -327,7 +327,7 @@ struct SyncSettingsView: View {
   private var statusDetail: String {
     switch model.syncPresentation {
     case .localOnly:
-      "生日与提醒只保存在这台设备上。"
+      model.localOnlyStatusDetail
     case .idle(let lastSuccess):
       lastSuccess.map { "上次同步：\($0.formatted(date: .abbreviated, time: .shortened))" }
         ?? "尚无成功同步记录。"

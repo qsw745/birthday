@@ -9,9 +9,12 @@ import UIKit
 struct BirthdayMobileApp: App {
   init() {
     let bootstrap = UITestBootstrap()
+    let configuration = AppConfiguration(
+      apiBaseURLValue: Bundle.main.object(forInfoDictionaryKey: "BirthdayAPIBaseURL")
+    )
     let runtime = SyncRuntimeCompositionPolicy(
       isUITesting: bootstrap.isEnabled,
-      networkDisabled: bootstrap.networkDisabled
+      networkDisabled: bootstrap.networkDisabled || configuration.remoteBaseURL == nil
     )
     guard runtime.allowsSystemSyncTriggers else { return }
     AppSyncRuntime.shared.registerBackgroundRefresh()
@@ -35,6 +38,9 @@ private struct BirthdayAppBootstrapView: View {
   @State private var networkMonitorLifecycle = NetworkRestorationMonitorLifecycle()
   @State private var sceneSyncRequests = SceneSyncRequestAdapter()
   private let uiTestBootstrap = UITestBootstrap()
+  private let appConfiguration = AppConfiguration(
+    apiBaseURLValue: Bundle.main.object(forInfoDictionaryKey: "BirthdayAPIBaseURL")
+  )
 
   var body: some View {
     Group {
@@ -140,13 +146,7 @@ private struct BirthdayAppBootstrapView: View {
       let configuration = ModelConfiguration(
         isStoredInMemoryOnly: uiTestBootstrap.isEnabled
       )
-      let container = try ModelContainer(
-        for: BirthdayEntity.self,
-        SyncOperationEntity.self,
-        SyncMetadataEntity.self,
-        SyncConflictEntity.self,
-        configurations: configuration
-      )
+      let container = try BirthdayModelContainer.make(configuration: configuration)
       if uiTestBootstrap.isSnapshotImportFixtureEnabled {
         try seedSnapshotImportPreview(in: container)
       }
@@ -166,7 +166,7 @@ private struct BirthdayAppBootstrapView: View {
   private var syncRuntimePolicy: SyncRuntimeCompositionPolicy {
     SyncRuntimeCompositionPolicy(
       isUITesting: uiTestBootstrap.isEnabled,
-      networkDisabled: uiTestBootstrap.networkDisabled
+      networkDisabled: uiTestBootstrap.networkDisabled || appConfiguration.remoteBaseURL == nil
     )
   }
 
@@ -292,7 +292,10 @@ private struct BirthdayAppBootstrapView: View {
       return model
     }
 
-    guard syncRuntimePolicy.allowsRemoteSyncComposition else {
+    guard
+      syncRuntimePolicy.allowsRemoteSyncComposition,
+      let remoteBaseURL = appConfiguration.remoteBaseURL
+    else {
       return makeOfflineAppModel(container: container)
     }
 
@@ -300,7 +303,7 @@ private struct BirthdayAppBootstrapView: View {
     let notificationClient = SystemNotificationCenterClient(center: notificationCenter)
     let credentials = DeviceCredentialStore(secure: KeychainStore())
     let mobileAPI = MobileAPIClient(
-      baseURL: URL(string: "https://qisw.top/api/mobile")!
+      baseURL: remoteBaseURL
     )
     let store = BirthdayStore(modelContainer: container)
     let notificationScheduler = UserNotificationScheduler(center: notificationClient)
@@ -353,6 +356,8 @@ private struct BirthdayAppBootstrapView: View {
     AppModel(
       store: BirthdayStore(modelContainer: container),
       preferences: .standard,
+      localOnlyStatusDetail: appConfiguration.localOnlyMessage
+        ?? "生日与提醒只保存在这台设备上。",
       authenticator: LocalAuthenticationService(),
       serverDeviceBinder: OfflineServerDeviceBinder(),
       notificationScheduler: OfflineNotificationScheduler(),

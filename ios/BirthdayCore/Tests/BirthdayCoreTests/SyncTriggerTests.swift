@@ -185,6 +185,21 @@ import Testing
   }
 }
 
+@Test func lastSuccessfulSyncSurvivesProcessRelaunch() throws {
+  let suiteName = "top.qisw.birthday.tests.sync-success.\(UUID().uuidString)"
+  let preferences = try #require(UserDefaults(suiteName: suiteName))
+  defer { preferences.removePersistentDomain(forName: suiteName) }
+  let completedAt = Date(timeIntervalSince1970: 1_800_000_000)
+
+  SyncLastSuccessStore(preferences: preferences).save(completedAt)
+
+  var relaunched = SyncPresentationReducer(
+    lastSuccess: SyncLastSuccessStore(preferences: preferences).load()
+  )
+  relaunched.configureRemoteRuntime(initiallyBound: true)
+  #expect(relaunched.presentation == .idle(lastSuccess: completedAt))
+}
+
 @Test func lifecycleTransitionsDisableEveryTriggerForMissingCredentialsAndRebind() {
   var reducer = SyncPresentationReducer()
   reducer.configureRemoteRuntime(initiallyBound: true)

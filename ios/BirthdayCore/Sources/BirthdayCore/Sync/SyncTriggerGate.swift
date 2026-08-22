@@ -80,7 +80,9 @@ public struct SyncPresentationReducer: Equatable, Sendable {
   private var lastSuccess: Date?
   private var remoteSyncEnabled = false
 
-  public init() {}
+  public init(lastSuccess: Date? = nil) {
+    self.lastSuccess = lastSuccess
+  }
 
   public var isRemoteSyncEnabled: Bool { remoteSyncEnabled }
 
@@ -128,6 +130,7 @@ public struct SyncPresentationReducer: Equatable, Sendable {
     lifecycle = initiallyBound ? .bound : .localOnly
     transient = .stable
     remoteSyncEnabled = true
+    if !initiallyBound { lastSuccess = nil }
   }
 
   public mutating func useLocalOnly() {
@@ -201,11 +204,12 @@ public struct SyncPresentationReducer: Equatable, Sendable {
       && candidate.value == runtimeLifecycleGeneration
   }
 
+  @discardableResult
   public mutating func finishSync(
     _ request: SyncPresentationRequest,
     result: SyncPresentationCompletion
-  ) {
-    guard lifecycle == .bound, request.generation == generation else { return }
+  ) -> Bool {
+    guard lifecycle == .bound, request.generation == generation else { return false }
     switch result {
     case .completed(let date):
       lastSuccess = date
@@ -217,6 +221,7 @@ public struct SyncPresentationReducer: Equatable, Sendable {
     case .failed(let message):
       transient = .failed(message: message)
     }
+    return true
   }
 
   private mutating func advanceGeneration() {

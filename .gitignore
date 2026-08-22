@@ -5,6 +5,7 @@ ios/BirthdayMobile.xcodeproj/
 ios/.build/
 ios/BirthdayCore/.build/
 ios/DerivedData/
+ios/Config/Signing.xcconfig
 node_modules/
 uploads/
 .env
