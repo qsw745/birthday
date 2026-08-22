@@ -57,7 +57,7 @@ struct ServerBindingView: View {
               Image(systemName: "arrow.triangle.2.circlepath.icloud.fill")
                 .accessibilityHidden(true)
             }
-            Text(isBinding ? "正在安全绑定" : "绑定并导入")
+            Text(isBinding ? "正在安全绑定" : "绑定并查看预览")
           }
           .frame(maxWidth: .infinity, minHeight: 44)
         }
@@ -66,9 +66,9 @@ struct ServerBindingView: View {
         .tint(ModernAirTheme.tide)
         .disabled(isBinding)
         .accessibilityIdentifier("bindServerButton")
-        .accessibilityHint("使用当前填写的账号绑定此设备，成功后进入首次导入预览")
+        .accessibilityHint("使用当前填写的账号绑定此设备，成功后查看首次导入预览")
 
-        Button("暂不绑定", action: onSkip)
+        Button("暂不绑定", action: skip)
           .buttonStyle(.bordered)
           .controlSize(.large)
           .tint(ModernAirTheme.tide)
@@ -77,6 +77,9 @@ struct ServerBindingView: View {
           .accessibilityIdentifier("skipServerBindingButton")
           .accessibilityHint("跳过服务器连接，直接使用本地生日功能")
       }
+    }
+    .onDisappear {
+      clearSensitiveInput()
     }
   }
 
@@ -172,10 +175,20 @@ struct ServerBindingView: View {
         password: password,
         deviceName: deviceName
       )
-      password = ""
+      clearSensitiveInput()
       if succeeded {
         onBound()
       }
     }
+  }
+
+  private func skip() {
+    clearSensitiveInput()
+    onSkip()
+  }
+
+  private func clearSensitiveInput() {
+    password = ""
+    focusedField = nil
   }
 }

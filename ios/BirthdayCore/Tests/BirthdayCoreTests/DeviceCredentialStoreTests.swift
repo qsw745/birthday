@@ -109,27 +109,91 @@ private actor BindingMobileAPI: MobileAPI {
     try store.save(credentials)
 
     #expect(try store.load() == credentials)
-    #expect(secure.accounts == ["mobile-device-credentials"])
+    #expect(secure.accounts == ["mobile-device-credentials", "mobile-device-id"])
+    #expect(try store.readDeviceID() == firstDeviceID)
   }
 
-  @Test func savingNewCredentialsOverwritesTheWholeBundle() throws {
+  @Test func savingNewCredentialsForTheSameDeviceOverwritesTheWholeBundle() throws {
     let secure = InMemorySecureTokenStore()
     let store = DeviceCredentialStore(secure: secure)
     try store.save(makeCredentials(deviceID: firstDeviceID, tokenSuffix: "old"))
-    let replacement = makeCredentials(deviceID: secondDeviceID, tokenSuffix: "new")
+    let replacement = makeCredentials(deviceID: firstDeviceID, tokenSuffix: "new")
 
     try store.save(replacement)
 
     #expect(try store.load() == replacement)
-    #expect(secure.accounts == ["mobile-device-credentials"])
+    #expect(try store.readDeviceID() == firstDeviceID)
+    #expect(secure.accounts == ["mobile-device-credentials", "mobile-device-id"])
+  }
+
+  @Test func savingCredentialsForAnotherDevicePreservesTheOriginalIdentityAndBundle() throws {
+    let secure = InMemorySecureTokenStore()
+    let store = DeviceCredentialStore(secure: secure)
+    let original = makeCredentials(deviceID: firstDeviceID, tokenSuffix: "original")
+    try store.save(original)
+
+    #expect(throws: DeviceCredentialStoreError.deviceIdentityMismatch) {
+      try store.save(makeCredentials(deviceID: secondDeviceID, tokenSuffix: "wrong-device"))
+    }
+
+    #expect(try store.readDeviceID() == firstDeviceID)
+    #expect(try store.load() == original)
   }
 
   @Test func corruptCredentialBundleFailsClosed() throws {
     let secure = InMemorySecureTokenStore()
     try secure.save(Data("not-json".utf8), account: "mobile-device-credentials")
+    try secure.save(
+      Data(firstDeviceID.uuidString.lowercased().utf8),
+      account: "mobile-device-id"
+    )
     let store = DeviceCredentialStore(secure: secure)
 
     #expect(throws: DecodingError.self) {
+      try store.load()
+    }
+  }
+
+  @Test func credentialBundleWithoutDeviceIdentityFailsClosed() throws {
+    let secure = InMemorySecureTokenStore()
+    let encoded = try MobileJSON.encoder.encode(
+      makeCredentials(deviceID: firstDeviceID, tokenSuffix: "orphaned")
+    )
+    try secure.save(encoded, account: "mobile-device-credentials")
+    let store = DeviceCredentialStore(secure: secure)
+
+    #expect(throws: DeviceCredentialStoreError.invalidDeviceID) {
+      try store.load()
+    }
+  }
+
+  @Test func credentialBundleWithCorruptDeviceIdentityFailsClosed() throws {
+    let secure = InMemorySecureTokenStore()
+    let encoded = try MobileJSON.encoder.encode(
+      makeCredentials(deviceID: firstDeviceID, tokenSuffix: "corrupt-identity")
+    )
+    try secure.save(encoded, account: "mobile-device-credentials")
+    try secure.save(Data("not-a-canonical-uuid".utf8), account: "mobile-device-id")
+    let store = DeviceCredentialStore(secure: secure)
+
+    #expect(throws: DeviceCredentialStoreError.invalidDeviceID) {
+      try store.load()
+    }
+  }
+
+  @Test func credentialBundleForDifferentPersistedIdentityFailsClosed() throws {
+    let secure = InMemorySecureTokenStore()
+    let encoded = try MobileJSON.encoder.encode(
+      makeCredentials(deviceID: secondDeviceID, tokenSuffix: "mismatched")
+    )
+    try secure.save(encoded, account: "mobile-device-credentials")
+    try secure.save(
+      Data(firstDeviceID.uuidString.lowercased().utf8),
+      account: "mobile-device-id"
+    )
+    let store = DeviceCredentialStore(secure: secure)
+
+    #expect(throws: DeviceCredentialStoreError.deviceIdentityMismatch) {
       try store.load()
     }
   }
@@ -300,6 +364,18 @@ private actor BindingMobileAPI: MobileAPI {
 
     #expect(try credentials.load() == nil)
     #expect(try credentials.readDeviceID() == firstDeviceID)
+  }
+
+  @Test func directCredentialSaveFailureStillEstablishesTheStableIdentity() throws {
+    let secure = SelectiveFailingSecureTokenStore()
+    let store = DeviceCredentialStore(secure: secure)
+
+    #expect(throws: CredentialStoreFixtureError.save) {
+      try store.save(makeCredentials(deviceID: firstDeviceID, tokenSuffix: "unsaved-direct"))
+    }
+
+    #expect(try store.readDeviceID() == firstDeviceID)
+    #expect(try store.load() == nil)
   }
 
   private func makeCredentials(deviceID: UUID, tokenSuffix: String) -> DeviceCredentials {

@@ -34,6 +34,7 @@ public struct DeviceCredentials: Codable, Equatable, Sendable {
 
 public enum DeviceCredentialStoreError: Error, Equatable, Sendable {
   case invalidDeviceID
+  case deviceIdentityMismatch
 }
 
 public enum ServerDeviceBindingError: Error, Equatable, Sendable {
@@ -97,6 +98,14 @@ public final class DeviceCredentialStore: @unchecked Sendable {
 
   public func save(_ value: DeviceCredentials) throws {
     try withLock {
+      if let deviceID = try readDeviceIDLocked() {
+        guard deviceID == value.deviceId else {
+          throw DeviceCredentialStoreError.deviceIdentityMismatch
+        }
+      } else {
+        try saveDeviceIDLocked(value.deviceId)
+      }
+
       let encoded = try MobileJSON.encoder.encode(value)
       try secure.save(encoded, account: Self.credentialsAccount)
     }
@@ -105,7 +114,14 @@ public final class DeviceCredentialStore: @unchecked Sendable {
   public func load() throws -> DeviceCredentials? {
     try withLock {
       guard let data = try secure.read(account: Self.credentialsAccount) else { return nil }
-      return try MobileJSON.decoder.decode(DeviceCredentials.self, from: data)
+      guard let deviceID = try readDeviceIDLocked() else {
+        throw DeviceCredentialStoreError.invalidDeviceID
+      }
+      let value = try MobileJSON.decoder.decode(DeviceCredentials.self, from: data)
+      guard deviceID == value.deviceId else {
+        throw DeviceCredentialStoreError.deviceIdentityMismatch
+      }
+      return value
     }
   }
 
@@ -132,13 +148,17 @@ public final class DeviceCredentialStore: @unchecked Sendable {
       }
 
       let deviceID = makeDeviceID()
-      guard Self.isServerUUID(deviceID.uuidString) else {
-        throw DeviceCredentialStoreError.invalidDeviceID
-      }
-      let canonical = deviceID.uuidString.lowercased()
-      try secure.save(Data(canonical.utf8), account: Self.deviceIDAccount)
+      try saveDeviceIDLocked(deviceID)
       return deviceID
     }
+  }
+
+  private func saveDeviceIDLocked(_ deviceID: UUID) throws {
+    guard Self.isServerUUID(deviceID.uuidString) else {
+      throw DeviceCredentialStoreError.invalidDeviceID
+    }
+    let canonical = deviceID.uuidString.lowercased()
+    try secure.save(Data(canonical.utf8), account: Self.deviceIDAccount)
   }
 
   private func readDeviceIDLocked() throws -> UUID? {

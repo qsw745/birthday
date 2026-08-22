@@ -20,6 +20,12 @@ final class OfflineFlowUITests: XCTestCase {
     XCTAssertTrue(app.textFields["serverUsernameField"].exists)
     XCTAssertTrue(app.secureTextFields["serverPasswordField"].exists)
     XCTAssertTrue(app.textFields["serverDeviceNameField"].exists)
+    XCTAssertTrue(
+      app.buttons.matching(NSPredicate(format: "label == %@", "绑定并查看预览")).firstMatch.exists,
+      "绑定按钮必须准确说明成功后只进入预览"
+    )
+    app.secureTextFields["serverPasswordField"].tap()
+    app.secureTextFields["serverPasswordField"].typeText("ui-test-secret")
     app.buttons["skipServerBindingButton"].tap()
 
     let unlockButton = app.buttons["unlockButton"]
