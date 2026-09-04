@@ -44,4 +44,4 @@ extension BirthdaySchemaV2 {
   }
 }
 
-public typealias BirthdayEntity = BirthdaySchemaV2.BirthdayEntity
+public typealias BirthdayEntity = BirthdaySchemaV3.BirthdayEntity

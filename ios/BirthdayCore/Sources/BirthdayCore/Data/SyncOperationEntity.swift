@@ -38,4 +38,4 @@ extension BirthdaySchemaV2 {
   }
 }
 
-public typealias SyncOperationEntity = BirthdaySchemaV2.SyncOperationEntity
+public typealias SyncOperationEntity = BirthdaySchemaV3.SyncOperationEntity

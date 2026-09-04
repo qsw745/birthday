@@ -32,7 +32,7 @@ extension BirthdaySchemaV2 {
   }
 }
 
-public typealias SyncConflictEntity = BirthdaySchemaV2.SyncConflictEntity
+public typealias SyncConflictEntity = BirthdaySchemaV3.SyncConflictEntity
 
 public enum SyncConflictKind: String, Codable, Equatable, Sendable {
   case editEdit

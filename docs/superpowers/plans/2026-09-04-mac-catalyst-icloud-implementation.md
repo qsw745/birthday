@@ -167,22 +167,22 @@
 - `CloudSyncEngineStateEntity`：单例 key、引擎序列化状态、初始合并状态和最近成功拉取时间。
 - `CloudSyncConflictEntity`：实体 UUID、本机快照、iCloud 快照、冲突类型和时间。
 
-- [ ] **Step 1：固定 V2 前云端夹具并写失败迁移测试**
+- [x] **Step 1：固定 V2 前云端夹具并写失败迁移测试**
 
 夹具至少包含一条有效生日、一条墓碑、一个待服务器操作、服务器游标和一个服务器冲突。测试打开夹具并断言 V3 迁移后所有旧数据不变，同时新的 CloudKit 表为空。
 
 先运行：`cd ios/BirthdayCore && swift test --filter BirthdayModelContainerMigrationTests`
 预期：FAIL，因为 V3 schema 和新实体不存在。
 
-- [ ] **Step 2：保留 V1/V2 类型并新增 V3 类型**
+- [x] **Step 2：保留 V1/V2 类型并新增 V3 类型**
 
 不要改变历史 schema 的模型声明。将公开 typealias 切换到 V3，对 V3 复制现有字段并加入三类 CloudKit 独立实体。新增字段必须可轻量迁移或提供默认值。
 
-- [ ] **Step 3：增加 V2 → V3 迁移阶段**
+- [x] **Step 3：增加 V2 → V3 迁移阶段**
 
 `BirthdaySchemaMigrationPlan` 顺序固定为 V1、V2、V3；使用轻量迁移，不在迁移阶段访问 CloudKit。
 
-- [ ] **Step 4：验证夹具和现有数据层**
+- [x] **Step 4：验证夹具和现有数据层**
 
 运行：
 
@@ -192,7 +192,7 @@
 
 预期：迁移、CRUD、墓碑、服务器 outbox 和游标测试全部 PASS。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 提交：`feat(data): 增加 CloudKit V3 本地状态模型`
 

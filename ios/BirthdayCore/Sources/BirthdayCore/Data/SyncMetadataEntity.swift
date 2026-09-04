@@ -14,4 +14,4 @@ extension BirthdaySchemaV2 {
   }
 }
 
-public typealias SyncMetadataEntity = BirthdaySchemaV2.SyncMetadataEntity
+public typealias SyncMetadataEntity = BirthdaySchemaV3.SyncMetadataEntity

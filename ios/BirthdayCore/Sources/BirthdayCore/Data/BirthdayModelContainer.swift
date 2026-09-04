@@ -23,17 +23,19 @@ public enum BirthdaySchemaMigrationPlan: SchemaMigrationPlan {
   public static let schemas: [any VersionedSchema.Type] = [
     BirthdaySchemaV1.self,
     BirthdaySchemaV2.self,
+    BirthdaySchemaV3.self,
   ]
 
   public static let stages: [MigrationStage] = [
-    .lightweight(fromVersion: BirthdaySchemaV1.self, toVersion: BirthdaySchemaV2.self)
+    .lightweight(fromVersion: BirthdaySchemaV1.self, toVersion: BirthdaySchemaV2.self),
+    .lightweight(fromVersion: BirthdaySchemaV2.self, toVersion: BirthdaySchemaV3.self),
   ]
 }
 
 public enum BirthdayModelContainer {
   public static func make(configuration: ModelConfiguration) throws -> ModelContainer {
     try ModelContainer(
-      for: Schema(versionedSchema: BirthdaySchemaV2.self),
+      for: Schema(versionedSchema: BirthdaySchemaV3.self),
       migrationPlan: BirthdaySchemaMigrationPlan.self,
       configurations: configuration
     )
