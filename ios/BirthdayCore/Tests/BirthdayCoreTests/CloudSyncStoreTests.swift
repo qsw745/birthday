@@ -85,6 +85,33 @@ import Testing
     #expect(try await store.pendingCloudChanges(limit: 10).isEmpty)
   }
 
+  @Test func hardCloudDeletionRestagesTheLocalSnapshotWithoutDeletingBusinessData() async throws {
+    let store = try makeCloudStore()
+    let created = try await store.save(
+      cloudDraft("不应被物理删除"), id: nil, now: cloudNow, timeZone: cloudTimeZone)
+    let sent = try #require(try await store.pendingCloudChanges(limit: 1).first)
+    try await store.markCloudUploadSucceeded(
+      CloudUploadSuccess(
+        entityID: sent.snapshot.id,
+        mutationID: sent.mutationID,
+        uploadedSnapshot: sent.snapshot,
+        encodedSystemFields: Data("stale-system-fields".utf8)
+      )
+    )
+
+    try await store.restageCloudRecordsDeletedRemotely([
+      created.id,
+      UUID(uuidString: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA")!,
+    ])
+
+    let stillLocal = try #require(try await store.activeBirthdays().first)
+    let pending = try #require(try await store.pendingCloudChanges(limit: 10).first)
+    #expect(stillLocal.id == created.id)
+    #expect(stillLocal.name == "不应被物理删除")
+    #expect(pending.snapshot.id == created.id)
+    #expect(pending.encodedSystemFields == nil)
+  }
+
   @Test func cloudUploadAcknowledgementDoesNotClearANewerLocalMutation() async throws {
     let store = try makeCloudStore()
     let created = try await store.save(

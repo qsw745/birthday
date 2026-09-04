@@ -134,6 +134,23 @@ extension BirthdayStore {
     }
   }
 
+  public func restageCloudRecordsDeletedRemotely(_ entityIDs: [UUID]) throws {
+    do {
+      var changed = false
+      for entityID in Set(entityIDs) {
+        guard let birthday = try birthday(id: entityID) else { continue }
+        try stageLocalCloudChange(for: birthday)
+        let state = try requireCloudState(id: entityID)
+        state.encodedSystemFields = nil
+        changed = true
+      }
+      if changed { try transactionCommitter(modelContext) }
+    } catch {
+      modelContext.rollback()
+      throw error
+    }
+  }
+
   public func markCloudUploadSucceeded(_ success: CloudUploadSuccess) throws {
     do {
       let state = try requireCloudState(id: success.entityID)
