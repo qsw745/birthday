@@ -213,7 +213,7 @@
 - `CloudRecordCodec.decode(record:)`
 - 固定 record type `Birthday`、zone `BirthdayZone`、record name 为小写 UUID 字符串。
 
-- [ ] **Step 1：写失败的字段白名单测试**
+- [x] **Step 1：写失败的字段白名单测试**
 
 验证往返编解码姓名、农历、提醒规则、创建/修改/删除时间；断言 `nextSolarDate`、服务器版本、邮件字段、通知权限和同步内部状态不进入 `CKRecord`。
 
@@ -222,11 +222,11 @@
 运行：`swift test --filter CloudRecordCodecTests`
 预期：FAIL，类型不存在。
 
-- [ ] **Step 2：实现版本化快照和严格 codec**
+- [x] **Step 2：实现版本化快照和严格 codec**
 
 CloudKit 字段只接受明确类型，所有入站数据先通过 `BirthdayValidator` 或等价只读验证。系统字段使用安全归档保存，禁止把整个 `CKRecord` 以不受控对象图写入业务快照。
 
-- [ ] **Step 3：验证并提交**
+- [x] **Step 3：验证并提交**
 
 运行：`swift test --filter CloudRecordCodecTests`
 预期：PASS。
