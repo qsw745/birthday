@@ -33,6 +33,7 @@ targets:
       - path: BirthdayMobile
         excludes:
           - PrivacyInfo.xcprivacy
+          - MacInfo.plist
       - path: BirthdayMobile/PrivacyInfo.xcprivacy
         buildPhase: resources
     info:
@@ -70,6 +71,7 @@ targets:
       - path: BirthdayMobile
         excludes:
           - PrivacyInfo.xcprivacy
+          - Info.plist
       - path: BirthdayMobile/PrivacyInfo.xcprivacy
         buildPhase: resources
     info:

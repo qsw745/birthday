@@ -616,7 +616,7 @@ iPhone 使用系统分享/文件面板，Mac 使用系统保存面板。取消�
 - 新建：`ios/QA/ICLOUD_MAC_ACCEPTANCE.md`
 - 修改：相关测试文件，仅限修复本任务发现的问题
 
-- [ ] **Step 1：运行全量核心和服务回归**
+- [x] **Step 1：运行全量核心和服务回归**
 
 运行：
 
@@ -661,7 +661,7 @@ iPhone 使用系统分享/文件面板，Mac 使用系统保存面板。取消�
 
 检查 Mac Release 架构包含计划的 `arm64` 和 `x86_64`；检查应用只包含声明的 entitlements、隐私清单和资源；确认 Release 不连接 `qisw.top/api/mobile`。
 
-- [ ] **Step 5：提交验收文档**
+- [x] **Step 5：提交验收文档**
 
 提交：`test(apple): 记录 iCloud 与 Mac 双端验收`
 

@@ -74,6 +74,21 @@ test('generated project exposes separate iPhone and Mac Catalyst products', () =
   assert.equal(mac.INFOPLIST_FILE, 'BirthdayMobile/MacInfo.plist')
 })
 
+test('each Apple product excludes the other platform Info plist from copied resources', () => {
+  const project = readFileSync(path.join(iosRoot, 'project.yml'), 'utf8')
+  const phoneTarget = project.slice(
+    project.indexOf('  BirthdayMobile:\n'),
+    project.indexOf('  BirthdayMac:\n'),
+  )
+  const macTarget = project.slice(
+    project.indexOf('  BirthdayMac:\n'),
+    project.indexOf('  BirthdayMobileUITests:\n'),
+  )
+
+  assert.match(phoneTarget, /excludes:[\s\S]*- MacInfo\.plist/)
+  assert.match(macTarget, /excludes:[\s\S]*- Info\.plist/)
+})
+
 test('both products carry only the planned private CloudKit capabilities', () => {
   const expectedCloudCapabilities = {
     'com.apple.developer.icloud-container-identifiers': ['$(ICLOUD_CONTAINER_IDENTIFIER)'],
