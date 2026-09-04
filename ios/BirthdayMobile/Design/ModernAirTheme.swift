@@ -38,6 +38,14 @@ enum ModernAirTheme {
     light: UIColor(red: 35 / 255, green: 107 / 255, blue: 115 / 255, alpha: 0.16),
     dark: UIColor(red: 111 / 255, green: 186 / 255, blue: 193 / 255, alpha: 0.28)
   )
+  static let desktopCanvas = dynamicColor(
+    light: UIColor(red: 239 / 255, green: 247 / 255, blue: 246 / 255, alpha: 1),
+    dark: UIColor(red: 11 / 255, green: 23 / 255, blue: 25 / 255, alpha: 1)
+  )
+  static let detailCanvas = dynamicColor(
+    light: UIColor(red: 247 / 255, green: 251 / 255, blue: 251 / 255, alpha: 1),
+    dark: UIColor(red: 19 / 255, green: 31 / 255, blue: 34 / 255, alpha: 1)
+  )
 
   static let cardRadius: CGFloat = 24
 

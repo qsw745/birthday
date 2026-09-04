@@ -223,6 +223,7 @@ struct BirthdayEditorView: View {
     }
     .tint(ModernAirTheme.tide)
     .interactiveDismissDisabled(isInteractionLocked)
+    .desktopEditorSizing()
   }
 
   @ViewBuilder
@@ -292,6 +293,24 @@ struct BirthdayEditorView: View {
       return LocalOnlyStatusPresentation.deletionConfirmation(name: record.name)
     }
     return "删除后将从本机生日列表移除。"
+  }
+}
+
+private extension View {
+  @ViewBuilder
+  func desktopEditorSizing() -> some View {
+    #if targetEnvironment(macCatalyst)
+      frame(
+        minWidth: 520,
+        idealWidth: 600,
+        maxWidth: 680,
+        minHeight: 600,
+        idealHeight: 680,
+        maxHeight: 780
+      )
+    #else
+      self
+    #endif
   }
 }
 

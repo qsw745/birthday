@@ -95,6 +95,20 @@ targets:
       - BirthdayMobileUITests
     dependencies:
       - target: BirthdayMobile
+  BirthdayMacUITests:
+    type: bundle.ui-testing
+    platform: auto
+    supportedDestinations:
+      - macCatalyst
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    sources:
+      - path: BirthdayMobileUITests
+        includes:
+          - ICloudAndMacFlowUITests.swift
+    dependencies:
+      - target: BirthdayMac
   BirthdayMobileTests:
     type: bundle.unit-test
     platform: iOS

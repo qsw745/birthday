@@ -28,9 +28,20 @@ struct BirthdayMobileApp: App {
   }
 
   var body: some Scene {
+    #if targetEnvironment(macCatalyst)
+      WindowGroup {
+        BirthdayAppBootstrapView()
+      }
+      .defaultSize(width: 1_080, height: 720)
+      .windowResizability(.contentMinSize)
+      .commands {
+        MacCommands()
+      }
+    #else
     WindowGroup {
       BirthdayAppBootstrapView()
     }
+    #endif
   }
 }
 
@@ -196,6 +207,9 @@ private struct BirthdayAppBootstrapView: View {
       if uiTestBootstrap.isSnapshotImportFixtureEnabled {
         try seedSnapshotImportPreview(in: container)
       }
+      if uiTestBootstrap.desktopPreview {
+        try seedDesktopPreview(in: container)
+      }
       self.container = container
       model = makeAppModel(container: container)
     } catch {
@@ -300,6 +314,9 @@ private struct BirthdayAppBootstrapView: View {
       let suiteName = "top.qisw.birthday.ui-tests"
       let preferences = UserDefaults(suiteName: suiteName)!
       preferences.removePersistentDomain(forName: suiteName)
+      if uiTestBootstrap.desktopPreview {
+        preferences.set(true, forKey: "top.qisw.birthday.hasCompletedOnboarding")
+      }
 
       // The UI-test composition injects an offline binder, so no view can
       // accidentally turn the offline regression flow into a network test.
@@ -428,6 +445,23 @@ private struct BirthdayAppBootstrapView: View {
     )
     entity.nextSolarDate = nil
     entity.syncStateRaw = SyncState.synced.rawValue
+    context.insert(entity)
+    try context.save()
+  }
+
+  private func seedDesktopPreview(in container: ModelContainer) throws {
+    let context = ModelContext(container)
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let entity = BirthdayEntity(
+      id: UUID(uuidString: "55555555-5555-4555-8555-555555555555")!,
+      draft: BirthdayDraft(
+        name: "小满",
+        lunarBirthday: LunarBirthday(month: 4, day: 15, isLeapMonth: false),
+        reminder: .defaults
+      ),
+      nextSolarDate: now.addingTimeInterval(86_400 * 12),
+      now: now
+    )
     context.insert(entity)
     try context.save()
   }
@@ -692,7 +726,11 @@ private struct AppFlowView: View {
     case .locked:
       AppLockView(model: model)
     case .ready:
+      #if targetEnvironment(macCatalyst)
+        MacRootView(model: model)
+      #else
       RootTabView(model: model)
+      #endif
     }
   }
 }

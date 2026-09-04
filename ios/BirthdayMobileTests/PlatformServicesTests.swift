@@ -39,6 +39,15 @@ import Testing
   #expect(services.shouldLock(for: .applicationRelaunch))
 }
 
+@Test func macDeviceNameUsesAStableMacLabelInsteadOfCatalystsIPadIdentity() {
+  #expect(
+    PlatformServices.resolveDeviceName(
+      platform: .macCatalyst,
+      uiDeviceName: "iPad"
+    ) == "这台 Mac"
+  )
+}
+
 @Test func deviceNotificationPreferenceDefaultsOnAndUsesItsOwnLocalKey() throws {
   let suiteName = "PlatformServicesTests.\(UUID().uuidString)"
   let preferences = try #require(UserDefaults(suiteName: suiteName))

@@ -7,8 +7,30 @@ struct CalendarHomeView: View {
   @Environment(\.timeZone) private var timeZone
   @ScaledMetric(relativeTo: .caption) private var scaledBirthdayMarkerSize: CGFloat = 10
   @ScaledMetric(relativeTo: .body) private var scaledDayRingSize: CGFloat = 36
+  @State private var hoveredRecordID: UUID?
+  private let showsAddToolbarButton: Bool
+  private let desktopSelectionID: UUID?
+  private let selectRecord: ((BirthdayRecord) -> Void)?
+  private let editRecord: ((BirthdayRecord) -> Void)?
+  private let requestDelete: ((BirthdayRecord) -> Void)?
 
   private let weekSymbols = ["一", "二", "三", "四", "五", "六", "日"]
+
+  init(
+    model: AppModel,
+    showsAddToolbarButton: Bool = true,
+    desktopSelectionID: UUID? = nil,
+    selectRecord: ((BirthdayRecord) -> Void)? = nil,
+    editRecord: ((BirthdayRecord) -> Void)? = nil,
+    requestDelete: ((BirthdayRecord) -> Void)? = nil
+  ) {
+    self.model = model
+    self.showsAddToolbarButton = showsAddToolbarButton
+    self.desktopSelectionID = desktopSelectionID
+    self.selectRecord = selectRecord
+    self.editRecord = editRecord
+    self.requestDelete = requestDelete
+  }
 
   private var calendar: Calendar {
     var calendar = Calendar(identifier: .gregorian)
@@ -56,15 +78,17 @@ struct CalendarHomeView: View {
     .navigationTitle("岁时")
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
-      ToolbarItem(placement: .topBarTrailing) {
-        Button {
-          model.isPresentingEditor = true
-        } label: {
-          Image(systemName: "plus")
-            .frame(width: 44, height: 44)
+      if showsAddToolbarButton {
+        ToolbarItem(placement: .topBarTrailing) {
+          Button {
+            model.isPresentingEditor = true
+          } label: {
+            Image(systemName: "plus")
+              .frame(width: 44, height: 44)
+          }
+          .accessibilityLabel("添加生日")
+          .accessibilityIdentifier("addBirthdayButton")
         }
-        .accessibilityLabel("添加生日")
-        .accessibilityIdentifier("addBirthdayButton")
       }
     }
     .onAppear(perform: selectDefaultDayIfNeeded)
@@ -345,8 +369,9 @@ struct CalendarHomeView: View {
     .padding(.vertical, 24)
   }
 
+  @ViewBuilder
   private func birthdayRow(_ record: BirthdayRecord) -> some View {
-    HStack(spacing: 14) {
+    let row = HStack(spacing: 14) {
       Image(systemName: "gift.fill")
         .font(.body.weight(.semibold))
         .foregroundStyle(ModernAirTheme.tide)
@@ -368,6 +393,44 @@ struct CalendarHomeView: View {
     .padding(.vertical, 12)
     .accessibilityElement(children: .combine)
     .accessibilityLabel("\(record.name)，农历\(lunarText(record.lunarBirthday))生日")
+
+    if let selectRecord {
+      row
+        .padding(.horizontal, 8)
+        .background(
+          desktopRowBackground(for: record.id),
+          in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+          editRecord?(record)
+        }
+        .simultaneousGesture(
+          TapGesture().onEnded {
+            selectRecord(record)
+          }
+        )
+        .contextMenu {
+          Button("编辑生日") {
+            editRecord?(record)
+          }
+          Button("从本机删除", role: .destructive) {
+            requestDelete?(record)
+          }
+        }
+        .onHover { isHovering in
+          hoveredRecordID = isHovering ? record.id : nil
+        }
+        .accessibilityIdentifier("desktopBirthdayRow-\(record.id.uuidString)")
+    } else {
+      row
+    }
+  }
+
+  private func desktopRowBackground(for id: UUID) -> Color {
+    if desktopSelectionID == id { return ModernAirTheme.glacier }
+    if hoveredRecordID == id { return ModernAirTheme.tide.opacity(0.08) }
+    return .clear
   }
 
   private var monthCells: [Int?] {

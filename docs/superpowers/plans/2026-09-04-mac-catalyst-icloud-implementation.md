@@ -505,23 +505,23 @@ CloudKit 冲突使用独立快照实体。可以向界面映射到共用展示�
 - 修改：`ios/BirthdayMobile/Features/Birthdays/BirthdayEditorView.swift`
 - 修改：`ios/BirthdayMobile/Design/ModernAirTheme.swift`
 
-- [ ] **Step 1：写失败的导航和命令测试**
+- [x] **Step 1：写失败的导航和命令测试**
 
 使用纯状态 reducer 验证侧边栏选择、窄窗口详情收起、`Command-N`、`Command-F`、`Command-,`、Delete 和双击编辑路由。UI 测试验证三栏标识、工具栏、右键菜单和删除确认。
 
-- [ ] **Step 2：按平台选择根界面**
+- [x] **Step 2：按平台选择根界面**
 
 `targetEnvironment(macCatalyst)` 使用 `MacRootView`，iPhone 继续使用现有 `RootTabView`。Mac 默认 1080 × 720、最小 820 × 600，只建立一个主窗口。
 
-- [ ] **Step 3：实现三栏和自适应详情**
+- [x] **Step 3：实现三栏和自适应详情**
 
 侧边栏为日历、全部生日、设置和条件出现的冲突。主栏复用日历/列表业务视图，详情栏展示选中记录。窗口变窄时先隐藏详情，不压坏七列日历。
 
-- [ ] **Step 4：完成桌面输入与视觉**
+- [x] **Step 4：完成桌面输入与视觉**
 
 加入菜单命令、键盘焦点、悬停、双击和右键。编辑器在 Mac 使用有最小/理想尺寸的居中表单；iPhone 保持 sheet。主题颜色通过平台适配，不让共享源码无条件依赖错误的平台框架。
 
-- [ ] **Step 5：双平台构建和提交**
+- [x] **Step 5：双平台构建和提交**
 
 运行：
 

@@ -39,9 +39,19 @@ struct PlatformServices: Equatable, Sendable {
 
     return PlatformServices(
       platform: platform,
-      deviceName: UIDevice.current.name,
+      deviceName: resolveDeviceName(
+        platform: platform,
+        uiDeviceName: UIDevice.current.name
+      ),
       systemSettingsURL: URL(string: UIApplication.openSettingsURLString)!
     )
+  }
+
+  static func resolveDeviceName(
+    platform: AppleRuntimePlatform,
+    uiDeviceName: String
+  ) -> String {
+    platform == .macCatalyst ? "这台 Mac" : uiDeviceName
   }
 
   var deviceKindName: String {

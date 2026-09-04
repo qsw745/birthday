@@ -11,6 +11,31 @@ struct BirthdayListView: View {
   @State private var deleteRetryRecord: BirthdayRecord?
   @State private var isShowingDeleteError = false
   @State private var deletingRecordID: UUID?
+  @State private var hoveredRecordID: UUID?
+  private let showsAddToolbarButton: Bool
+  private let desktopSelectionID: UUID?
+  private let searchFocusGeneration: Int
+  private let selectRecord: ((BirthdayRecord) -> Void)?
+  private let editRecord: ((BirthdayRecord) -> Void)?
+  private let requestDelete: ((BirthdayRecord) -> Void)?
+
+  init(
+    model: AppModel,
+    showsAddToolbarButton: Bool = true,
+    desktopSelectionID: UUID? = nil,
+    searchFocusGeneration: Int = 0,
+    selectRecord: ((BirthdayRecord) -> Void)? = nil,
+    editRecord: ((BirthdayRecord) -> Void)? = nil,
+    requestDelete: ((BirthdayRecord) -> Void)? = nil
+  ) {
+    self.model = model
+    self.showsAddToolbarButton = showsAddToolbarButton
+    self.desktopSelectionID = desktopSelectionID
+    self.searchFocusGeneration = searchFocusGeneration
+    self.selectRecord = selectRecord
+    self.editRecord = editRecord
+    self.requestDelete = requestDelete
+  }
 
   private var visibleRecords: [BirthdayRecord] {
     BirthdaySearch.sortedByNextSolarDate(
@@ -52,21 +77,24 @@ struct BirthdayListView: View {
     .background {
       SearchFieldAccessibilityIdentifier(
         identifier: "birthdaySearchField",
-        placeholder: "搜索姓名"
+        placeholder: "搜索姓名",
+        focusGeneration: searchFocusGeneration
       )
       .frame(width: 0, height: 0)
     }
     .toolbar {
-      ToolbarItem(placement: .topBarTrailing) {
-        Button {
-          model.isPresentingEditor = true
-        } label: {
-          Image(systemName: "plus")
-            .frame(width: 44, height: 44)
+      if showsAddToolbarButton {
+        ToolbarItem(placement: .topBarTrailing) {
+          Button {
+            model.isPresentingEditor = true
+          } label: {
+            Image(systemName: "plus")
+              .frame(width: 44, height: 44)
+          }
+          .accessibilityLabel("添加生日")
+          .accessibilityIdentifier("addBirthdayButton")
+          .disabled(isDeletingRecord)
         }
-        .accessibilityLabel("添加生日")
-        .accessibilityIdentifier("addBirthdayButton")
-        .disabled(isDeletingRecord)
       }
     }
     .sheet(item: $editingRecord) { record in
@@ -114,21 +142,53 @@ struct BirthdayListView: View {
         }
         .frame(minHeight: 58)
       } else {
-        Button {
-          editingRecord = record
-        } label: {
-          BirthdayListRow(record: record, timeZone: timeZone)
-        }
-        .buttonStyle(.plain)
-        .frame(minHeight: 58)
-        .disabled(isDeletingRecord)
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-          Button(role: .destructive) {
-            deleteCandidate = record
+        if let selectRecord {
+          BirthdayListRow(record: record, timeZone: timeZone, isDesktop: true)
+            .padding(.horizontal, 8)
+            .frame(minHeight: 58)
+            .background(
+              desktopRowBackground(for: record.id),
+              in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+              editRecord?(record)
+            }
+            .simultaneousGesture(
+              TapGesture().onEnded {
+                selectRecord(record)
+              }
+            )
+            .contextMenu {
+              Button("编辑生日") {
+                editRecord?(record)
+              }
+              Button("从本机删除", role: .destructive) {
+                requestDelete?(record)
+              }
+            }
+            .onHover { isHovering in
+              hoveredRecordID = isHovering ? record.id : nil
+            }
+            .disabled(isDeletingRecord)
+            .accessibilityIdentifier("desktopBirthdayRow-\(record.id.uuidString)")
+        } else {
+          Button {
+            editingRecord = record
           } label: {
-            Label("删除", systemImage: "trash")
+            BirthdayListRow(record: record, timeZone: timeZone)
           }
+          .buttonStyle(.plain)
+          .frame(minHeight: 58)
           .disabled(isDeletingRecord)
+          .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+              deleteCandidate = record
+            } label: {
+              Label("删除", systemImage: "trash")
+            }
+            .disabled(isDeletingRecord)
+          }
         }
       }
     }
@@ -145,6 +205,12 @@ struct BirthdayListView: View {
         .foregroundStyle(ModernAirTheme.secondaryInk)
     }
     .accessibilityElement(children: .combine)
+  }
+
+  private func desktopRowBackground(for id: UUID) -> Color {
+    if desktopSelectionID == id { return ModernAirTheme.glacier }
+    if hoveredRecordID == id { return ModernAirTheme.tide.opacity(0.08) }
+    return .clear
   }
 
   private func errorState(message: String) -> some View {
@@ -227,22 +293,30 @@ struct BirthdayListView: View {
 private struct SearchFieldAccessibilityIdentifier: UIViewRepresentable {
   let identifier: String
   let placeholder: String
+  let focusGeneration: Int
 
   func makeUIView(context: Context) -> InstallerView {
-    InstallerView(identifier: identifier, placeholder: placeholder)
+    InstallerView(
+      identifier: identifier,
+      placeholder: placeholder,
+      focusGeneration: focusGeneration
+    )
   }
 
   func updateUIView(_ uiView: InstallerView, context: Context) {
-    uiView.installIdentifier()
+    uiView.update(focusGeneration: focusGeneration)
   }
 
   final class InstallerView: UIView {
     private let identifier: String
     private let placeholder: String
+    private var focusGeneration: Int
+    private var appliedFocusGeneration = 0
 
-    init(identifier: String, placeholder: String) {
+    init(identifier: String, placeholder: String, focusGeneration: Int) {
       self.identifier = identifier
       self.placeholder = placeholder
+      self.focusGeneration = focusGeneration
       super.init(frame: .zero)
       isAccessibilityElement = false
       isUserInteractionEnabled = false
@@ -275,6 +349,15 @@ private struct SearchFieldAccessibilityIdentifier: UIViewRepresentable {
           })
       else { return }
       searchField.accessibilityIdentifier = identifier
+      if focusGeneration > appliedFocusGeneration {
+        appliedFocusGeneration = focusGeneration
+        searchField.becomeFirstResponder()
+      }
+    }
+
+    func update(focusGeneration: Int) {
+      self.focusGeneration = focusGeneration
+      installIdentifier()
     }
   }
 }
@@ -299,6 +382,7 @@ extension UIView {
 private struct BirthdayListRow: View {
   let record: BirthdayRecord
   let timeZone: TimeZone
+  var isDesktop = false
 
   var body: some View {
     HStack(alignment: .center, spacing: 14) {
@@ -326,18 +410,27 @@ private struct BirthdayListRow: View {
 
       Spacer(minLength: 8)
 
-      Label(syncText, systemImage: syncSymbol)
-        .font(.caption.weight(.medium))
-        .foregroundStyle(ModernAirTheme.secondaryInk)
-        .labelStyle(.titleAndIcon)
-        .fixedSize(horizontal: false, vertical: true)
+      if isDesktop {
+        Image(systemName: syncSymbol)
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(ModernAirTheme.secondaryInk)
+          .help(syncText)
+      } else {
+        Label(syncText, systemImage: syncSymbol)
+          .font(.caption.weight(.medium))
+          .foregroundStyle(ModernAirTheme.secondaryInk)
+          .labelStyle(.titleAndIcon)
+          .fixedSize(horizontal: false, vertical: true)
+      }
     }
     .padding(.vertical, 6)
     .contentShape(Rectangle())
     .accessibilityElement(children: .combine)
     .accessibilityLabel(accessibilityText)
     .accessibilityHint(
-      record.syncState == .conflict ? "请使用下方按钮处理同步冲突" : "轻点编辑生日"
+      record.syncState == .conflict
+        ? "请使用下方按钮处理同步冲突"
+        : isDesktop ? "单击选择，双击编辑" : "轻点编辑生日"
     )
   }
 
@@ -378,7 +471,8 @@ private struct BirthdayListRow: View {
   }
 
   private var syncSymbol: String {
-    record.syncState == .conflict ? "exclamationmark.triangle" : "iphone"
+    if record.syncState == .conflict { return "exclamationmark.triangle" }
+    return isDesktop ? "internaldrive" : "iphone"
   }
 
   private var accessibilityText: String {

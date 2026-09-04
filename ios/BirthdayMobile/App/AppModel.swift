@@ -12,6 +12,7 @@ struct UITestBootstrap: Equatable, Sendable {
   let storeReleaseLocalOnly: Bool
   let cloudKitSyncEnabled: Bool
   let cloudAccountChange: Bool
+  let desktopPreview: Bool
 
   init(arguments: [String] = ProcessInfo.processInfo.arguments) {
     isEnabled = arguments.contains("-ui-testing")
@@ -23,6 +24,7 @@ struct UITestBootstrap: Equatable, Sendable {
     storeReleaseLocalOnly = arguments.contains("-store-release-local-only")
     cloudKitSyncEnabled = arguments.contains("-cloudkit-sync")
     cloudAccountChange = arguments.contains("-cloud-account-change")
+    desktopPreview = arguments.contains("-desktop-preview")
   }
 
   var isSnapshotImportFixtureEnabled: Bool {
@@ -202,11 +204,18 @@ final class AppModel {
     static let lockEnabled = "top.qisw.birthday.lockEnabled"
   }
 
-  var selectedTab: Tab = .calendar
+  var selectedTab: Tab = .calendar {
+    didSet {
+      if macNavigation.section != selectedTab {
+        macNavigation.reduce(.selectSection(selectedTab))
+      }
+    }
+  }
   private(set) var records: [BirthdayRecord]
   var selectedMonth: Date
   var selectedDay: Int?
   var isPresentingEditor = false
+  var macNavigation = MacNavigationState()
   private(set) var loadState: LoadState
   private(set) var hasCompletedOnboarding: Bool
   private(set) var lockEnabled: Bool
@@ -428,6 +437,23 @@ final class AppModel {
       if generation == reminderGeneration {
         notificationHealth = failedNotificationHealth(category: "local_read_failed")
       }
+    }
+  }
+
+  func reduceMacNavigation(_ action: MacNavigationAction) {
+    macNavigation.reduce(action)
+    selectedTab = macNavigation.section
+  }
+
+  @discardableResult
+  func deleteBirthday(id: UUID) async -> Bool {
+    do {
+      try await store.softDelete(id: id, now: now())
+      await reload()
+      Task { await requestSync(.localMutation) }
+      return true
+    } catch {
+      return false
     }
   }
 
