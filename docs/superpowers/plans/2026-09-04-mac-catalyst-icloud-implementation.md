@@ -459,23 +459,23 @@ CloudKit 冲突使用独立快照实体。可以向界面映射到共用展示�
 - 修改：`ios/BirthdayMobile/Features/Conflicts/ConflictListView.swift`
 - 修改：`ios/BirthdayMobileUITests/OfflineFlowUITests.swift`
 
-- [ ] **Step 1：写失败的组装与 UI 测试**
+- [x] **Step 1：写失败的组装与 UI 测试**
 
 注入 fake CloudKit，不访问真实网络。验证 Release 组装选择 CloudKit 且不构造服务器 client；首次没有设置时同步默认开启；引导说明本机优先与 iCloud；设置可以关闭、重开、手动刷新和处理账号变化。
 
-- [ ] **Step 2：定义单一正式同步模式**
+- [x] **Step 2：定义单一正式同步模式**
 
 在 `AppConfiguration` 或组装层明确区分 `cloudKit`、`legacyServer` 和 `none`。App Store Release 固定 `cloudKit`；有 Debug API 地址时保留旧服务器诊断路径，但不得同时启动两套同步运行时。
 
-- [ ] **Step 3：接入 scene 生命周期**
+- [x] **Step 3：接入 scene 生命周期**
 
 应用启动先打开本地数据库和界面，再异步启动 CloudKit。前台、网络恢复和 CloudKit 远程变更可触发同步；后台调度只作增强。同步合并后统一 reload 并重建本地提醒。
 
-- [ ] **Step 4：更新设置与冲突界面**
+- [x] **Step 4：更新设置与冲突界面**
 
 替换“仅保存在此 iPhone”文案。设置页展示明确状态、设备级开关、手动刷新和账号变化确认。冲突页支持 CloudKit 快照，不显示服务器版本和邮件字段。
 
-- [ ] **Step 5：验证并提交**
+- [x] **Step 5：验证并提交**
 
 运行：
 

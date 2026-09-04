@@ -2,6 +2,71 @@ import XCTest
 
 @MainActor
 final class OfflineFlowUITests: XCTestCase {
+  func testCloudKitOnboardingAndSettingsRemainLocalFirstWithoutNetwork() {
+    let app = XCUIApplication()
+    app.launchArguments = ["-ui-testing", "-network-disabled", "-cloudkit-sync"]
+    app.launch()
+
+    XCTAssertTrue(app.staticTexts["离线也能完整使用"].waitForExistence(timeout: 5))
+    XCTAssertTrue(
+      app.staticTexts.matching(
+        NSPredicate(format: "label CONTAINS %@", "iCloud 私有空间同步")
+      ).firstMatch.exists
+    )
+    app.buttons["继续"].tap()
+    app.buttons["暂不开启"].tap()
+    if app.buttons["unlockButton"].waitForExistence(timeout: 2) {
+      app.buttons["unlockButton"].tap()
+    }
+    XCTAssertTrue(app.buttons["addBirthdayButton"].waitForExistence(timeout: 5))
+
+    app.tabBars.buttons["设置"].tap()
+    let cloudToggle = app.switches["icloudSyncToggle"]
+    for _ in 0..<4 where !cloudToggle.isHittable { app.swipeUp() }
+    XCTAssertTrue(cloudToggle.waitForExistence(timeout: 3))
+    XCTAssertTrue(cloudToggle.isHittable)
+    cloudToggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+    let status = app.descendants(matching: .any)["icloudSyncStatus"]
+    XCTAssertTrue(status.waitForExistence(timeout: 3))
+    XCTAssertTrue(
+      status.label.contains("同步已关闭"),
+      "关闭后状态不正确：\(status.label)，开关值：\(String(describing: cloudToggle.value))"
+    )
+    cloudToggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+    let refresh = app.buttons["manualCloudSyncButton"]
+    XCTAssertTrue(refresh.waitForExistence(timeout: 3))
+    refresh.tap()
+    XCTAssertFalse(app.buttons["bindFromSettingsButton"].exists)
+  }
+
+  func testCloudKitAccountChangeRequiresExplicitConfirmation() {
+    let app = XCUIApplication()
+    app.launchArguments = [
+      "-ui-testing", "-network-disabled", "-cloudkit-sync", "-cloud-account-change",
+    ]
+    app.launch()
+
+    XCTAssertTrue(app.staticTexts["离线也能完整使用"].waitForExistence(timeout: 5))
+    app.buttons["继续"].tap()
+    app.buttons["暂不开启"].tap()
+    if app.buttons["unlockButton"].waitForExistence(timeout: 2) {
+      app.buttons["unlockButton"].tap()
+    }
+    app.tabBars.buttons["设置"].tap()
+
+    let confirmation = app.buttons["confirmCloudAccountChangeButton"]
+    for _ in 0..<4 where !confirmation.isHittable { app.swipeUp() }
+    XCTAssertTrue(confirmation.waitForExistence(timeout: 3))
+    XCTAssertTrue(app.buttons["cancelCloudAccountChangeButton"].exists)
+    confirmation.tap()
+    let merge = app.buttons["保留本机数据并安全合并"]
+    XCTAssertTrue(merge.waitForExistence(timeout: 3))
+    merge.tap()
+    let status = app.descendants(matching: .any)["icloudSyncStatus"]
+    XCTAssertTrue(status.waitForExistence(timeout: 3))
+    XCTAssertTrue(status.label.contains("已同步"))
+  }
+
   func testStoreReleaseIsLocalOnlyFromOnboardingThroughSettings() {
     let app = XCUIApplication()
     app.launchArguments = [

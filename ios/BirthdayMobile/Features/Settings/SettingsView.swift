@@ -91,7 +91,9 @@ struct SettingsView: View {
         }
       }
 
-      if model.isServerBindingAvailable {
+      if model.syncMode == .cloudKit {
+        ICloudSyncSettingsView(model: model)
+      } else if model.isServerBindingAvailable {
         SyncSettingsView(model: model)
       } else {
         Section {

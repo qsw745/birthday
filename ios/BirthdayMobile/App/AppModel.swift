@@ -10,6 +10,8 @@ struct UITestBootstrap: Equatable, Sendable {
   let snapshotFirstRefreshFails: Bool
   let transportCleanupFailure: Bool
   let storeReleaseLocalOnly: Bool
+  let cloudKitSyncEnabled: Bool
+  let cloudAccountChange: Bool
 
   init(arguments: [String] = ProcessInfo.processInfo.arguments) {
     isEnabled = arguments.contains("-ui-testing")
@@ -19,6 +21,8 @@ struct UITestBootstrap: Equatable, Sendable {
     snapshotFirstRefreshFails = arguments.contains("-snapshot-first-refresh-fails")
     transportCleanupFailure = arguments.contains("-transport-cleanup-failure")
     storeReleaseLocalOnly = arguments.contains("-store-release-local-only")
+    cloudKitSyncEnabled = arguments.contains("-cloudkit-sync")
+    cloudAccountChange = arguments.contains("-cloud-account-change")
   }
 
   var isSnapshotImportFixtureEnabled: Bool {
@@ -216,6 +220,7 @@ final class AppModel {
   private(set) var snapshotImportErrorMessage: String?
   private(set) var snapshotDuplicateDecisions: [DuplicateCandidate.ID: DuplicateDecision] = [:]
   private(set) var conflicts: [ResolvableSyncConflict] = []
+  private(set) var cloudConflicts: [CloudConflictRecord] = []
   private(set) var conflictErrorMessage: String?
   private(set) var resolvingConflictID: UUID?
   private(set) var isRequestingNotificationAuthorization = false
@@ -227,6 +232,7 @@ final class AppModel {
     errorCategory: nil
   )
   private(set) var syncStatus: SyncStatus = .idle
+  private(set) var cloudSyncStatus: CloudSyncStatus = .disabled
   private(set) var isManualSyncing = false
   var syncPresentation: SyncPresentation { syncPresentationReducer.presentation }
   private(set) var syncPendingCount = 0
@@ -235,7 +241,13 @@ final class AppModel {
   private(set) var isManagingDevice = false
   private(set) var deviceManagementMessage: String?
   var isSyncRuntimeEnabled: Bool { syncPresentationReducer.isRemoteSyncEnabled }
+  var isCloudSyncEnabled: Bool {
+    syncMode == .cloudKit && cloudSyncStatus != .disabled
+  }
+  var hasSyncConflicts: Bool { !conflicts.isEmpty || !cloudConflicts.isEmpty }
+  var syncConflictCount: Int { conflicts.count + cloudConflicts.count }
   let isServerBindingAvailable: Bool
+  let syncMode: AppSyncMode
   private(set) var pendingLocalCleanup: PendingLocalCleanup?
   let localOnlyStatusDetail: String
   let platformServices: PlatformServices
@@ -272,6 +284,7 @@ final class AppModel {
   private let conflictResolver: ConflictResolver
   private let reminderRebuildCoordinator: ReminderRebuildCoordinator
   private var syncCoordinator: SyncCoordinator?
+  private var cloudSyncRuntime: (any CloudSyncRuntimeControlling)?
   private var deviceManagementService: DeviceManagementService?
   private var syncPresentationReducer: SyncPresentationReducer
   private var activeSyncPresentationRequest: SyncPresentationRequest?
@@ -328,6 +341,7 @@ final class AppModel {
     initiallyLoaded: Bool = false,
     preferences: UserDefaults = .standard,
     platformServices: PlatformServices = .live,
+    syncMode: AppSyncMode = .none,
     localOnlyStatusDetail: String = "生日与提醒只保存在这台设备上。",
     isServerBindingAvailable: Bool = false,
     authenticator: any AppLockAuthenticating = LocalAuthenticationService(),
@@ -352,6 +366,7 @@ final class AppModel {
     loadState = initiallyLoaded ? .loaded : .idle
     self.preferences = preferences
     self.platformServices = platformServices
+    self.syncMode = syncMode
     self.localOnlyStatusDetail = localOnlyStatusDetail
     self.isServerBindingAvailable = isServerBindingAvailable
     let syncLastSuccessStore = SyncLastSuccessStore(preferences: preferences)
@@ -432,6 +447,22 @@ final class AppModel {
     }
   }
 
+  func resolveCloudConflictKeepingLocal(id: UUID) async {
+    await resolveCloudConflict(id: id) {
+      try await self.store.resolveCloudConflictKeepingLocal(id: id, now: self.now())
+    }
+  }
+
+  func resolveCloudConflictUsingICloud(id: UUID) async {
+    await resolveCloudConflict(id: id) {
+      try await self.store.resolveCloudConflictUsingICloud(
+        id: id,
+        now: self.now(),
+        timeZone: self.timeZone()
+      )
+    }
+  }
+
   private func resolveConflict(
     id: UUID,
     action: () async throws -> Void
@@ -449,12 +480,37 @@ final class AppModel {
     }
   }
 
+  private func resolveCloudConflict(
+    id: UUID,
+    action: () async throws -> Void
+  ) async {
+    guard resolvingConflictID == nil else { return }
+    resolvingConflictID = id
+    conflictErrorMessage = nil
+    defer { resolvingConflictID = nil }
+
+    do {
+      try await action()
+      await reload()
+      await requestCloudSync()
+    } catch {
+      conflictErrorMessage = "未能解决 iCloud 冲突，本机资料未改变。请重新载入后再试。"
+    }
+  }
+
   private func reloadConflicts() async {
     do {
-      conflicts = try await conflictResolver.conflicts()
+      if syncMode == .cloudKit {
+        conflicts = []
+        cloudConflicts = try await store.cloudConflicts()
+      } else {
+        conflicts = try await conflictResolver.conflicts()
+        cloudConflicts = []
+      }
       conflictErrorMessage = nil
     } catch {
       conflicts = []
+      cloudConflicts = []
       conflictErrorMessage = "同步冲突资料无法安全读取，未执行任何更改。请重新载入后再试。"
     }
     updateSyncPresentationLocalFacts()
@@ -852,6 +908,62 @@ final class AppModel {
     }
   }
 
+  func configureCloudSyncRuntime(_ runtime: any CloudSyncRuntimeControlling) {
+    cloudSyncRuntime = runtime
+    cloudSyncStatus = runtime.initialStatus
+  }
+
+  func startCloudSync() async {
+    guard syncMode == .cloudKit, let cloudSyncRuntime else { return }
+    await applyCloudSyncOperation { await cloudSyncRuntime.start() }
+  }
+
+  func requestCloudSync(isManual: Bool = true) async {
+    guard syncMode == .cloudKit, let cloudSyncRuntime, cloudSyncStatus != .syncing else { return }
+    if isManual { isManualSyncing = true }
+    defer {
+      if isManual { isManualSyncing = false }
+    }
+    await applyCloudSyncOperation { await cloudSyncRuntime.requestSync() }
+  }
+
+  func setCloudSyncEnabled(_ isEnabled: Bool) async {
+    guard syncMode == .cloudKit, let cloudSyncRuntime else { return }
+    await applyCloudSyncOperation(
+      showProgress: isEnabled,
+      reloadAfterOperation: isEnabled
+    ) {
+      await cloudSyncRuntime.setEnabled(isEnabled)
+    }
+  }
+
+  func confirmCloudAccountChange() async {
+    guard syncMode == .cloudKit, let cloudSyncRuntime else { return }
+    await applyCloudSyncOperation {
+      await cloudSyncRuntime.confirmAccountChange()
+    }
+  }
+
+  func cancelCloudAccountChange() async {
+    guard syncMode == .cloudKit, let cloudSyncRuntime else { return }
+    await applyCloudSyncOperation(showProgress: false, reloadAfterOperation: false) {
+      await cloudSyncRuntime.cancelAccountChange()
+    }
+  }
+
+  private func applyCloudSyncOperation(
+    showProgress: Bool = true,
+    reloadAfterOperation: Bool = true,
+    operation: () async -> CloudSyncStatus
+  ) async {
+    if showProgress { cloudSyncStatus = .syncing }
+    let status = await operation()
+    cloudSyncStatus = status
+
+    guard reloadAfterOperation else { return }
+    await reload()
+  }
+
   func configureSyncCoordinator(_ coordinator: SyncCoordinator, initiallyBound: Bool) {
     syncCoordinator = coordinator
     syncPresentationReducer.configureRemoteRuntime(initiallyBound: initiallyBound)
@@ -1052,6 +1164,10 @@ final class AppModel {
   }
 
   func requestSync(_ trigger: SyncTrigger) async {
+    if syncMode == .cloudKit {
+      await requestCloudSync(isManual: trigger == .manual)
+      return
+    }
     guard trigger != .manual || !isManualSyncing else { return }
     if trigger == .manual {
       isManualSyncing = true

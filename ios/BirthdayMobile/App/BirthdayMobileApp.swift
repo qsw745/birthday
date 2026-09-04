@@ -6,6 +6,9 @@ import UIKit
 
 @main
 struct BirthdayMobileApp: App {
+  @UIApplicationDelegateAdaptor(CloudRemoteNotificationDelegate.self)
+  private var cloudRemoteNotificationDelegate
+
   init() {
     let bootstrap = UITestBootstrap()
     let configuration = AppConfiguration(
@@ -13,9 +16,14 @@ struct BirthdayMobileApp: App {
     )
     let runtime = SyncRuntimeCompositionPolicy(
       isUITesting: bootstrap.isEnabled,
-      networkDisabled: bootstrap.networkDisabled || configuration.remoteBaseURL == nil
+      networkDisabled: bootstrap.networkDisabled
     )
-    guard runtime.allowsSystemSyncTriggers else { return }
+    let syncMode = AppSyncMode.resolve(
+      configuration: configuration,
+      policy: runtime,
+      allowsLegacyServerDiagnostics: AppSyncMode.currentBuildAllowsLegacyServerDiagnostics
+    )
+    guard case .legacyServer = syncMode else { return }
     AppSyncRuntime.shared.registerBackgroundRefresh()
   }
 
@@ -57,28 +65,51 @@ private struct BirthdayAppBootstrapView: View {
         }
         .modelContainer(container)
         .task {
-          await SyncRootRuntimeBootstrapper(policy: syncRuntimePolicy).bootstrap(
-            runtimeGeneration: { model.currentSyncRuntimeLifecycleGeneration },
-            reload: { await model.reload() },
-            runtimeStillPermitted: { model.permitsSyncRuntimeLifecycle($0) },
-            installRuntime: {
-              await AppSyncRuntime.shared.install(model: model, lifecycleGeneration: $0)
-            },
-            sceneIsActive: { scenePhase == .active },
-            activateOrdinaryTriggers: {
-              startActiveSceneSync(
-                for: model,
-                trigger: .appLaunch,
-                reloadBeforeRequest: false
-              )
+          switch model.syncMode {
+          case .cloudKit:
+            CloudRemoteNotificationRouter.shared.install(model: model)
+            await model.reload()
+            await model.startCloudSync()
+            if scenePhase == .active, model.isCloudSyncEnabled {
+              configureCloudNetworkRestoration(for: model)
             }
-          )
+          case .legacyServer:
+            await SyncRootRuntimeBootstrapper(policy: syncRuntimePolicy).bootstrap(
+              runtimeGeneration: { model.currentSyncRuntimeLifecycleGeneration },
+              reload: { await model.reload() },
+              runtimeStillPermitted: { model.permitsSyncRuntimeLifecycle($0) },
+              installRuntime: {
+                await AppSyncRuntime.shared.install(model: model, lifecycleGeneration: $0)
+              },
+              sceneIsActive: { scenePhase == .active },
+              activateOrdinaryTriggers: {
+                startActiveSceneSync(
+                  for: model,
+                  trigger: .appLaunch,
+                  reloadBeforeRequest: false
+                )
+              }
+            )
+          case .none:
+            CloudRemoteNotificationRouter.shared.uninstall()
+            await model.reload()
+          }
         }
         .onChange(of: scenePhase) { _, newPhase in
           switch newPhase {
           case .active:
             model.refreshAuthenticationCapability()
-            if syncRuntimeEnabled {
+            if model.syncMode == .cloudKit {
+              if model.isCloudSyncEnabled {
+                configureCloudNetworkRestoration(for: model)
+                Task {
+                  await model.reload()
+                  await model.requestCloudSync(isManual: false)
+                }
+              } else {
+                Task { await model.reload() }
+              }
+            } else if syncRuntimeEnabled {
               startActiveSceneSync(for: model, trigger: .foreground)
             } else {
               Task { await model.reload() }
@@ -93,6 +124,7 @@ private struct BirthdayAppBootstrapView: View {
           }
         }
         .onChange(of: model.isSyncRuntimeEnabled) { _, enabled in
+          guard case .legacyServer = model.syncMode else { return }
           if enabled, let lifecycleGeneration = model.currentSyncRuntimeLifecycleGeneration {
             Task {
               let installed = await AppSyncRuntime.shared.install(
@@ -109,6 +141,14 @@ private struct BirthdayAppBootstrapView: View {
           } else {
             deactivateSceneSyncRuntime()
             AppSyncRuntime.shared.uninstall(model: model)
+          }
+        }
+        .onChange(of: model.isCloudSyncEnabled) { _, enabled in
+          guard model.syncMode == .cloudKit else { return }
+          if enabled, scenePhase == .active {
+            configureCloudNetworkRestoration(for: model)
+          } else {
+            deactivateSceneSyncRuntime()
           }
         }
         .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
@@ -172,8 +212,26 @@ private struct BirthdayAppBootstrapView: View {
   private var syncRuntimePolicy: SyncRuntimeCompositionPolicy {
     SyncRuntimeCompositionPolicy(
       isUITesting: uiTestBootstrap.isEnabled,
-      networkDisabled: uiTestBootstrap.networkDisabled || appConfiguration.remoteBaseURL == nil
+      networkDisabled: uiTestBootstrap.networkDisabled
     )
+  }
+
+  private func configureCloudNetworkRestoration(for model: AppModel) {
+    guard model.syncMode == .cloudKit, model.isCloudSyncEnabled else { return }
+    switch networkMonitorLifecycle.update(isActive: true) {
+    case .none:
+      break
+    case .startNewMonitor:
+      let monitor = NetworkRestorationMonitor {
+        guard scenePhase == .active, model.isCloudSyncEnabled else { return }
+        Task { await model.requestCloudSync(isManual: false) }
+      }
+      networkRestorationMonitor = monitor
+      monitor.start()
+    case .stopMonitor:
+      networkRestorationMonitor?.stop()
+      networkRestorationMonitor = nil
+    }
   }
 
   private func startActiveSceneSync(
@@ -280,7 +338,9 @@ private struct BirthdayAppBootstrapView: View {
         store: store,
         selectedMonth: selectedMonth,
         preferences: preferences,
-        isServerBindingAvailable: !uiTestBootstrap.storeReleaseLocalOnly,
+        syncMode: uiTestBootstrap.cloudKitSyncEnabled ? .cloudKit : .none,
+        isServerBindingAvailable: !uiTestBootstrap.storeReleaseLocalOnly
+          && !uiTestBootstrap.cloudKitSyncEnabled,
         authenticator: UITestAppLockAuthenticator(),
         serverDeviceBinder: serverDeviceBinder,
         notificationScheduler: UITestNotificationScheduler(),
@@ -293,6 +353,11 @@ private struct BirthdayAppBootstrapView: View {
         now: now,
         timeZone: timeZone
       )
+      if uiTestBootstrap.cloudKitSyncEnabled {
+        model.configureCloudSyncRuntime(
+          UITestCloudSyncRuntime(requiresAccountConfirmation: uiTestBootstrap.cloudAccountChange)
+        )
+      }
       if uiTestBootstrap.transportCleanupFailure {
         configureTransportCleanupFailureFixture(model: model, store: store)
       }
@@ -440,6 +505,38 @@ struct OfflineServerDeviceBinder: ServerDeviceBinding {
 
   func loadSnapshot() async throws -> SnapshotResponse {
     throw MobileAPIError.transport("network_disabled")
+  }
+}
+
+@MainActor
+private final class UITestCloudSyncRuntime: CloudSyncRuntimeControlling {
+  let initialStatus: CloudSyncStatus = .unavailable
+  private let requiresAccountConfirmation: Bool
+
+  init(requiresAccountConfirmation: Bool) {
+    self.requiresAccountConfirmation = requiresAccountConfirmation
+  }
+
+  func start() async -> CloudSyncStatus {
+    requiresAccountConfirmation
+      ? .accountChangeRequiresConfirmation
+      : .synchronized(date: Date(timeIntervalSince1970: 1_800_000_000))
+  }
+
+  func requestSync() async -> CloudSyncStatus {
+    await start()
+  }
+
+  func setEnabled(_ enabled: Bool) async -> CloudSyncStatus {
+    enabled ? await start() : .disabled
+  }
+
+  func confirmAccountChange() async -> CloudSyncStatus {
+    .synchronized(date: Date(timeIntervalSince1970: 1_800_000_000))
+  }
+
+  func cancelAccountChange() async -> CloudSyncStatus {
+    .disabled
   }
 }
 
@@ -621,14 +718,14 @@ struct RootTabView: View {
       }
       .tag(AppModel.Tab.birthdays)
 
-      if model.isServerBindingAvailable {
+      if model.isServerBindingAvailable || model.hasSyncConflicts {
         NavigationStack {
           ConflictListView(model: model)
         }
         .tabItem {
           Label("冲突", systemImage: "arrow.triangle.2.circlepath")
         }
-        .badge(model.conflicts.count)
+        .badge(model.syncConflictCount)
         .tag(AppModel.Tab.conflicts)
       }
 

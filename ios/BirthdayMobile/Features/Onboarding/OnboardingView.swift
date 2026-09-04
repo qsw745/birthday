@@ -11,9 +11,9 @@ struct OnboardingView: View {
 
         if page == 0 {
           introduction(
-            systemImage: "iphone.gen3",
+            systemImage: model.platformServices.localStorageIconName,
             title: "离线也能完整使用",
-            message: "生日资料保存在这台 iPhone 上。没有网络时，查看、添加、编辑和删除仍可立即完成。"
+            message: localFirstMessage
           )
 
           Button("继续") {
@@ -26,8 +26,8 @@ struct OnboardingView: View {
         } else if page == 1 {
           introduction(
             systemImage: "bell.badge.fill",
-            title: "由 iPhone 按时提醒",
-            message: "允许通知后，提醒会直接安排在本机。是否开启由你决定，也可以稍后在系统设置中更改。"
+            title: "由这台 \(model.platformServices.deviceKindName) 按时提醒",
+            message: "允许通知后，提醒会直接安排在本机，不依赖服务器或 iCloud 准时到达；也可以稍后在设置中单独关闭。"
           )
 
           if let errorMessage = model.onboardingErrorMessage {
@@ -134,6 +134,13 @@ struct OnboardingView: View {
     .padding(.vertical, 32)
     .frame(maxWidth: .infinity)
     .modernAirSurface(radius: 30)
+  }
+
+  private var localFirstMessage: String {
+    if model.syncMode == .cloudKit {
+      return "生日始终先保存在这台 \(model.platformServices.deviceKindName) 上，默认通过你的 iCloud 私有空间同步。没有网络或 iCloud 暂不可用时，查看、添加、编辑和删除仍可立即完成。"
+    }
+    return "生日资料保存在这台 \(model.platformServices.deviceKindName) 上。没有网络时，查看、添加、编辑和删除仍可立即完成。"
   }
 
   private func onboardingActionLabel(_ title: String, systemImage: String) -> some View {

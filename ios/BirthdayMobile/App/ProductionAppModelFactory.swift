@@ -11,6 +11,13 @@ struct ProductionAppModelFactory {
   private let notificationCenter: any NotificationCenterClient
   private let requestNotificationAuthorization: @MainActor () async throws -> Bool
   private let makeRemoteClient: @MainActor (URL) -> MobileAPIClient
+  private let allowsLegacyServerDiagnostics: Bool
+  private let makeCloudRuntime:
+    @MainActor (BirthdayStore, UserDefaults) -> any CloudSyncRuntimeControlling
+
+  private static var defaultAllowsLegacyServerDiagnostics: Bool {
+    AppSyncMode.currentBuildAllowsLegacyServerDiagnostics
+  }
 
   init(
     appConfiguration: AppConfiguration,
@@ -25,7 +32,11 @@ struct ProductionAppModelFactory {
       requestNotificationAuthorization: {
         try await center.requestAuthorization(options: [.alert, .sound, .badge])
       },
-      makeRemoteClient: { MobileAPIClient(baseURL: $0) }
+      makeRemoteClient: { MobileAPIClient(baseURL: $0) },
+      allowsLegacyServerDiagnostics: Self.defaultAllowsLegacyServerDiagnostics,
+      makeCloudRuntime: { store, preferences in
+        CloudSyncRuntime.live(store: store, preferences: preferences)
+      }
     )
   }
 
@@ -35,7 +46,12 @@ struct ProductionAppModelFactory {
     preferences: UserDefaults,
     notificationCenter: any NotificationCenterClient,
     requestNotificationAuthorization: @escaping @MainActor () async throws -> Bool,
-    makeRemoteClient: @escaping @MainActor (URL) -> MobileAPIClient
+    makeRemoteClient: @escaping @MainActor (URL) -> MobileAPIClient,
+    allowsLegacyServerDiagnostics: Bool = Self.defaultAllowsLegacyServerDiagnostics,
+    makeCloudRuntime: @escaping @MainActor (BirthdayStore, UserDefaults) ->
+      any CloudSyncRuntimeControlling = { store, preferences in
+        CloudSyncRuntime.live(store: store, preferences: preferences)
+      }
   ) {
     self.appConfiguration = appConfiguration
     self.syncRuntimePolicy = syncRuntimePolicy
@@ -43,11 +59,18 @@ struct ProductionAppModelFactory {
     self.notificationCenter = notificationCenter
     self.requestNotificationAuthorization = requestNotificationAuthorization
     self.makeRemoteClient = makeRemoteClient
+    self.allowsLegacyServerDiagnostics = allowsLegacyServerDiagnostics
+    self.makeCloudRuntime = makeCloudRuntime
   }
 
   func make(container: ModelContainer) -> AppModel {
-    let remoteBaseURL =
-      syncRuntimePolicy.allowsRemoteSyncComposition ? appConfiguration.remoteBaseURL : nil
+    let syncMode = AppSyncMode.resolve(
+      configuration: appConfiguration,
+      policy: syncRuntimePolicy,
+      allowsLegacyServerDiagnostics: allowsLegacyServerDiagnostics
+    )
+    let remoteBaseURL: URL? =
+      if case .legacyServer(let url) = syncMode { url } else { nil }
     let composition = ProductionAppRuntimeCompositionFactory.make(
       remoteBaseURL: remoteBaseURL,
       notificationCenter: notificationCenter,
@@ -57,12 +80,14 @@ struct ProductionAppModelFactory {
     let store = BirthdayStore(modelContainer: container)
     let reminderPlanner = ReminderPlanner()
 
-    guard let mobileAPI = composition.remoteClient else {
-      return AppModel(
+    guard case .legacyServer = syncMode, let mobileAPI = composition.remoteClient else {
+      let model = AppModel(
         store: store,
         preferences: preferences,
-        localOnlyStatusDetail: appConfiguration.localOnlyMessage
-          ?? "生日与提醒只保存在这台设备上。",
+        syncMode: syncMode,
+        localOnlyStatusDetail: syncMode == .cloudKit
+          ? "生日先保存在本机，并通过你的 iCloud 私有空间同步。"
+          : appConfiguration.localOnlyMessage ?? "生日与提醒只保存在这台设备上。",
         isServerBindingAvailable: false,
         authenticator: LocalAuthenticationService(),
         serverDeviceBinder: OfflineServerDeviceBinder(),
@@ -71,6 +96,10 @@ struct ProductionAppModelFactory {
         reminderPlanner: reminderPlanner,
         requestNotificationAuthorization: composition.requestNotificationAuthorization
       )
+      if syncMode == .cloudKit {
+        model.configureCloudSyncRuntime(makeCloudRuntime(store, preferences))
+      }
+      return model
     }
 
     let credentials = DeviceCredentialStore(secure: KeychainStore())
@@ -78,6 +107,7 @@ struct ProductionAppModelFactory {
     let model = AppModel(
       store: store,
       preferences: preferences,
+      syncMode: syncMode,
       isServerBindingAvailable: true,
       authenticator: LocalAuthenticationService(),
       serverDeviceBinder: ServerDeviceBinder(api: mobileAPI, credentials: credentials),
