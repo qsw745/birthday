@@ -16,8 +16,8 @@ public actor BirthdayStore: ModelActor {
   nonisolated public let modelContainer: ModelContainer
   nonisolated public let modelExecutor: any ModelExecutor
 
-  private let calculator: any LunarBirthdayCalculating
-  private let transactionCommitter: @Sendable (ModelContext) throws -> Void
+  let calculator: any LunarBirthdayCalculating
+  let transactionCommitter: @Sendable (ModelContext) throws -> Void
   private let operationReader: @Sendable (ModelContext) throws -> [SyncOperationEntity]
 
   public init(modelContainer: ModelContainer) {
@@ -80,6 +80,7 @@ public actor BirthdayStore: ModelActor {
         record: record,
         createdAt: now
       )
+      try stageLocalCloudChange(for: entity)
       try transactionCommitter(modelContext)
       return record
     } catch {
@@ -153,6 +154,7 @@ public actor BirthdayStore: ModelActor {
         record: record,
         createdAt: now
       )
+      try stageLocalCloudChange(for: entity)
       try transactionCommitter(modelContext)
     } catch {
       modelContext.rollback()
@@ -177,6 +179,7 @@ public actor BirthdayStore: ModelActor {
         record: record,
         createdAt: now
       )
+      try stageLocalCloudChange(for: entity)
       try transactionCommitter(modelContext)
     } catch {
       modelContext.rollback()

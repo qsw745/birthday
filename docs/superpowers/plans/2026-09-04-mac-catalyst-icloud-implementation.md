@@ -296,7 +296,7 @@ CloudKit 字段只接受明确类型，所有入站数据先通过 `BirthdayVali
 - `persistCloudEngineState(_:)`
 - `cloudConflicts()` 与两种解决动作
 
-- [ ] **Step 1：写失败的原子性测试**
+- [x] **Step 1：写失败的原子性测试**
 
 验证：
 
@@ -310,15 +310,15 @@ CloudKit 字段只接受明确类型，所有入站数据先通过 `BirthdayVali
 运行：`swift test --filter CloudSyncStoreTests`
 预期：FAIL。
 
-- [ ] **Step 2：在 BirthdayStore 中接入 Cloud 状态**
+- [x] **Step 2：在 BirthdayStore 中接入 Cloud 状态**
 
 保持现有服务器 outbox 行为和测试不变；Cloud 状态使用独立实体和 API。通过明确的“本地用户写入”与“远端合并”入口阻止回声循环。
 
-- [ ] **Step 3：接入冲突持久化与解决**
+- [x] **Step 3：接入冲突持久化与解决**
 
 CloudKit 冲突使用独立快照实体。可以向界面映射到共用展示结构，但不得要求服务器 operation ID 或 baseVersion。解决后只生成 CloudKit 待发送变更。
 
-- [ ] **Step 4：验证并提交**
+- [x] **Step 4：验证并提交**
 
 运行：
 
