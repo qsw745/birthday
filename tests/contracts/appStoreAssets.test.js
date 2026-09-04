@@ -78,7 +78,7 @@ test('public privacy and support pages expose matching navigation and support co
   assert.doesNotMatch(`${privacy}\n${support}\n${stylesheet}`, /__[A-Z0-9_]+__/)
 })
 
-test('App Store Release composition is local-only and has no background sync entitlement', () => {
+test('App Store Release keeps legacy server sync disabled while allowing CloudKit changes', () => {
   const releaseConfiguration = readFileSync(
     path.join(repositoryRoot, 'ios/BirthdayMobile/Config/Release.xcconfig'),
     'utf8',
@@ -91,8 +91,9 @@ test('App Store Release composition is local-only and has no background sync ent
 
   assert.match(releaseConfiguration, /^BIRTHDAY_API_BASE_URL\s*=\s*$/m)
   assert.doesNotMatch(releaseConfiguration, /https?:/)
-  assert.doesNotMatch(project, /BGTaskSchedulerPermittedIdentifiers|UIBackgroundModes/)
-  assert.doesNotMatch(info, /BGTaskSchedulerPermittedIdentifiers|UIBackgroundModes/)
+  assert.doesNotMatch(project, /BGTaskSchedulerPermittedIdentifiers/)
+  assert.doesNotMatch(info, /BGTaskSchedulerPermittedIdentifiers/)
+  assert.match(info, /<string>remote-notification<\/string>/)
 })
 
 test('iOS settings exposes the public privacy and support pages', () => {

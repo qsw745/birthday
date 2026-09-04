@@ -104,7 +104,7 @@
 
 **产出接口：** iOS `BirthdayMobile` 与独立 `BirthdayMac` Catalyst scheme；计划容器标识 `iCloud.top.qisw.birthday`；Release 仍无自有服务器 URL。
 
-- [ ] **Step 1：写失败的工程契约测试**
+- [x] **Step 1：写失败的工程契约测试**
 
 测试必须断言：
 
@@ -118,15 +118,15 @@
 运行：`node --test tests/contracts/macosAndCloudKitAssets.test.js`
 预期：FAIL，提示 Mac 目标或 entitlements 尚不存在。
 
-- [ ] **Step 2：在 XcodeGen 中增加 Mac Catalyst 目标**
+- [x] **Step 2：在 XcodeGen 中增加 Mac Catalyst 目标**
 
 保持现有 iOS 目标不变，新增共享 `BirthdayMobile` 源码和 `BirthdayCore` 包的 `BirthdayMac` 目标。设置同一 Bundle ID、macOS 14 最低版本、独立 Info/entitlements 路径、`SUPPORTS_MACCATALYST=YES` 与不派生新 Bundle ID。不要手工编辑生成工程。
 
-- [ ] **Step 3：增加 CloudKit 和远程通知声明**
+- [x] **Step 3：增加 CloudKit 和远程通知声明**
 
 将容器标识集中在 xcconfig 或 XcodeGen 设置中。不得硬编码 `aps-environment`；由签名配置注入。Mac entitlements 同时启用 App Sandbox，但不增加文件、网络服务器或下载目录等无关权限。
 
-- [ ] **Step 4：生成工程并验证无签名编译入口**
+- [x] **Step 4：生成工程并验证无签名编译入口**
 
 运行：
 
@@ -138,7 +138,7 @@
 
 预期：工程生成成功；若现有 UIKit 代码导致 Catalyst 编译失败，只记录精确失败位置，本任务可加入最小条件编译垫片，但不开始桌面 UI 重写。
 
-- [ ] **Step 5：运行契约测试并提交**
+- [x] **Step 5：运行契约测试并提交**
 
 运行：`node --test tests/contracts/macosAndCloudKitAssets.test.js`
 预期：PASS。

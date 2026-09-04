@@ -23,7 +23,7 @@
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSFaceIDUsageDescription</key>
-	<string>使用 Face ID 保护生日资料</string>
+	<string>使用生物识别保护生日资料</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>
