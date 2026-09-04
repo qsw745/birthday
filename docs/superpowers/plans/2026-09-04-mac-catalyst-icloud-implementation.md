@@ -379,19 +379,19 @@ CloudKit 冲突使用独立快照实体。可以向界面映射到共用展示�
 - `CloudAccountMarkerStore`：将账号 record name 经过 CryptoKit 哈希后存入 Keychain。
 - `CloudSyncCoordinator`：`start`、`setEnabled`、`requestSync`、`confirmAccountChange`、`cancelAccountChange`。
 
-- [ ] **Step 1：写失败的状态机测试**
+- [x] **Step 1：写失败的状态机测试**
 
 覆盖首次默认开启、关闭不删数据、关闭期间累积修改、重新开启增量恢复、无 iCloud 降级、配额错误、限流退避、账号退出和账号切换暂停上传。
 
-- [ ] **Step 2：实现账号保护**
+- [x] **Step 2：实现账号保护**
 
 首次账号建立不可逆标记。账号变化后只允许读取状态，不允许上传；用户确认后重置该账号对应的引擎 state、进行安全初始合并，再允许上传。取消后保持本地模式。
 
-- [ ] **Step 3：定义用户状态快照**
+- [x] **Step 3：定义用户状态快照**
 
 输出 `disabled`、`unavailable`、`syncing`、`pending(count:)`、`synchronized(date:)`、`accountChangeRequiresConfirmation`、`conflicts(count:)` 和 `failed(category:)`。
 
-- [ ] **Step 4：验证并提交**
+- [x] **Step 4：验证并提交**
 
 运行：
 

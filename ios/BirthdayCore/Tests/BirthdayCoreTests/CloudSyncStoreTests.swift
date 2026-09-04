@@ -112,6 +112,53 @@ import Testing
     #expect(pending.encodedSystemFields == nil)
   }
 
+  @Test func accountChangeResetRestagesEveryLocalRecordAndClearsOnlyCloudMetadata() async throws {
+    let store = try makeCloudStore()
+    let first = try await store.save(
+      cloudDraft("第一条"), id: nil, now: cloudNow, timeZone: cloudTimeZone)
+    let firstPending = try #require(try await store.pendingCloudChanges(limit: 1).first)
+    try await store.markCloudUploadSucceeded(
+      CloudUploadSuccess(
+        entityID: first.id,
+        mutationID: firstPending.mutationID,
+        uploadedSnapshot: firstPending.snapshot,
+        encodedSystemFields: Data("old-account-system".utf8)
+      )
+    )
+    let second = try await store.save(
+      cloudDraft("第二条"), id: nil,
+      now: cloudNow.addingTimeInterval(1), timeZone: cloudTimeZone)
+    try await store.persistCloudEngineState(Data("old-engine-state".utf8))
+    try await store.markCloudInitialMergeCompleted(at: cloudNow)
+    let serverOperationCount = try await store.pendingOperations().count
+
+    try await store.resetCloudStateForAccountChange()
+
+    let localIDs = Set(try await store.activeBirthdays().map(\.id))
+    let pending = try await store.pendingCloudChanges(limit: 10)
+    let engineState = try await store.cloudEngineState()
+    #expect(localIDs == [first.id, second.id])
+    #expect(Set(pending.map(\.snapshot.id)) == [first.id, second.id])
+    #expect(pending.allSatisfy { $0.encodedSystemFields == nil })
+    #expect(engineState.serializedState == nil)
+    #expect(!engineState.initialMergeCompleted)
+    #expect(engineState.lastSuccessfulFetchAt == nil)
+    #expect(try await store.pendingOperations().count == serverOperationCount)
+  }
+
+  @Test func birthdayStoreProvidesExactCoordinatorStatusCountsAndSuccessState() async throws {
+    let store = try makeCloudStore()
+    _ = try await store.save(
+      cloudDraft("待同步"), id: nil, now: cloudNow, timeZone: cloudTimeZone)
+    let repository: any CloudSyncCoordinatorRepository = store
+
+    #expect(try await repository.pendingCloudChangeCount() == 1)
+    #expect(try await repository.cloudConflictCount() == 0)
+    try await repository.markCloudSyncSucceeded(at: cloudNow)
+    #expect(try await store.cloudEngineState().initialMergeCompleted)
+    #expect(try await store.cloudEngineState().lastSuccessfulFetchAt == cloudNow)
+  }
+
   @Test func cloudUploadAcknowledgementDoesNotClearANewerLocalMutation() async throws {
     let store = try makeCloudStore()
     let created = try await store.save(

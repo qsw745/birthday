@@ -151,6 +151,40 @@ extension BirthdayStore {
     }
   }
 
+  public func resetCloudStateForAccountChange() throws {
+    do {
+      let birthdays = try modelContext.fetch(FetchDescriptor<BirthdayEntity>())
+      let states = try modelContext.fetch(FetchDescriptor<CloudRecordStateEntity>())
+      let birthdaysByID = Dictionary(uniqueKeysWithValues: birthdays.map { ($0.id, $0) })
+      var statesByID = Dictionary(uniqueKeysWithValues: states.map { ($0.entityId, $0) })
+
+      for state in states where birthdaysByID[state.entityId] == nil {
+        modelContext.delete(state)
+        statesByID.removeValue(forKey: state.entityId)
+      }
+      for birthday in birthdays {
+        let state = statesByID[birthday.id] ?? CloudRecordStateEntity(entityId: birthday.id)
+        if statesByID[birthday.id] == nil { modelContext.insert(state) }
+        state.baseSnapshotJSON = nil
+        state.encodedSystemFields = nil
+        state.needsUpload = true
+        state.lastMutationID = UUID()
+        state.lastErrorCategory = nil
+      }
+      for conflict in try modelContext.fetch(FetchDescriptor<CloudSyncConflictEntity>()) {
+        modelContext.delete(conflict)
+      }
+      let engineState = try loadOrCreateEngineState()
+      engineState.serializedState = nil
+      engineState.initialMergeCompleted = false
+      engineState.lastSuccessfulFetchAt = nil
+      try transactionCommitter(modelContext)
+    } catch {
+      modelContext.rollback()
+      throw error
+    }
+  }
+
   public func markCloudUploadSucceeded(_ success: CloudUploadSuccess) throws {
     do {
       let state = try requireCloudState(id: success.entityID)
