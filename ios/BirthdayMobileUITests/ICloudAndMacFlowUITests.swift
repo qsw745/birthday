@@ -3,6 +3,21 @@ import XCTest
 #if targetEnvironment(macCatalyst)
 @MainActor
 final class ICloudAndMacFlowUITests: XCTestCase {
+  func testDesktopSettingsExposeLocalDataExportWithoutRequiringSync() {
+    let app = XCUIApplication()
+    app.launchArguments = ["-ui-testing", "-network-disabled", "-desktop-preview"]
+    app.launch()
+
+    if app.buttons["unlockButton"].waitForExistence(timeout: 3) {
+      app.buttons["unlockButton"].tap()
+    }
+    app.staticTexts["设置"].tap()
+    let exportButton = app.buttons["exportBirthdayDataButton"]
+    for _ in 0..<5 where !exportButton.isHittable { app.swipeUp() }
+    XCTAssertTrue(exportButton.waitForExistence(timeout: 3))
+    XCTAssertTrue(exportButton.isEnabled)
+  }
+
   func testDesktopLayoutExposesThreeColumnsToolbarContextMenuAndDeleteConfirmation() {
     let app = XCUIApplication()
     app.launchArguments = ["-ui-testing", "-network-disabled", "-desktop-preview"]

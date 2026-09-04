@@ -117,6 +117,8 @@ struct SettingsView: View {
         }
       }
 
+      DataExportView(model: model)
+
       Section("关于与支持") {
         Link(destination: Self.privacyPolicyURL) {
           Label("隐私政策", systemImage: "hand.raised")
