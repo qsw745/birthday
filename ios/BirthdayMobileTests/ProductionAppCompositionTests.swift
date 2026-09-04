@@ -41,7 +41,7 @@ func productionAppWithoutRemoteConfigurationUsesSystemNotificationPipeline() asy
   let preferences = try #require(UserDefaults(suiteName: suiteName))
   defer { preferences.removePersistentDomain(forName: suiteName) }
   let container = try BirthdayModelContainer.make(
-    configuration: ModelConfiguration(isStoredInMemoryOnly: true)
+    configuration: BirthdayModelContainer.localConfiguration(isStoredInMemoryOnly: true)
   )
   let factory = ProductionAppModelFactory(
     appConfiguration: AppConfiguration(apiBaseURLValue: nil),

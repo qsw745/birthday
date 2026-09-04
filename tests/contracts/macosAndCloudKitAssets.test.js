@@ -74,6 +74,34 @@ test('generated project exposes separate iPhone and Mac Catalyst products', () =
   assert.equal(mac.INFOPLIST_FILE, 'BirthdayMobile/MacInfo.plist')
 })
 
+test('release candidates use non-conflicting iPhone and Mac version trains', () => {
+  generatedProject()
+  const phone = buildSettings('BirthdayMobile')
+  const mac = buildSettings('BirthdayMac')
+
+  assert.equal(phone.MARKETING_VERSION, '1.1.0')
+  assert.equal(phone.CURRENT_PROJECT_VERSION, '2')
+  assert.equal(mac.MARKETING_VERSION, '1.0.0')
+  assert.equal(mac.CURRENT_PROJECT_VERSION, '2')
+})
+
+test('desktop screenshot fixture is isolated and contains only declared fictional names', () => {
+  const source = readFileSync(
+    path.join(iosRoot, 'BirthdayMobile/App/BirthdayMobileApp.swift'),
+    'utf8',
+  )
+  const fixture = source.slice(
+    source.indexOf('  private func seedDesktopPreview'),
+    source.indexOf('\n  }\n}', source.indexOf('  private func seedDesktopPreview')),
+  )
+  const names = [...fixture.matchAll(/UUID\([^\n]+\)!,\s*"([^"]+)"/g)]
+    .map((match) => match[1])
+
+  assert.deepEqual(names, ['清和', '星野', '望舒', '知夏', '小满'])
+  assert.doesNotMatch(fixture, /@|\b1[3-9]\d{9}\b/)
+  assert.match(fixture, /ModelContext\(container\)/)
+})
+
 test('each Apple product excludes the other platform Info plist from copied resources', () => {
   const project = readFileSync(path.join(iosRoot, 'project.yml'), 'utf8')
   const phoneTarget = project.slice(

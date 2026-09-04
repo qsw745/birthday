@@ -551,7 +551,7 @@ private struct CalendarHomePreviewHost: View {
   @State private var model: AppModel?
 
   init() {
-    let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
+    let configuration = BirthdayModelContainer.localConfiguration(isStoredInMemoryOnly: true)
     let container = try? ModelContainer(
       for: BirthdayEntity.self,
       SyncOperationEntity.self,

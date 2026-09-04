@@ -1,3 +1,4 @@
+import Foundation
 import SwiftData
 
 public enum BirthdaySchemaV1: VersionedSchema {
@@ -33,6 +34,19 @@ public enum BirthdaySchemaMigrationPlan: SchemaMigrationPlan {
 }
 
 public enum BirthdayModelContainer {
+  public static func localConfiguration(
+    isStoredInMemoryOnly: Bool = false
+  ) -> ModelConfiguration {
+    ModelConfiguration(
+      isStoredInMemoryOnly: isStoredInMemoryOnly,
+      cloudKitDatabase: .none
+    )
+  }
+
+  public static func localConfiguration(url: URL) -> ModelConfiguration {
+    ModelConfiguration(url: url, cloudKitDatabase: .none)
+  }
+
   public static func make(configuration: ModelConfiguration) throws -> ModelContainer {
     try ModelContainer(
       for: Schema(versionedSchema: BirthdaySchemaV3.self),

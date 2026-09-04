@@ -19,12 +19,12 @@
 
 | 检查 | 结果 | 边界 |
 | --- | --- | --- |
-| `npm test` | 335/335 通过 | Node 契约、服务和冒烟回归 |
-| `npm run test:mobile` | 261/261 通过 | 移动端 API 与契约回归 |
-| Apple 三组契约 | 15/15 通过 | 工程、隐私、元数据与目标资源 |
+| `npm test` | 338/338 通过 | Node 契约、服务和冒烟回归 |
+| `npm run test:mobile` | 264/264 通过 | 移动端 API 与契约回归 |
+| Apple 三组契约 | 18/18 通过 | 工程、隐私、元数据、双平台版本与截图资源 |
 | `swift test` | 333/333 通过 | BirthdayCore 本地、迁移、CloudKit 状态机与导出 |
 | `swift test --filter BirthdayModelContainerMigrationTests` | 5/5 通过 | 固定 V1/V2 夹具与 V3 迁移 |
-| iPhone 模拟器 `BirthdayMobile` 测试方案 | 21/21 通过，0 失败、0 跳过 | iPhone 17 Pro、iOS 26.5；12 个应用单元测试与 9 个 UI 流程 |
+| iPhone 模拟器 `BirthdayMobile` 测试方案 | 22/22 通过，0 失败、0 跳过 | iPhone 17 Pro、iOS 26.5；13 个应用单元测试与 9 个 UI 流程 |
 | iOS Release 无签名构建 | 通过 | generic iOS Simulator；不是可提交归档 |
 | Mac Catalyst Release 无签名构建 | 通过 | generic Mac Catalyst；不是可提交归档 |
 | Mac Catalyst `build-for-testing` | 通过 | UI Runner 和测试源完成编译，未实际启动 Runner |
@@ -53,6 +53,7 @@ Mac Catalyst 实际 UI 自动化未执行：当前没有可用于 `top.qisw.birt
 - [x] Mac 包只包含主 `Contents/Info.plist` 和 `Contents/Resources/PrivacyInfo.xcprivacy`
 - [x] 已修复 iPhone 误带 `MacInfo.plist`、Mac 误带 iOS `Info.plist` 的资源污染
 - [x] Release `BirthdayAPIBaseURL` 为空
+- [x] SwiftData 本地配置显式使用 `.none`，不会因 CloudKit entitlement 启动 SwiftData 自动 CloudKit；业务同步仍只经过 `CKSyncEngine`
 - [x] iPhone 与 Mac 二进制均不包含 `qisw.top/api/mobile` 或完整移动 API URL
 - [x] Mac 动态依赖只包含 Apple 系统框架和 Swift 运行库
 - [x] 源 entitlements 仅声明计划内 CloudKit 容器、CloudKit 服务与键值存储；Mac 另含沙盒和网络客户端能力

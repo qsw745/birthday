@@ -93,7 +93,7 @@ func releaseCompositionBuildsCloudRuntimeWithoutConstructingLegacyServerClient()
   let preferences = try #require(UserDefaults(suiteName: suiteName))
   defer { preferences.removePersistentDomain(forName: suiteName) }
   let container = try BirthdayModelContainer.make(
-    configuration: ModelConfiguration(isStoredInMemoryOnly: true)
+    configuration: BirthdayModelContainer.localConfiguration(isStoredInMemoryOnly: true)
   )
   let fakeRuntime = FakeCloudSyncRuntime()
   var cloudRuntimeConstructionCount = 0
@@ -135,7 +135,7 @@ func cloudRuntimeActionsPublishStatusAndReloadOnlyLocalData() async throws {
   let preferences = try #require(UserDefaults(suiteName: suiteName))
   defer { preferences.removePersistentDomain(forName: suiteName) }
   let container = try BirthdayModelContainer.make(
-    configuration: ModelConfiguration(isStoredInMemoryOnly: true)
+    configuration: BirthdayModelContainer.localConfiguration(isStoredInMemoryOnly: true)
   )
   let model = AppModel(
     store: BirthdayStore(modelContainer: container),

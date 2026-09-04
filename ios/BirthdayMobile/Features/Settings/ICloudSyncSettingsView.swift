@@ -1,6 +1,20 @@
 import BirthdayCore
 import SwiftUI
 
+enum ICloudSyncStatusPresentation {
+  static func synchronizedDetail(
+    _ date: Date,
+    timeZone: TimeZone = .current
+  ) -> String {
+    let formatter = DateFormatter()
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.locale = Locale(identifier: "zh_CN")
+    formatter.timeZone = timeZone
+    formatter.dateFormat = "yyyy年M月d日 HH:mm"
+    return "最近完成：\(formatter.string(from: date))"
+  }
+}
+
 struct ICloudSyncSettingsView: View {
   @Bindable var model: AppModel
   @State private var isConfirmingAccountChange = false
@@ -141,7 +155,7 @@ struct ICloudSyncSettingsView: View {
     case .pending:
       "修改已安全保存在本机，将在条件允许时继续上传。"
     case .synchronized(let date):
-      "最近完成：\(date.formatted(date: .abbreviated, time: .shortened))"
+      ICloudSyncStatusPresentation.synchronizedDetail(date)
     case .accountChangeRequiresConfirmation:
       "同步已暂停，等待你决定是否与新账号安全合并。"
     case .conflicts:

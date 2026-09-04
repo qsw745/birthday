@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict')
+const { execFileSync } = require('node:child_process')
 const { readFileSync, readdirSync, statSync } = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
@@ -178,5 +179,33 @@ test('App Store upload screenshot set is complete 6.9-inch JPEG output', () => {
     const filePath = path.join(screenshotDirectory, filename)
     assert.ok(statSync(filePath).size > 100_000, `${filename} is unexpectedly small`)
     assert.deepEqual(readJPEGDimensions(filePath), { width: 1_320, height: 2_868 })
+  }
+})
+
+test('Mac App Store upload screenshot set is complete 16:10 RGB JPEG output', () => {
+  const screenshotDirectory = path.join(appStoreRoot, 'Screenshots/macos/zh-Hans/upload')
+  const expectedFiles = [
+    '01-calendar.jpg',
+    '02-all-birthdays.jpg',
+    '03-reminder-editor.jpg',
+    '04-local-privacy.jpg',
+    '05-icloud-export.jpg',
+  ]
+
+  assert.deepEqual(readdirSync(screenshotDirectory).sort(), expectedFiles)
+  for (const filename of expectedFiles) {
+    const filePath = path.join(screenshotDirectory, filename)
+    assert.ok(statSync(filePath).size > 200_000, `${filename} is unexpectedly small`)
+    assert.deepEqual(readJPEGDimensions(filePath), { width: 2_880, height: 1_800 })
+
+    const metadata = execFileSync('/usr/bin/sips', [
+      '-g', 'format',
+      '-g', 'space',
+      '-g', 'hasAlpha',
+      filePath,
+    ], { encoding: 'utf8' })
+    assert.match(metadata, /format: jpeg/)
+    assert.match(metadata, /space: RGB/)
+    assert.match(metadata, /hasAlpha: no/)
   }
 })

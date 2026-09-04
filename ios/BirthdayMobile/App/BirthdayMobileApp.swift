@@ -200,7 +200,7 @@ private struct BirthdayAppBootstrapView: View {
     initializationError = nil
 
     do {
-      let configuration = ModelConfiguration(
+      let configuration = BirthdayModelContainer.localConfiguration(
         isStoredInMemoryOnly: uiTestBootstrap.isEnabled
       )
       let container = try BirthdayModelContainer.make(configuration: configuration)
@@ -340,7 +340,7 @@ private struct BirthdayAppBootstrapView: View {
       let selectedMonth: Date
       let now: @Sendable () -> Date
       let timeZone: @Sendable () -> TimeZone
-      if snapshotFixtureEnabled {
+      if snapshotFixtureEnabled || uiTestBootstrap.desktopPreview {
         selectedMonth = fixtureNow
         now = { fixtureNow }
         timeZone = { fixtureTimeZone }
@@ -451,18 +451,28 @@ private struct BirthdayAppBootstrapView: View {
 
   private func seedDesktopPreview(in container: ModelContainer) throws {
     let context = ModelContext(container)
-    let now = Date(timeIntervalSince1970: 1_800_000_000)
-    let entity = BirthdayEntity(
-      id: UUID(uuidString: "55555555-5555-4555-8555-555555555555")!,
-      draft: BirthdayDraft(
-        name: "小满",
-        lunarBirthday: LunarBirthday(month: 4, day: 15, isLeapMonth: false),
-        reminder: .defaults
-      ),
-      nextSolarDate: now.addingTimeInterval(86_400 * 12),
-      now: now
-    )
-    context.insert(entity)
+    let now = Date(timeIntervalSince1970: 1_789_876_800)
+    let fixtures: [(UUID, String, Int, Int)] = [
+      (UUID(uuidString: "55555551-5555-4555-8555-555555555551")!, "清和", 8, 15),
+      (UUID(uuidString: "55555552-5555-4555-8555-555555555552")!, "星野", 8, 18),
+      (UUID(uuidString: "55555553-5555-4555-8555-555555555553")!, "望舒", 8, 24),
+      (UUID(uuidString: "55555554-5555-4555-8555-555555555554")!, "知夏", 9, 2),
+      (UUID(uuidString: "55555555-5555-4555-8555-555555555555")!, "小满", 4, 15),
+    ]
+
+    for (id, name, month, day) in fixtures {
+      let entity = BirthdayEntity(
+        id: id,
+        draft: BirthdayDraft(
+          name: name,
+          lunarBirthday: LunarBirthday(month: month, day: day, isLeapMonth: false),
+          reminder: .defaults
+        ),
+        nextSolarDate: now,
+        now: now
+      )
+      context.insert(entity)
+    }
     try context.save()
   }
 }
