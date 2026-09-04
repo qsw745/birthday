@@ -251,7 +251,7 @@ CloudKit 字段只接受明确类型，所有入站数据先通过 `BirthdayVali
 - `unchanged`
 - `conflict(kind:)`
 
-- [ ] **Step 1：写失败的纯函数矩阵测试**
+- [x] **Step 1：写失败的纯函数矩阵测试**
 
 覆盖：
 
@@ -268,11 +268,11 @@ CloudKit 字段只接受明确类型，所有入站数据先通过 `BirthdayVali
 运行：`swift test --filter CloudMergePolicyTests`
 预期：FAIL。
 
-- [ ] **Step 2：实现内容比较**
+- [x] **Step 2：实现内容比较**
 
 比较只使用可同步字段；`updatedAt` 用于展示和诊断，不单独作为覆盖依据。存在共同基础时按三方差异判断；没有基础且同 UUID 两边均存在不同内容时生成冲突。
 
-- [ ] **Step 3：验证并提交**
+- [x] **Step 3：验证并提交**
 
 提交：`feat(icloud): 实现无静默覆盖的合并策略`
 
