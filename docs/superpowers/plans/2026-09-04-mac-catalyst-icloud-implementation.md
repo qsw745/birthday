@@ -577,7 +577,7 @@ iPhone 使用系统分享/文件面板，Mac 使用系统保存面板。取消�
 - 修改：`tests/contracts/appStoreAssets.test.js`
 - 修改：`tests/contracts/macosAndCloudKitAssets.test.js`
 
-- [ ] **Step 1：先让旧契约对新事实失败**
+- [x] **Step 1：先让旧契约对新事实失败**
 
 更新测试预期：
 
@@ -589,15 +589,15 @@ iPhone 使用系统分享/文件面板，Mac 使用系统保存面板。取消�
 运行：`node --test tests/contracts/iosPrivacyManifest.test.js tests/contracts/appStoreAssets.test.js tests/contracts/macosAndCloudKitAssets.test.js`
 预期：FAIL，指出旧隐私和元数据内容。
 
-- [ ] **Step 2：依据当前 Apple 规则完成隐私判断**
+- [x] **Step 2：依据当前 Apple 规则完成隐私判断**
 
 生成 Xcode Privacy Report，并记录 CloudKit 数据由 Apple 服务处理、开发者不接收私有记录正文的实际边界。只有证据支持时才保留 `NSPrivacyCollectedDataTypes=[]`；如果最终实现使开发者或第三方可持续访问任何数据，必须在 manifest 和 App Store Connect 问卷中申报对应类型、关联性和 App Functionality 用途。
 
-- [ ] **Step 3：更新本地材料**
+- [x] **Step 3：更新本地材料**
 
 修改公开页面源文件和商店 JSON 草稿，但本任务不部署网页、不写 App Store Connect。Mac 描述突出桌面窗口、键鼠和离线能力，iOS 1.1 `whatsNew` 说明 iCloud 可关闭。
 
-- [ ] **Step 4：验证并提交**
+- [x] **Step 4：验证并提交**
 
 运行：
 

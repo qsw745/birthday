@@ -1,14 +1,15 @@
 {
   "name": "岁时·农历生日提醒",
-  "subtitle": "离线农历生日与本地提醒",
-  "promotionalText": "农历生日、月历视图与本地通知都在 iPhone 上完成。无需账号，离线也能完整使用。",
-  "description": "岁时是一款完全离线的农历生日管理工具。生日资料、提醒设置和日期计算都保存在你的 iPhone 上；无需注册账号，也不依赖服务器。\n\n你可以：\n• 按农历月、日和闰月记录生日\n• 在月历中查看下一次公历日期\n• 设置提前一天和生日当天的本地提醒\n• 搜索、编辑和管理全部生日\n• 使用 Face ID 或设备密码保护本机资料\n• 查看本地提醒数量与覆盖截止日期\n\n即使没有网络，查看、添加、编辑、删除、农历转公历和本地通知仍可正常使用。\n\n岁时不包含广告，不收集生日资料，也不进行跨应用跟踪。",
-  "keywords": "生日,农历,提醒,日历,纪念日,离线,家庭,朋友,Face ID",
+  "subtitle": "本机优先的农历生日提醒",
+  "promotionalText": "生日先存本机，离线照常提醒；默认通过你的 iCloud 私有空间在 iPhone 与 Mac 间同步，也可随时关闭。",
+  "description": "岁时是一款本机优先的农历生日管理工具。查看、添加、编辑、删除、农历换算和本地提醒都先在 iPhone 上完成；无需注册应用账号，也不依赖开发者服务器。\n\n你可以：\n• 按农历月、日和闰月记录生日\n• 在月历中查看下一次公历日期\n• 设置提前一天和生日当天的本地提醒\n• 搜索、编辑和管理全部生日\n• 使用 Face ID 或设备密码保护本机资料\n• 将本机可见生日导出为 JSON 文件\n\niCloud 私有同步默认开启，用于在同一 Apple ID 的 iPhone 与 Mac 之间合并生日。你可以在设置中按设备关闭；离线、未登录 iCloud 或同步暂时失败时，本机功能和本地提醒仍可正常使用。\n\n岁时不包含广告，不把生日资料上传到开发者服务器，也不进行跨应用跟踪。",
+  "whatsNew": "新增 iCloud 私有同步，默认开启，可在设置中按设备关闭；新增本机生日数据导出。即使离线，本机新增、编辑、农历换算和提醒仍可正常使用。",
+  "keywords": "生日,农历,提醒,日历,离线,iCloud,纪念日,朋友,Face ID",
   "supportURL": "https://qisw.top/birthday/support.html",
   "privacyPolicyURL": "https://qisw.top/birthday/privacy.html",
   "marketingURL": "https://qisw.top/birthday/",
   "primaryCategory": "Lifestyle",
   "secondaryCategory": "Utilities",
-  "reviewNotes": "本版本为纯离线应用，无需账号、服务器或演示凭据。首次启动时可在通知页选择“暂不开启”，随后直接进入完整功能。建议审核路径：添加生日 → 查看月历与全部列表 → 编辑提醒 → 设置页查看 Face ID、本地通知与本机数据存储说明。",
+  "reviewNotes": "无需注册岁时账号或提供演示凭据。生日先保存到本机，核心功能离线可用；默认使用当前 Apple ID 的 iCloud 私有数据库同步，可在设置中关闭。建议审核路径：添加生日 → 查看月历与全部列表 → 编辑提醒 → 设置页查看 iCloud 开关、数据导出、Face ID 与本地通知。CloudKit 远程通知只触发同步检查，不承载生日正文；同步到达时间取决于系统与网络。",
   "requiresDemoAccount": false
 }

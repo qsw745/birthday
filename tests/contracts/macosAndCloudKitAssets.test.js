@@ -105,3 +105,22 @@ test('release receives CloudKit changes without restoring the legacy server tran
   assert.match(releaseConfiguration, /^BIRTHDAY_API_BASE_URL\s*=\s*$/m)
   assert.doesNotMatch(releaseConfiguration, /https?:/)
 })
+
+test('iPhone and Mac store drafts describe private, optional CloudKit without real-time promises', () => {
+  const phone = JSON.parse(readFileSync(
+    path.join(iosRoot, 'AppStore/metadata/zh-Hans.json'),
+    'utf8',
+  ))
+  const mac = JSON.parse(readFileSync(
+    path.join(iosRoot, 'AppStore/metadata/macos-zh-Hans.json'),
+    'utf8',
+  ))
+
+  for (const metadata of [phone, mac]) {
+    const copy = `${metadata.promotionalText}\n${metadata.description}\n${metadata.reviewNotes}`
+    assert.match(copy, /iCloud/)
+    assert.match(copy, /私有/)
+    assert.match(copy, /离线/)
+    assert.doesNotMatch(copy, /实时同步|即时同步/)
+  }
+})

@@ -18,7 +18,7 @@ function readManifest() {
   ))
 }
 
-test('iOS privacy manifest declares no collection and the required-reason API', () => {
+test('privacy manifest declares no developer collection, tracking, or undeclared required-reason API', () => {
   const manifest = readManifest()
 
   assert.equal(manifest.NSPrivacyTracking, false)
@@ -31,6 +31,16 @@ test('iOS privacy manifest declares no collection and the required-reason API', 
   ])
 
   assert.deepEqual(manifest.NSPrivacyCollectedDataTypes, [])
+})
+
+test('Apple release sources contain no advertising, analytics, or tracking SDK', () => {
+  const project = readFileSync(path.join(repositoryRoot, 'ios/project.yml'), 'utf8')
+
+  assert.doesNotMatch(
+    project,
+    /GoogleMobileAds|FirebaseAnalytics|Amplitude|Mixpanel|Appsflyer|Adjust|FacebookSDK|AdSupport|AppTrackingTransparency/i,
+  )
+  assert.doesNotMatch(project, /^\s+url:\s*https?:/m)
 })
 
 test('XcodeGen classifies the privacy manifest as an application resource', () => {

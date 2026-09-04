@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>岁时使用支持</title>
-    <meta name="description" content="岁时 iOS 应用使用帮助、离线说明与联系支持。" />
+    <meta name="description" content="岁时 iPhone 与 Mac 应用使用帮助、离线说明、iCloud 同步与数据导出。" />
     <meta name="theme-color" content="#eef8f7" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="stylesheet" href="legal.css" />
@@ -23,15 +23,15 @@
       </div>
 
       <header class="hero">
-        <p class="eyebrow">Support · iOS</p>
+        <p class="eyebrow">Support · iPhone &amp; Mac</p>
         <h1>把生日留在心上，<br />其余交给岁时。</h1>
         <p class="lede">
-          这里整理了首次使用、本地通知、Face ID 和数据保存的常见问题。
-          岁时不要求登录，所有核心功能都可以离线使用。
+          这里整理了首次使用、本地通知、设备锁、iCloud 私有同步和数据导出的常见问题。
+          岁时不要求注册应用账号，所有核心功能都可以离线使用。
         </p>
         <div class="meta">
-          <span>当前版本：1.0.0</span>
-          <span>最低系统：iOS 17</span>
+          <span>当前材料：iOS 1.1、macOS 1.0</span>
+          <span>最低系统：iOS 17、macOS 14</span>
         </div>
       </header>
 
@@ -39,57 +39,86 @@
         <section class="section callout">
           <h2>快速开始</h2>
           <p>
-            首次打开后选择是否允许通知，应用会直接进入月历。轻点右上角“＋”，填写姓名、农历生日和提醒时间即可。
+            首次打开后选择是否允许通知，应用会直接进入月历。选择“＋”，填写姓名、农历生日和提醒时间即可。
+            生日先存入本机，不会等待网络。
           </p>
         </section>
 
         <section class="section">
           <h2>没有网络还能用吗？</h2>
           <p>
-            可以。查看、添加、编辑、删除、农历转公历和本地通知都在 iPhone 上完成，不依赖服务器。
-            本版本不包含服务器同步入口，断开网络不会影响本地保存。
+            可以。查看、添加、编辑、删除、搜索、农历转公历和本地通知都由本机完成，不依赖开发者服务器。
+            离线期间的修改会保存在设备上，网络与 iCloud 可用后再尝试同步。
+          </p>
+        </section>
+
+        <section class="section">
+          <h2>iCloud 同步如何工作？</h2>
+          <p>
+            同步默认开启，使用你的 iCloud 私有数据库在同一 Apple ID 的岁时设备之间合并生日。
+            你可以在“设置 → iCloud 同步”中关闭或重新开启；每台设备的开关互不影响，关闭不会删除本机生日。
+          </p>
+          <p>
+            同步时间取决于网络、系统调度和 iCloud 状态。远程通知只提示应用检查变化，生日提醒仍由每台设备本地安排。
+          </p>
+        </section>
+
+        <section class="section">
+          <h2>更换或退出 iCloud 账号会怎样？</h2>
+          <p>
+            未登录时应用会继续保留并使用本机数据。检测到 iCloud 账号变化后，同步会暂停并要求确认；
+            只有确认使用新账号后，本机资料才会与新账号的私有数据合并。
+          </p>
+        </section>
+
+        <section class="section">
+          <h2>如何导出生日资料？</h2>
+          <p>
+            打开“设置 → 数据导出”，选择“导出生日数据”，再用系统面板选择保存位置。
+            文件为 UTF-8 JSON，只包含当时本机可见的未删除生日；导出不会等待 iCloud，也不包含账号、同步令牌或通知权限状态。
           </p>
         </section>
 
         <section class="section">
           <h2>为什么没有收到提醒？</h2>
           <ul>
-            <li>前往“设置 → 通知 → 岁时”，确认允许通知；</li>
+            <li>前往系统“设置 → 通知 → 岁时”，确认允许通知；</li>
             <li>在岁时“设置”页查看已安排数量和覆盖截止日期；</li>
             <li>确认生日当天或提前一天的开关至少开启一个；</li>
             <li>修改系统时区后，打开岁时并选择“重新安排本地提醒”。</li>
           </ul>
+          <p>本地生日提醒不依赖 iCloud 同步是否成功。</p>
         </section>
 
         <section class="section">
-          <h2>Face ID 会上传吗？</h2>
+          <h2>Face ID 或 Touch ID 会上传吗？</h2>
           <p>
-            不会。Face ID 和设备密码验证完全由 iOS 处理，应用只接收验证是否成功的结果，不会读取、保存或上传生物识别信息。
+            不会。生物识别和设备密码验证完全由系统处理，应用只接收验证是否成功的结果，不会读取、保存或上传生物识别信息。
           </p>
         </section>
 
         <section class="section">
           <h2>需要注册账号吗？</h2>
           <p>
-            不需要。岁时 iOS 1.0 是纯离线应用，不提供账号登录或服务器连接入口。
+            不需要注册岁时账号。iCloud 同步由设备当前登录的 Apple ID 提供；即使未登录 iCloud，你仍可离线使用本机功能。
           </p>
         </section>
 
         <section class="section">
           <h2>如何删除资料？</h2>
           <p>
-            在“全部”列表中打开生日，轻点“删除生日”。若要移除全部本机资料，可删除岁时 App；
-            开发者无法远程访问或删除你的本机生日资料。
+            在生日列表中打开记录并选择“删除生日”。同步开启时，删除会在后续同步中传递到其他设备。
+            关闭同步或卸载一台设备上的应用不会自动删除 iCloud 中仍保留的数据。
           </p>
         </section>
 
         <section class="section callout" id="contact">
           <h2>仍然需要帮助？</h2>
           <p>
-            请在邮件中写明 iPhone 型号、iOS 版本、岁时版本和遇到问题的步骤。不要发送密码或其他账号凭据。
+            请在邮件中写明设备型号、系统版本、岁时版本和遇到问题的步骤。不要发送密码、完整 Apple ID 或生日资料。
             这些信息和你的发件邮箱仅用于答复与排查，保存和删除方式见隐私政策。
           </p>
-          <a class="contact" href="mailto:support@qisw.top?subject=%E5%B2%81%E6%97%B6%20iOS%20%E4%BD%BF%E7%94%A8%E6%94%AF%E6%8C%81">support@qisw.top</a>
+          <a class="contact" href="mailto:support@qisw.top?subject=%E5%B2%81%E6%97%B6%20%E4%BD%BF%E7%94%A8%E6%94%AF%E6%8C%81">support@qisw.top</a>
         </section>
       </div>
 
