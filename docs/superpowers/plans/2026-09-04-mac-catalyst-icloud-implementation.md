@@ -416,19 +416,19 @@ CloudKit 冲突使用独立快照实体。可以向界面映射到共用展示�
 - 修改：`ios/BirthdayMobile/Features/Lock/AppLockView.swift`
 - 修改：`ios/BirthdayMobile/Features/Settings/SettingsView.swift`
 
-- [ ] **Step 1：写失败的平台语义测试**
+- [x] **Step 1：写失败的平台语义测试**
 
 验证 iPhone 显示 Face ID/设备密码，Mac Catalyst 显示 Touch ID/登录密码；系统设置 URL 和设备名称通过平台服务返回；普通 Mac 焦点切换不锁定，系统锁屏、休眠和重新打开触发锁定。
 
-- [ ] **Step 2：扩展生物识别能力**
+- [x] **Step 2：扩展生物识别能力**
 
 将当前只区分 Face ID/设备密码的模型扩展为 Face ID、Touch ID、设备凭据和不可用，保持旧测试语义兼容。所有用户文案由平台能力生成，不在业务模型中硬编码“iPhone”。
 
-- [ ] **Step 3：增加设备级通知开关**
+- [x] **Step 3：增加设备级通知开关**
 
 通知开关使用独立 UserDefaults 键且不进入 iCloud。关闭后只移除本应用命名空间下的生日通知；重新开启时按本地数据重建，不等待同步。
 
-- [ ] **Step 4：验证并提交**
+- [x] **Step 4：验证并提交**
 
 运行：
 

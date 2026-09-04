@@ -64,8 +64,9 @@ private func makeLocalAuthenticationService(
   )
 }
 
-@Test func authenticationCapabilityDistinguishesFaceIDPasscodeAndUnavailable() {
+@Test func authenticationCapabilityDistinguishesFaceIDTouchIDPasscodeAndUnavailable() {
   let faceID = makeLocalAuthenticationService(biometry: .faceID, evaluation: .success(true))
+  let touchID = makeLocalAuthenticationService(biometry: .touchID, evaluation: .success(true))
   let passcode = makeLocalAuthenticationService(biometry: .none, evaluation: .success(true))
   let unavailable = makeLocalAuthenticationService(
     availability: .failure(.unavailable),
@@ -74,6 +75,7 @@ private func makeLocalAuthenticationService(
   )
 
   #expect(faceID.capability() == .faceID)
+  #expect(touchID.capability() == .touchID)
   #expect(passcode.capability() == .devicePasscode)
   #expect(unavailable.capability() == .unavailable)
 }

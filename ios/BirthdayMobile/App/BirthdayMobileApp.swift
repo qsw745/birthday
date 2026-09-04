@@ -85,7 +85,7 @@ private struct BirthdayAppBootstrapView: View {
             }
           case .background:
             deactivateSceneSyncRuntime()
-            model.lockForBackground()
+            model.handleLockEvent(.enteredBackground)
           case .inactive:
             deactivateSceneSyncRuntime()
           @unknown default:
@@ -121,6 +121,13 @@ private struct BirthdayAppBootstrapView: View {
           NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)
         ) { _ in
           Task { await model.reload() }
+        }
+        .onReceive(
+          NotificationCenter.default.publisher(
+            for: UIApplication.protectedDataWillBecomeUnavailableNotification
+          )
+        ) { _ in
+          model.handleLockEvent(.systemLocked)
         }
       } else if let initializationError {
         LocalDatabaseFailureView(message: initializationError) {

@@ -8,12 +8,14 @@ public protocol AppLockAuthenticating: Sendable {
 
 public enum AppLockCapability: Equatable, Sendable {
   case faceID
+  case touchID
   case devicePasscode
   case unavailable
 }
 
 internal enum AppLockBiometry: Equatable, Sendable {
   case faceID
+  case touchID
   case other
   case none
 }
@@ -76,7 +78,9 @@ internal final class SystemAppLockSystemContext: AppLockSystemContext, @unchecke
     switch context.biometryType {
     case .faceID:
       return .faceID
-    case .touchID, .opticID:
+    case .touchID:
+      return .touchID
+    case .opticID:
       return .other
     case .none:
       return .none
@@ -112,7 +116,14 @@ public struct LocalAuthenticationService: AppLockAuthenticating {
     guard case .success = context.canEvaluateDeviceOwnerAuthentication() else {
       return .unavailable
     }
-    return context.availableBiometry() == .faceID ? .faceID : .devicePasscode
+    switch context.availableBiometry() {
+    case .faceID:
+      return .faceID
+    case .touchID:
+      return .touchID
+    case .other, .none:
+      return .devicePasscode
+    }
   }
 
   public func unlock(reason: String) async throws -> Bool {

@@ -73,4 +73,39 @@ func productionAppWithoutRemoteConfigurationUsesSystemNotificationPipeline() asy
       "birthday.immediate.11111111-1111-4111-8111-111111111111.1800000000000"
     ]
   )
+
+  try await notificationCenter.add(
+    NotificationRequestSnapshot(
+      identifier: "other.app",
+      triggerDate: Date(timeIntervalSince1970: 1_900_000_000),
+      title: "其他通知",
+      body: "必须保留"
+    )
+  )
+  await model.setNotificationsEnabled(false)
+  #expect(!model.notificationsEnabled)
+  #expect(await notificationCenter.pendingRequests().map(\.identifier) == ["other.app"])
+  #expect(
+    await model.oneShotNotificationScheduler.schedule(
+      birthdayID: birthdayID,
+      name: "妈妈",
+      now: Date(timeIntervalSince1970: 1_800_000_100)
+    ) == .notAuthorized
+  )
+
+  _ = try await model.store.save(
+    BirthdayDraft(
+      name: "爸爸",
+      lunarBirthday: LunarBirthday(month: 1, day: 1, isLeapMonth: false),
+      reminder: .defaults
+    ),
+    id: nil,
+    now: Date(),
+    timeZone: .current
+  )
+  await model.setNotificationsEnabled(true)
+  let restoredIdentifiers = await notificationCenter.pendingRequests().map(\.identifier)
+  #expect(model.notificationsEnabled)
+  #expect(restoredIdentifiers.contains("other.app"))
+  #expect(restoredIdentifiers.contains { $0.hasPrefix("birthday.") })
 }

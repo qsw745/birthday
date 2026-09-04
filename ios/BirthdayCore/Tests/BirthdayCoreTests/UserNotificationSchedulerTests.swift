@@ -194,6 +194,26 @@ private func makeReminderPlan(count: Int) -> ReminderPlan {
   #expect(health.scheduledCount == 0)
 }
 
+@Test func disablingNotificationsClearsEntireBirthdayNamespaceAndPreservesForeignRequests() async {
+  let center = FakeNotificationCenterClient(
+    authorization: .authorized,
+    pendingRequests: [
+      notificationRequest(identifier: "birthday.rolling"),
+      notificationRequest(identifier: "birthday.immediate.today"),
+      notificationRequest(identifier: "other.app"),
+    ]
+  )
+
+  let health = await UserNotificationScheduler(center: center).removeAllBirthdayNotifications()
+
+  #expect(health.state == .scheduled)
+  #expect(health.scheduledCount == 0)
+  #expect(await center.capturedRemoved() == [
+    "birthday.immediate.today", "birthday.rolling",
+  ])
+  #expect(await center.capturedPendingRequests().map(\.identifier) == ["other.app"])
+}
+
 @Test(arguments: [NotificationAuthorization.denied, .notDetermined])
 func unavailableAuthorizationDoesNotSchedule(_ authorization: NotificationAuthorization) async throws {
   let center = FakeNotificationCenterClient(

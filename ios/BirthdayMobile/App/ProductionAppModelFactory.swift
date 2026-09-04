@@ -99,7 +99,7 @@ struct ProductionAppModelFactory {
         remoteAccessGate: remoteAccessGate,
         store: store,
         credentials: credentials,
-        notificationScheduler: composition.notificationScheduler,
+        notificationScheduler: model.notificationScheduler,
         reminderPlanner: reminderPlanner,
         publish: { [weak model] outcome in
           await model?.publishCompletedSync(outcome)

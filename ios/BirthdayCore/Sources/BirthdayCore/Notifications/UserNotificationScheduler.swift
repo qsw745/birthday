@@ -92,6 +92,18 @@ public protocol NotificationCenterClient: Sendable {
 
 public protocol NotificationScheduling: Sendable {
   func apply(_ plan: ReminderPlan) async throws -> NotificationHealth
+  func removeAllBirthdayNotifications() async -> NotificationHealth
+}
+
+extension NotificationScheduling {
+  public func removeAllBirthdayNotifications() async -> NotificationHealth {
+    NotificationHealth(
+      state: .failed,
+      scheduledCount: 0,
+      coverageEnd: nil,
+      errorCategory: "notification_removal_unsupported"
+    )
+  }
 }
 
 public enum OneShotNotificationResult: Equatable, Sendable {
@@ -147,6 +159,31 @@ public struct UserNotificationScheduler: NotificationScheduling {
   public func apply(_ plan: ReminderPlan) async throws -> NotificationHealth {
     try await gate.withLock { [center] in
       try await Self.apply(plan, using: center)
+    }
+  }
+
+  public func removeAllBirthdayNotifications() async -> NotificationHealth {
+    await gate.withLock { [center] in
+      let identifiers = await center.pendingRequests()
+        .map(\.identifier)
+        .filter { $0.hasPrefix(Self.rollingNamespace) }
+        .sorted()
+      await center.remove(identifiers: identifiers)
+
+      let remainingOwnedCount = await center.pendingRequests()
+        .lazy
+        .map(\.identifier)
+        .filter { $0.hasPrefix(Self.rollingNamespace) }
+        .count
+      guard remainingOwnedCount == 0 else {
+        return Self.failedHealth(category: "notification_removal_failed")
+      }
+      return NotificationHealth(
+        state: .scheduled,
+        scheduledCount: 0,
+        coverageEnd: nil,
+        errorCategory: nil
+      )
     }
   }
 

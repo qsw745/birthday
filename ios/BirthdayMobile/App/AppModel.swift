@@ -83,6 +83,23 @@ private actor ReminderRebuildCoordinator {
     return latestHealth
   }
 
+  func removeAllBirthdayNotifications(generation: UInt64) async -> NotificationHealth {
+    guard generation >= latestRequestedGeneration else {
+      if let runningTask { await runningTask.value }
+      return latestHealth
+    }
+
+    latestRequestedGeneration = generation
+    pendingRequest = nil
+    if let runningTask { await runningTask.value }
+
+    let result = await scheduler.removeAllBirthdayNotifications()
+    if generation == latestRequestedGeneration {
+      latestHealth = result
+    }
+    return latestHealth
+  }
+
   private func drainPendingRequests() async {
     while let request = pendingRequest {
       pendingRequest = nil
@@ -202,6 +219,7 @@ final class AppModel {
   private(set) var conflictErrorMessage: String?
   private(set) var resolvingConflictID: UUID?
   private(set) var isRequestingNotificationAuthorization = false
+  private(set) var notificationsEnabled: Bool
   private(set) var notificationHealth = NotificationHealth(
     state: .notRequested,
     scheduledCount: 0,
@@ -220,6 +238,7 @@ final class AppModel {
   let isServerBindingAvailable: Bool
   private(set) var pendingLocalCleanup: PendingLocalCleanup?
   let localOnlyStatusDetail: String
+  let platformServices: PlatformServices
 
   var needsRevokedCredentialCleanup: Bool {
     pendingLocalCleanup == .serverRevoked
@@ -236,6 +255,7 @@ final class AppModel {
 
   let store: BirthdayStore
   let oneShotNotificationScheduler: any OneShotNotificationScheduling
+  let notificationScheduler: any NotificationScheduling
 
   private var appLockSession: AppLockSessionState
   private var reminderGeneration: UInt64 = 0
@@ -307,6 +327,7 @@ final class AppModel {
     selectedMonth: Date = Date(),
     initiallyLoaded: Bool = false,
     preferences: UserDefaults = .standard,
+    platformServices: PlatformServices = .live,
     localOnlyStatusDetail: String = "生日与提醒只保存在这台设备上。",
     isServerBindingAvailable: Bool = false,
     authenticator: any AppLockAuthenticating = LocalAuthenticationService(),
@@ -330,6 +351,7 @@ final class AppModel {
     self.selectedMonth = selectedMonth
     loadState = initiallyLoaded ? .loaded : .idle
     self.preferences = preferences
+    self.platformServices = platformServices
     self.localOnlyStatusDetail = localOnlyStatusDetail
     self.isServerBindingAvailable = isServerBindingAvailable
     let syncLastSuccessStore = SyncLastSuccessStore(preferences: preferences)
@@ -337,7 +359,17 @@ final class AppModel {
     syncPresentationReducer = SyncPresentationReducer(lastSuccess: syncLastSuccessStore.load())
     self.authenticator = authenticator
     self.serverDeviceBinder = serverDeviceBinder
-    self.oneShotNotificationScheduler = oneShotNotificationScheduler
+    let notificationPreference = DeviceNotificationPreference(preferences: preferences)
+    notificationsEnabled = notificationPreference.isEnabled
+    let deviceNotificationScheduler = DeviceNotificationScheduler(
+      base: notificationScheduler,
+      preference: notificationPreference
+    )
+    self.notificationScheduler = deviceNotificationScheduler
+    self.oneShotNotificationScheduler = DeviceNotificationOneShotScheduler(
+      base: oneShotNotificationScheduler,
+      preference: notificationPreference
+    )
     self.requestNotificationAuthorization = requestNotificationAuthorization
     self.snapshotRecordLoader = snapshotRecordLoader
     self.now = now
@@ -345,7 +377,7 @@ final class AppModel {
     conflictResolver = ConflictResolver(store: store, now: now, timeZone: timeZone)
     reminderRebuildCoordinator = ReminderRebuildCoordinator(
       planner: reminderPlanner,
-      scheduler: notificationScheduler
+      scheduler: deviceNotificationScheduler
     )
 
     let capability = authenticator.capability()
@@ -645,7 +677,7 @@ final class AppModel {
   }
 
   func requestNotificationAuthorizationFromSettings() async {
-    guard !isRequestingNotificationAuthorization else { return }
+    guard notificationsEnabled, !isRequestingNotificationAuthorization else { return }
     isRequestingNotificationAuthorization = true
     let generation = nextReminderGeneration()
     defer { isRequestingNotificationAuthorization = false }
@@ -731,6 +763,8 @@ final class AppModel {
 
     unlockState = .authenticating
 
+    let lockPresentation = platformServices.lockPresentation(for: lockCapability)
+
     do {
       let succeeded = try await authenticator.unlock(reason: "解锁生日资料")
       guard appLockSession.completeAuthentication(attempt, succeeded: succeeded) else { return }
@@ -738,24 +772,31 @@ final class AppModel {
       if succeeded {
         unlockState = .idle
       } else {
-        unlockState = .failed(message: "身份验证未通过。请再次验证 Face ID 或设备密码。")
+        unlockState = .failed(
+          message: "身份验证未通过。请再次使用生物识别或\(lockPresentation.credentialName)验证。"
+        )
       }
     } catch AppLockError.cancelled {
       guard appLockSession.completeAuthentication(attempt, succeeded: false) else { return }
       unlockState = .failed(message: "已取消解锁。需要时可再次验证。")
     } catch AppLockError.unavailable {
       guard appLockSession.completeAuthentication(attempt, succeeded: false) else { return }
-      unlockState = .failed(message: "此设备当前无法使用 Face ID 或设备密码，请检查系统设置后重试。")
+      unlockState = .failed(
+        message: "此设备当前无法使用生物识别或\(lockPresentation.credentialName)，请检查系统设置后重试。"
+      )
     } catch AppLockError.evaluationFailed {
       guard appLockSession.completeAuthentication(attempt, succeeded: false) else { return }
-      unlockState = .failed(message: "未能验证身份。请再次尝试 Face ID 或设备密码。")
+      unlockState = .failed(
+        message: "未能验证身份。请再次尝试生物识别或\(lockPresentation.credentialName)。"
+      )
     } catch {
       guard appLockSession.completeAuthentication(attempt, succeeded: false) else { return }
       unlockState = .failed(message: "解锁失败。请稍后重试。")
     }
   }
 
-  func lockForBackground() {
+  func handleLockEvent(_ event: AppLockLifecycleEvent) {
+    guard platformServices.shouldLock(for: event) else { return }
     appLockSession.enterBackground(lockEnabled: lockEnabled)
     unlockState = .idle
   }
@@ -783,8 +824,32 @@ final class AppModel {
   }
 
   func rebuildReminders() async {
+    guard notificationsEnabled else { return }
     let generation = nextReminderGeneration()
     await rebuildFreshSnapshot(generation: generation, reportReadFailure: true)
+  }
+
+  func setNotificationsEnabled(_ isEnabled: Bool) async {
+    guard notificationsEnabled != isEnabled else { return }
+    notificationsEnabled = isEnabled
+    DeviceNotificationPreference(preferences: preferences).setEnabled(isEnabled)
+    let generation = nextReminderGeneration()
+
+    if isEnabled {
+      await rebuildFreshSnapshot(generation: generation, reportReadFailure: true)
+      return
+    }
+
+    beginReminderOperation()
+    let health = await reminderRebuildCoordinator.removeAllBirthdayNotifications(
+      generation: generation
+    )
+    endReminderOperation()
+    if generation == reminderGeneration {
+      notificationHealth = health.state == .failed
+        ? health
+        : disabledNotificationHealth()
+    }
   }
 
   func configureSyncCoordinator(_ coordinator: SyncCoordinator, initiallyBound: Bool) {
@@ -977,7 +1042,7 @@ final class AppModel {
   func publishCompletedSync(_ outcome: SyncRequestOutcome) async {
     guard case .completed(let summary, let activeBirthdays, let health) = outcome else { return }
     records = activeBirthdays
-    notificationHealth = health
+    notificationHealth = notificationsEnabled ? health : disabledNotificationHealth()
     syncStatus = .synchronized(summary)
     await reloadConflicts()
     await refreshSyncCounts()
@@ -1157,6 +1222,12 @@ final class AppModel {
   }
 
   private func rebuildReminderSnapshot(_ snapshot: [BirthdayRecord], generation: UInt64) async {
+    guard notificationsEnabled else {
+      if generation == reminderGeneration {
+        notificationHealth = disabledNotificationHealth()
+      }
+      return
+    }
     let health = await reminderRebuildCoordinator.rebuild(
       records: snapshot,
       now: now(),
@@ -1187,6 +1258,15 @@ final class AppModel {
       scheduledCount: 0,
       coverageEnd: nil,
       errorCategory: category
+    )
+  }
+
+  private func disabledNotificationHealth() -> NotificationHealth {
+    NotificationHealth(
+      state: .notRequested,
+      scheduledCount: 0,
+      coverageEnd: nil,
+      errorCategory: "disabled_on_device"
     )
   }
 

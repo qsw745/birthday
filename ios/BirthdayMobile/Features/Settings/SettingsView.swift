@@ -1,6 +1,5 @@
 import BirthdayCore
 import SwiftUI
-import UIKit
 
 struct SettingsView: View {
   @Bindable var model: AppModel
@@ -60,7 +59,8 @@ struct SettingsView: View {
           .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
         }
         .disabled(
-          model.isRebuildingReminders || model.isRequestingNotificationAuthorization)
+          !model.notificationsEnabled || model.isRebuildingReminders
+            || model.isRequestingNotificationAuthorization)
 
         if canRequestNotificationAuthorization {
           Button {
@@ -84,7 +84,7 @@ struct SettingsView: View {
         }
 
         if model.notificationHealth.state == .permissionDenied {
-          Link(destination: URL(string: UIApplication.openSettingsURLString)!) {
+          Link(destination: model.platformServices.systemSettingsURL) {
             Label("打开系统设置", systemImage: "gearshape.arrow.triangle.2.circlepath")
               .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
           }
@@ -97,13 +97,13 @@ struct SettingsView: View {
         Section {
           Label {
             VStack(alignment: .leading, spacing: 3) {
-              Text("仅保存在此 iPhone")
+              Text("仅保存在这台 \(model.platformServices.deviceKindName)")
               Text("无需账号，也不依赖服务器")
                 .font(.caption)
                 .foregroundStyle(ModernAirTheme.secondaryInk)
             }
           } icon: {
-            Image(systemName: "iphone.and.arrow.forward")
+            Image(systemName: model.platformServices.localStorageIconName)
               .foregroundStyle(ModernAirTheme.tide)
           }
           .frame(minHeight: 44)
@@ -142,6 +142,15 @@ struct SettingsView: View {
     )
   }
 
+  private var notificationsEnabledBinding: Binding<Bool> {
+    Binding(
+      get: { model.notificationsEnabled },
+      set: { isEnabled in
+        Task { await model.setNotificationsEnabled(isEnabled) }
+      }
+    )
+  }
+
   private static let privacyPolicyURL = URL(
     string: "https://qisw.top/birthday/privacy.html"
   )!
@@ -160,52 +169,51 @@ struct SettingsView: View {
   }
 
   private var lockTitle: String {
-    switch model.lockCapability {
-    case .faceID: "Face ID 应用锁"
-    case .devicePasscode: "设备密码应用锁"
-    case .unavailable: "应用锁不可用"
-    }
+    lockPresentation.title
   }
 
   private var lockDetail: String {
-    switch model.lockCapability {
-    case .faceID: "验证时支持设备密码回退"
-    case .devicePasscode: "Face ID 不可用，将使用设备密码"
-    case .unavailable: "Face ID 与设备密码当前均不可用"
-    }
+    lockPresentation.detail
   }
 
   private var lockIcon: String {
-    model.lockCapability == .faceID ? "faceid" : "lock.shield"
+    lockPresentation.iconName
   }
 
   private var lockFooter: String {
     guard model.lockCapability != .unavailable else {
-      return "应用锁保持关闭，避免无法进入本机生日资料。请先在系统中设置设备密码。"
+      return lockPresentation.unavailableFooter
     }
     return "关闭后当前会话会保持打开；重新开启不会打断当前操作，下次进入后台或重新启动时生效。"
   }
 
   private var notificationStatusRow: some View {
-    Label {
-      VStack(alignment: .leading, spacing: 3) {
-        Text(notificationStatusTitle)
-          .foregroundStyle(ModernAirTheme.ink)
-        Text(notificationStatusDetail)
-          .font(.caption)
-          .foregroundStyle(ModernAirTheme.secondaryInk)
-          .fixedSize(horizontal: false, vertical: true)
+    HStack(spacing: 12) {
+      Label {
+        VStack(alignment: .leading, spacing: 3) {
+          Text(notificationStatusTitle)
+            .foregroundStyle(ModernAirTheme.ink)
+          Text(notificationStatusDetail)
+            .font(.caption)
+            .foregroundStyle(ModernAirTheme.secondaryInk)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+      } icon: {
+        Image(systemName: notificationStatusIcon)
+          .foregroundStyle(ModernAirTheme.tide)
       }
-    } icon: {
-      Image(systemName: notificationStatusIcon)
-        .foregroundStyle(ModernAirTheme.tide)
+      Spacer(minLength: 8)
+      Toggle("生日提醒", isOn: notificationsEnabledBinding)
+        .labelsHidden()
+        .tint(ModernAirTheme.tide)
+        .accessibilityHint("仅影响“\(model.platformServices.deviceName)”上的本地生日提醒")
     }
     .frame(minHeight: 44)
-    .accessibilityElement(children: .combine)
   }
 
   private var notificationStatusTitle: String {
-    switch model.notificationHealth.state {
+    guard model.notificationsEnabled else { return "本机提醒已关闭" }
+    return switch model.notificationHealth.state {
     case .scheduled:
       "通知已授权"
     case .permissionDenied:
@@ -219,11 +227,14 @@ struct SettingsView: View {
   }
 
   private var notificationStatusDetail: String {
-    switch model.notificationHealth.state {
+    guard model.notificationsEnabled else {
+      return "生日资料仍保存在本机；重新开启后会直接按本机资料恢复提醒。"
+    }
+    return switch model.notificationHealth.state {
     case .scheduled:
       model.notificationHealth.scheduledCount == 0
         ? "当前没有需要安排的生日提醒。"
-        : "生日提醒已由这台 iPhone 安排。"
+        : "生日提醒已由“\(model.platformServices.deviceName)”安排。"
     case .permissionDenied:
       "请在系统设置中允许通知，然后重新安排。"
     case .notRequested:
@@ -234,7 +245,8 @@ struct SettingsView: View {
   }
 
   private var notificationStatusIcon: String {
-    switch model.notificationHealth.state {
+    guard model.notificationsEnabled else { return "bell.slash.fill" }
+    return switch model.notificationHealth.state {
     case .scheduled:
       "checkmark.circle.fill"
     case .permissionDenied:
@@ -260,11 +272,16 @@ struct SettingsView: View {
   }
 
   private var canRequestNotificationAuthorization: Bool {
+    guard model.notificationsEnabled else { return false }
     if model.notificationHealth.state == .notRequested {
       return true
     }
     return model.notificationHealth.state == .failed
       && model.notificationHealth.errorCategory == "authorization_request_failed"
+  }
+
+  private var lockPresentation: AppLockPresentation {
+    model.platformServices.lockPresentation(for: model.lockCapability)
   }
 
   private var coverageText: String {
