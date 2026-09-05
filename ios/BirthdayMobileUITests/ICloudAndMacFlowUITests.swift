@@ -88,6 +88,64 @@ final class ICloudAndMacFlowUITests: XCTestCase {
       app.staticTexts["确定删除“小满”吗？删除后将从本机生日列表移除。"].exists
     )
   }
+
+  func testDesktopDeleteDialogIsCenteredAndEscapePreservesRecord() {
+    let app = XCUIApplication()
+    app.launchArguments = ["-ui-testing", "-network-disabled", "-desktop-preview"]
+    app.launch()
+    if app.buttons["unlockButton"].waitForExistence(timeout: 3) {
+      app.buttons["unlockButton"].tap()
+    }
+    app.staticTexts["全部生日"].tap()
+    let row = app.descendants(matching: .any)[
+      "desktopBirthdayRow-55555555-5555-4555-8555-555555555555"
+    ]
+    XCTAssertTrue(row.waitForExistence(timeout: 3))
+    row.tap()
+    app.buttons["删除"].tap()
+
+    let dialog = app.descendants(matching: .any)["centeredBirthdayDeleteDialog"]
+    XCTAssertTrue(dialog.waitForExistence(timeout: 3))
+    let window = app.windows.firstMatch.frame
+    XCTAssertEqual(dialog.frame.midX, window.midX, accuracy: 4)
+    // The title bar sits outside the SwiftUI content area.
+    XCTAssertEqual(dialog.frame.midY, window.midY, accuracy: 32)
+    XCTAssertFalse(app.buttons["macAddBirthdayToolbarButton"].isHittable)
+    app.typeKey(.escape, modifierFlags: [])
+    XCTAssertFalse(dialog.exists)
+    XCTAssertTrue(row.exists)
+
+    app.buttons["删除"].tap()
+    XCTAssertTrue(dialog.waitForExistence(timeout: 3))
+    app.buttons["confirmBirthdayDeletion"].tap()
+    XCTAssertTrue(row.waitForNonExistence(timeout: 5))
+  }
+
+  func testEditorDeleteDialogCanBeCancelledWithoutClosingEditor() {
+    let app = XCUIApplication()
+    app.launchArguments = ["-ui-testing", "-network-disabled", "-desktop-preview"]
+    app.launch()
+    if app.buttons["unlockButton"].waitForExistence(timeout: 3) {
+      app.buttons["unlockButton"].tap()
+    }
+    app.buttons["编辑"].tap()
+    let nameField = app.textFields["birthdayNameField"]
+    XCTAssertTrue(nameField.waitForExistence(timeout: 3))
+    let originalName = nameField.value as? String
+    let delete = app.buttons["deleteBirthdayButton"]
+    let editorList = app.collectionViews.firstMatch
+    for _ in 0..<4 where !delete.isHittable { editorList.swipeUp() }
+    delete.tap()
+    let dialog = app.descendants(matching: .any)["centeredBirthdayDeleteDialog"]
+    XCTAssertTrue(dialog.waitForExistence(timeout: 3))
+    XCTAssertFalse(app.buttons["saveBirthdayButton"].isHittable)
+    app.buttons["cancelBirthdayDeletion"].tap()
+    XCTAssertFalse(dialog.exists)
+    XCTAssertTrue(app.buttons["saveBirthdayButton"].exists)
+    for _ in 0..<4 where !nameField.isHittable { editorList.swipeDown() }
+    XCTAssertEqual(nameField.value as? String, originalName)
+  }
+
 #if CLOUDKIT_PRODUCTION_SMOKE
   private func launchProductionCloudKitSmoke() -> XCUIApplication {
     let app = XCUIApplication()

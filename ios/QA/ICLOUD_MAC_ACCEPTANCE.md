@@ -12,7 +12,7 @@
 - Production CloudKit Schema：部署成功并从 Production 环境读回。
 - Production CloudKit 真实关键闭环：通过；iPhone 新增 → Mac 下载、Mac 修改 → iPhone 下载、iPhone 删除墓碑 → Mac 删除均已验证，上传结束时待同步数为 0。
 - Mac Catalyst 双架构与目标级资源检查：通过。
-- Mac Catalyst 普通 UI Runner：2/2 通过。
+- Mac Catalyst 普通 UI Runner：4/4 通过。
 - CloudKit 开发环境真实 iPhone ↔ Mac 双端矩阵：未验证。
 - Production 系统推送、完整离线冲突/账号切换/通知/生物识别矩阵：未验证。
 - 最终发布签名归档、上传及 TestFlight 安装：未验证。
@@ -31,7 +31,7 @@
 | iPhone 模拟器 `BirthdayMobile` 测试方案 | 23/23 通过，0 失败、0 跳过 | iPhone 17 Pro Max、iOS 26.5；14 个应用单元测试与 9 个 UI 流程 |
 | iOS Release 无签名构建 | 通过 | generic iOS Simulator；不是可提交归档 |
 | Mac Catalyst Release 无签名构建 | 通过 | generic Mac Catalyst；不是可提交归档 |
-| Mac Catalyst 普通 UI 方案 | 2/2 通过 | 真实 Mac Catalyst Runner；三栏、右键菜单、删除确认和本地导出入口 |
+| Mac Catalyst 普通 UI 方案 | 4/4 通过 | 真实 Mac Catalyst Runner；三栏、右键菜单、居中删除确认、编辑器取消和本地导出入口 |
 | Production CloudKit 隔离冒烟 | 4 段真实设备流程通过 | 实体 iPhone 17 Pro Max 与本机 Mac Catalyst；只使用手动同步，不代表系统推送已验证 |
 
 iPhone UI 流程覆盖离线新增、搜索、编辑、删除、CloudKit 引导与设置、账号变化确认、旧服务器清理失败保护和快照导入保护。测试使用内存 SwiftData、测试偏好域与注入服务，不访问真实 CloudKit。
@@ -49,7 +49,7 @@ iPhone UI 流程覆盖离线新增、搜索、编辑、删除、CloudKit 引导�
 - [x] 离线状态下可打开“导出生日数据”的系统保存面板
 - [x] 取消导出不显示错误，也不写入文件
 
-Mac Catalyst 普通 UI 自动化已实际执行并 2/2 通过。Production 关键数据闭环也已在实体 iPhone 与 Mac Catalyst 上完成；下文 Development 完整矩阵及系统推送、通知、生物识别等条目仍保持“未验证”。
+Mac Catalyst 普通 UI 自动化已实际执行并 4/4 通过。Production 关键数据闭环也已在实体 iPhone 与 Mac Catalyst 上完成；下文 Development 完整矩阵及系统推送、通知、生物识别等条目仍保持“未验证”。
 
 ## 构建与包内容检查
 

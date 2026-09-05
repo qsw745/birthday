@@ -630,7 +630,7 @@ iPhone 使用系统分享/文件面板，Mac 使用系统保存面板。取消�
 
 `swift test --filter BirthdayModelContainerMigrationTests`
 
-- [ ] **Step 2：运行双平台构建与测试**
+- [x] **Step 2：运行双平台构建与测试**
 
 运行：
 

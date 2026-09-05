@@ -9,45 +9,82 @@ struct BirthdayDetailView: View {
 
   var body: some View {
     ScrollView {
-      VStack(alignment: .leading, spacing: 22) {
-        VStack(alignment: .leading, spacing: 14) {
-          Image(systemName: "gift.fill")
-            .font(.system(size: 30, weight: .semibold))
+      VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 18) {
+          Text(String(record.name.prefix(1)))
+            .font(.system(size: 30, weight: .medium, design: .rounded))
             .foregroundStyle(ModernAirTheme.tide)
-            .frame(width: 64, height: 64)
-            .background(ModernAirTheme.glacier, in: Circle())
+            .frame(width: 72, height: 72)
+            .background(ModernAirTheme.tide.opacity(0.08), in: Circle())
+            .overlay {
+              Circle()
+                .trim(from: 0.04, to: 0.3)
+                .stroke(ModernAirTheme.moon, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .rotationEffect(.degrees(-85))
+                .padding(-3)
+            }
+            .accessibilityHidden(true)
 
-          Text("生日详情")
+          VStack(alignment: .leading, spacing: 7) {
+            Text("生日详情")
+              .font(.caption.weight(.medium))
+              .foregroundStyle(ModernAirTheme.secondaryInk)
+            Text(record.name)
+              .font(.system(.largeTitle, design: .rounded, weight: .bold))
+              .foregroundStyle(ModernAirTheme.ink)
+              .fixedSize(horizontal: false, vertical: true)
+          }
+        }
+
+        VStack(alignment: .leading, spacing: 12) {
+          Label("下次生日", systemImage: "calendar")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(ModernAirTheme.tide)
+
+          Text(nextDateText)
+            .font(.system(.title2, design: .rounded, weight: .semibold))
+            .monospacedDigit()
+            .foregroundStyle(ModernAirTheme.ink)
+            .fixedSize(horizontal: false, vertical: true)
+
+          Text("农历 \(lunarText)")
+            .font(.subheadline)
+            .foregroundStyle(ModernAirTheme.secondaryInk)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(ModernAirTheme.tide.opacity(0.06), in: RoundedRectangle(cornerRadius: 20))
+
+        VStack(alignment: .leading, spacing: 16) {
+          Text("提醒安排")
             .font(.caption.weight(.semibold))
             .foregroundStyle(ModernAirTheme.secondaryInk)
-            .textCase(.uppercase)
-
-          Text(record.name)
-            .font(.system(.largeTitle, design: .rounded, weight: .bold))
-            .foregroundStyle(ModernAirTheme.ink)
+          detailRow("提醒时间", value: reminderTimeText, symbol: "clock")
+          Divider().overlay(ModernAirTheme.outline.opacity(0.5))
+          detailRow("本地通知", value: notificationText, symbol: "bell")
         }
-
-        VStack(spacing: 0) {
-          detailRow("农历生日", value: lunarText)
-          Divider()
-          detailRow("下次公历", value: nextDateText)
-          Divider()
-          detailRow("提醒时间", value: reminderTimeText)
-          Divider()
-          detailRow("本地通知", value: notificationText)
-        }
-        .padding(.horizontal, 18)
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .modernAirSurface(radius: 20)
 
-        HStack(spacing: 12) {
-          Button("编辑", action: edit)
-            .buttonStyle(.borderedProminent)
-            .tint(ModernAirTheme.tide)
-            .keyboardShortcut(.return, modifiers: [])
+        VStack(spacing: 10) {
+          Button(action: edit) {
+            Label("编辑", systemImage: "pencil")
+              .frame(maxWidth: .infinity, minHeight: 30)
+          }
+          .buttonStyle(.borderedProminent)
+          .tint(ModernAirTheme.tide)
+          .keyboardShortcut(.return, modifiers: [])
 
-          Button("删除", role: .destructive, action: requestDelete)
-            .buttonStyle(.bordered)
+          Button(role: .destructive, action: requestDelete) {
+            Label("删除", systemImage: "trash")
+              .frame(maxWidth: .infinity, minHeight: 32)
+          }
+          .buttonStyle(.borderless)
+          .foregroundStyle(.red)
         }
+        .controlSize(.large)
+        .buttonBorderShape(.roundedRectangle(radius: 12))
       }
       .frame(maxWidth: 420, alignment: .leading)
       .padding(28)
@@ -55,22 +92,27 @@ struct BirthdayDetailView: View {
     .accessibilityIdentifier("birthdayDetail-\(record.id.uuidString)")
   }
 
-  private func detailRow(_ label: String, value: String) -> some View {
-    HStack(alignment: .firstTextBaseline, spacing: 16) {
-      Text(label)
-        .foregroundStyle(ModernAirTheme.secondaryInk)
-      Spacer(minLength: 12)
-      Text(value)
-        .multilineTextAlignment(.trailing)
-        .foregroundStyle(ModernAirTheme.ink)
+  private func detailRow(_ label: String, value: String, symbol: String) -> some View {
+    HStack(alignment: .top, spacing: 12) {
+      Image(systemName: symbol)
+        .foregroundStyle(ModernAirTheme.tide)
+        .frame(width: 20, height: 20)
+        .accessibilityHidden(true)
+      VStack(alignment: .leading, spacing: 5) {
+        Text(label)
+          .font(.caption)
+          .foregroundStyle(ModernAirTheme.secondaryInk)
+        Text(value)
+          .font(.body.weight(.medium))
+          .foregroundStyle(ModernAirTheme.ink)
+          .fixedSize(horizontal: false, vertical: true)
+      }
     }
-    .font(.body)
-    .padding(.vertical, 15)
+    .accessibilityElement(children: .combine)
   }
 
   private var lunarText: String {
-    let birthday = record.lunarBirthday
-    return "\(birthday.isLeapMonth ? "闰" : "")\(birthday.month) 月 \(birthday.day) 日"
+    LunarBirthdayText.string(for: record.lunarBirthday)
   }
 
   private var nextDateText: String {

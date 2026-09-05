@@ -72,7 +72,7 @@ struct BirthdayListView: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(ModernAirTheme.mist.ignoresSafeArea())
-    .navigationTitle("全部")
+    .navigationTitle(selectRecord == nil ? "全部" : "生日簿")
     .searchable(text: $query, prompt: "搜索姓名")
     .background {
       SearchFieldAccessibilityIdentifier(
@@ -144,12 +144,23 @@ struct BirthdayListView: View {
       } else {
         if let selectRecord {
           BirthdayListRow(record: record, timeZone: timeZone, isDesktop: true)
-            .padding(.horizontal, 8)
-            .frame(minHeight: 58)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .frame(minHeight: 84)
             .background(
               desktopRowBackground(for: record.id),
               in: RoundedRectangle(cornerRadius: 12, style: .continuous)
             )
+            .overlay {
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(
+                  desktopSelectionID == record.id ? ModernAirTheme.tide.opacity(0.28) : .clear,
+                  lineWidth: 1
+                )
+            }
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
             .contentShape(Rectangle())
             .onTapGesture(count: 2) {
               editRecord?(record)
@@ -208,7 +219,7 @@ struct BirthdayListView: View {
   }
 
   private func desktopRowBackground(for id: UUID) -> Color {
-    if desktopSelectionID == id { return ModernAirTheme.glacier }
+    if desktopSelectionID == id { return ModernAirTheme.tide.opacity(0.08) }
     if hoveredRecordID == id { return ModernAirTheme.tide.opacity(0.08) }
     return .clear
   }
@@ -386,12 +397,19 @@ private struct BirthdayListRow: View {
 
   var body: some View {
     HStack(alignment: .center, spacing: 14) {
-      Image(systemName: "gift.fill")
-        .font(.body.weight(.semibold))
-        .foregroundStyle(ModernAirTheme.tide)
-        .frame(width: 36, height: 36)
-        .background(ModernAirTheme.glacier, in: Circle())
-        .accessibilityHidden(true)
+      Group {
+        if isDesktop {
+          Text(String(record.name.prefix(1)))
+            .font(.system(.title3, design: .rounded, weight: .medium))
+        } else {
+          Image(systemName: "gift.fill")
+            .font(.body.weight(.semibold))
+        }
+      }
+      .foregroundStyle(ModernAirTheme.tide)
+      .frame(width: isDesktop ? 44 : 36, height: isDesktop ? 44 : 36)
+      .background(ModernAirTheme.glacier, in: Circle())
+      .accessibilityHidden(true)
 
       VStack(alignment: .leading, spacing: 4) {
         Text(record.name)
@@ -450,19 +468,7 @@ private struct BirthdayListRow: View {
   }
 
   private var lunarText: String {
-    let months = ["正", "二", "三", "四", "五", "六", "七", "八", "九", "十", "冬", "腊"]
-    let days = [
-      "初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九", "初十",
-      "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
-      "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十",
-    ]
-    let month =
-      months.indices.contains(record.lunarBirthday.month - 1)
-      ? months[record.lunarBirthday.month - 1] : "第\(record.lunarBirthday.month)"
-    let day =
-      days.indices.contains(record.lunarBirthday.day - 1)
-      ? days[record.lunarBirthday.day - 1] : "第\(record.lunarBirthday.day)日"
-    return "\(record.lunarBirthday.isLeapMonth ? "闰" : "")\(month)月\(day)"
+    LunarBirthdayText.string(for: record.lunarBirthday)
   }
 
   private var syncText: String {

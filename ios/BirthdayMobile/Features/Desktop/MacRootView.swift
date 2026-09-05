@@ -108,26 +108,20 @@ struct MacRootView: View {
     .focusedSceneValue(
       \.macCommandHandler,
       MacCommandHandler { command in
+        guard model.macNavigation.deleteCandidateID == nil else { return }
         model.reduceMacNavigation(.command(command))
       }
     )
     .sheet(isPresented: editorPresentedBinding) {
       desktopEditor
     }
-    .confirmationDialog(
-      "确认删除",
+    .birthdayDeleteConfirmation(
       isPresented: deleteConfirmationPresented,
-      titleVisibility: .visible,
-      presenting: deleteCandidate
-    ) { record in
-      Button("确认删除", role: .destructive) {
-        delete(record)
-      }
-      Button("取消", role: .cancel) {
-        model.reduceMacNavigation(.cancelDelete)
-      }
-    } message: { record in
-      Text(LocalOnlyStatusPresentation.deletionConfirmation(name: record.name))
+      message: deleteCandidate.map {
+        LocalOnlyStatusPresentation.deletionConfirmation(name: $0.name)
+      } ?? ""
+    ) {
+      if let record = deleteCandidate { delete(record) }
     }
     .alert("删除失败", isPresented: $isShowingDeleteFailure) {
       Button("知道了", role: .cancel) {}
@@ -158,10 +152,13 @@ struct MacRootView: View {
 
   private var sidebar: some View {
     List(selection: sectionBinding) {
-      Label("日历", systemImage: "calendar")
-        .tag(AppModel.Tab.calendar)
-      Label("全部生日", systemImage: "list.bullet")
-        .tag(AppModel.Tab.birthdays)
+      Section("生日") {
+        Label("日历", systemImage: "calendar")
+          .tag(AppModel.Tab.calendar)
+        Label("全部生日", systemImage: "gift")
+          .badge(model.records.count)
+          .tag(AppModel.Tab.birthdays)
+      }
 
       if model.isServerBindingAvailable || model.hasSyncConflicts {
         Label("冲突", systemImage: "arrow.triangle.2.circlepath")
@@ -175,8 +172,19 @@ struct MacRootView: View {
       }
     }
     .listStyle(.sidebar)
+    .safeAreaInset(edge: .bottom) {
+      HStack(spacing: 8) {
+        Image(systemName: "moonphase.waning.crescent")
+          .foregroundStyle(ModernAirTheme.tide)
+        Text("记得每一个重要的日子")
+          .font(.caption)
+          .foregroundStyle(ModernAirTheme.secondaryInk)
+      }
+      .padding(18)
+      .frame(maxWidth: .infinity, alignment: .leading)
+    }
     .navigationTitle("岁时")
-    .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 260)
+    .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
     .accessibilityIdentifier("macSidebar")
   }
 
@@ -223,6 +231,7 @@ struct MacRootView: View {
         }
       }
     }
+    .navigationSplitViewColumnWidth(min: 420, ideal: 500, max: 720)
   }
 
   private var detailContent: some View {
@@ -247,7 +256,7 @@ struct MacRootView: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(ModernAirTheme.detailCanvas.ignoresSafeArea())
-    .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
+    .navigationSplitViewColumnWidth(min: 280, ideal: 300, max: 340)
   }
 
   @ViewBuilder

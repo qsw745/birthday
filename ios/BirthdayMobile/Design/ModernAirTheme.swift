@@ -30,6 +30,10 @@ enum ModernAirTheme {
     light: UIColor(red: 73 / 255, green: 96 / 255, blue: 100 / 255, alpha: 1),
     dark: UIColor(red: 180 / 255, green: 199 / 255, blue: 201 / 255, alpha: 1)
   )
+  static let selectedInk = dynamicColor(
+    light: .white,
+    dark: UIColor(red: 14 / 255, green: 27 / 255, blue: 29 / 255, alpha: 1)
+  )
   static let surface = dynamicColor(
     light: UIColor(red: 250 / 255, green: 253 / 255, blue: 253 / 255, alpha: 1),
     dark: UIColor(red: 26 / 255, green: 39 / 255, blue: 42 / 255, alpha: 1)

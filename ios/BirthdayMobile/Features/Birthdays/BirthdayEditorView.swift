@@ -49,12 +49,42 @@ struct BirthdayEditorView: View {
     NavigationStack {
       ScrollViewReader { proxy in
         Form {
+          #if targetEnvironment(macCatalyst)
+            Section {
+              HStack(spacing: 14) {
+                Image(systemName: "gift")
+                  .font(.system(size: 24, weight: .medium))
+                  .foregroundStyle(ModernAirTheme.tide)
+                  .frame(width: 52, height: 52)
+                  .background(ModernAirTheme.tide.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+                  .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 6) {
+                  Text(editor.draft.name.isEmpty ? "新的生日" : editor.draft.name)
+                    .font(.system(.title2, design: .rounded, weight: .semibold))
+                    .foregroundStyle(ModernAirTheme.ink)
+                  Text("农历\(LunarBirthdayText.string(for: editor.draft.lunarBirthday))")
+                    .font(.subheadline)
+                    .foregroundStyle(ModernAirTheme.secondaryInk)
+                }
+              }
+              .padding(.vertical, 4)
+              .accessibilityElement(children: .combine)
+            }
+            .listRowBackground(Color.clear)
+          #endif
+
           Section {
-            TextField("姓名", text: $editor.draft.name)
-              .focused($focusedField, equals: .name)
-              .textContentType(.name)
-              .submitLabel(.done)
-              .accessibilityIdentifier("birthdayNameField")
+            HStack {
+              #if targetEnvironment(macCatalyst)
+                Text("姓名")
+                  .frame(width: 80, alignment: .leading)
+              #endif
+              TextField("姓名", text: $editor.draft.name)
+                .focused($focusedField, equals: .name)
+                .textContentType(.name)
+                .submitLabel(.done)
+                .accessibilityIdentifier("birthdayNameField")
+            }
 
             LunarDatePicker(value: $editor.draft.lunarBirthday)
 
@@ -62,6 +92,9 @@ struct BirthdayEditorView: View {
           } header: {
             Text("基本信息")
           } footer: {
+            #if targetEnvironment(macCatalyst)
+              Text("每年的公历日期会按农历自动换算。")
+            #endif
             validationMessage(in: .basicInformation)
           }
           .id(BirthdayEditorModel.SectionLocation.basicInformation)
@@ -180,18 +213,6 @@ struct BirthdayEditorView: View {
           .accessibilityIdentifier("saveBirthdayButton")
         }
       }
-      .confirmationDialog(
-        "确认删除",
-        isPresented: $isShowingDeleteConfirmation,
-        titleVisibility: .visible
-      ) {
-        Button("确认删除", role: .destructive) {
-          deleteRecord()
-        }
-        Button("取消", role: .cancel) {}
-      } message: {
-        Text(deleteConfirmationMessage)
-      }
       .alert("删除失败", isPresented: $isShowingDeleteFailure) {
         Button("重试") {
           deleteRecord()
@@ -224,6 +245,11 @@ struct BirthdayEditorView: View {
     .tint(ModernAirTheme.tide)
     .interactiveDismissDisabled(isInteractionLocked)
     .desktopEditorSizing()
+    .birthdayDeleteConfirmation(
+      isPresented: $isShowingDeleteConfirmation,
+      message: deleteConfirmationMessage,
+      confirm: deleteRecord
+    )
   }
 
   @ViewBuilder
@@ -317,30 +343,40 @@ private extension View {
 struct LunarDatePicker: View {
   @Binding var value: LunarBirthday
 
-  private let monthNames = ["正月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "冬月", "腊月"]
-  private let dayNames = [
-    "初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九", "初十",
-    "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
-    "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十",
-  ]
-
   var body: some View {
+    #if targetEnvironment(macCatalyst)
+      HStack {
+        Text("农历生日")
+          .frame(width: 80, alignment: .leading)
+        datePickers
+          .pickerStyle(.menu)
+          .labelsHidden()
+        Spacer(minLength: 0)
+      }
+    #else
+      datePickers
+        .pickerStyle(.wheel)
+        .frame(height: 140)
+        .accessibilityElement(children: .contain)
+    #endif
+  }
+
+  private var datePickers: some View {
     HStack(spacing: 12) {
       Picker("农历月份", selection: $value.month) {
         ForEach(1...12, id: \.self) { month in
-          Text(monthNames[month - 1]).tag(month)
+          Text(LunarBirthdayText.months[month - 1]).tag(month)
         }
       }
+      .accessibilityIdentifier("lunarMonthPicker")
 
       Picker("农历日期", selection: $value.day) {
         ForEach(1...30, id: \.self) { day in
-          Text(dayNames[day - 1]).tag(day)
+          Text(LunarBirthdayText.days[day - 1]).tag(day)
         }
       }
+      .accessibilityIdentifier("lunarDayPicker")
     }
-    .pickerStyle(.wheel)
-    .frame(height: 140)
-    .accessibilityElement(children: .contain)
   }
 }
 

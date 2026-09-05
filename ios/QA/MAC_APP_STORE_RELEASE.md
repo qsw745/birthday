@@ -39,7 +39,7 @@
 | Apple 工程、隐私、元数据、截图与生产冒烟隔离契约 | 20/20 通过 |
 | iPhone 与 Mac Catalyst Debug 签名构建 | 通过；两端开发描述文件、CloudKit 容器和平台 APS 权限均已从实包读回 |
 | iPhone 模拟器完整方案 | 23/23 通过，包含 14 个应用测试和 9 个离线/UI 流程 |
-| Mac Catalyst 普通 UI 方案 | 2/2 通过，真实 Runner 覆盖三栏、右键菜单、删除确认与导出入口 |
+| Mac Catalyst 普通 UI 方案 | 4/4 通过，真实 Runner 覆盖三栏、右键菜单、居中删除确认、编辑取消与导出入口 |
 | Production CloudKit 真实关键闭环 | 通过；实体 iPhone 新增 → Mac、Mac 修改 → iPhone、iPhone 删除墓碑 → Mac，最终清理并由全新 Mac 进程确认不存在 |
 | iOS Release 无签名构建 | 通过；包内版本 `1.1.0 (2)`，服务器地址为空 |
 | Mac Catalyst Release 无签名构建 | 通过；包内版本 `1.0.0 (2)`，二进制包含 `arm64` 与 `x86_64`，服务器地址为空 |

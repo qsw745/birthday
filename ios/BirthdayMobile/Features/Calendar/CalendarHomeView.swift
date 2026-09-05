@@ -16,6 +16,8 @@ struct CalendarHomeView: View {
 
   private let weekSymbols = ["一", "二", "三", "四", "五", "六", "日"]
 
+  private var isDesktop: Bool { selectRecord != nil }
+
   init(
     model: AppModel,
     showsAddToolbarButton: Bool = true,
@@ -65,17 +67,17 @@ struct CalendarHomeView: View {
           }
         }
         .padding(.horizontal, layout.pageHorizontalPadding)
-        .padding(.top, 12)
+        .padding(.top, isDesktop ? 24 : 12)
         .padding(.bottom, 28)
       }
       .contentMargins(
         .bottom,
-        max(120, proxy.safeAreaInsets.bottom + 96),
+        isDesktop ? 24 : max(120, proxy.safeAreaInsets.bottom + 96),
         for: .scrollContent
       )
     }
     .background(ModernAirTheme.mist.ignoresSafeArea())
-    .navigationTitle("岁时")
+    .navigationTitle(isDesktop ? "月历" : "岁时")
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
       if showsAddToolbarButton {
@@ -101,7 +103,36 @@ struct CalendarHomeView: View {
     }
   }
 
+  @ViewBuilder
   private var monthHeader: some View {
+    if isDesktop {
+      HStack(alignment: .center, spacing: 16) {
+        VStack(alignment: .leading, spacing: 6) {
+          Text("生日月历")
+            .font(.caption.weight(.medium))
+            .foregroundStyle(ModernAirTheme.secondaryInk)
+          Text(monthTitle)
+            .font(.system(size: 28, weight: .semibold, design: .rounded))
+            .foregroundStyle(ModernAirTheme.ink)
+            .monospacedDigit()
+          if let monthSubtitle {
+            Text(monthSubtitle)
+              .font(.subheadline)
+              .foregroundStyle(ModernAirTheme.secondaryInk)
+          }
+        }
+        Spacer(minLength: 0)
+        HStack(spacing: 6) {
+          monthNavigationButton(title: "上个月", systemImage: "chevron.left", monthOffset: -1)
+          monthNavigationButton(title: "下个月", systemImage: "chevron.right", monthOffset: 1)
+        }
+      }
+    } else {
+      mobileMonthHeader
+    }
+  }
+
+  private var mobileMonthHeader: some View {
     HStack(spacing: 12) {
       monthNavigationButton(
         title: "上个月",
@@ -151,10 +182,11 @@ struct CalendarHomeView: View {
     } label: {
       Image(systemName: systemImage)
         .font(.body.weight(.semibold))
-        .frame(width: 44, height: 44)
-        .background(ModernAirTheme.glacier, in: Circle())
+        .frame(width: isDesktop ? 36 : 44, height: isDesktop ? 36 : 44)
+        .background(isDesktop ? ModernAirTheme.surface : ModernAirTheme.glacier, in: Circle())
     }
     .foregroundStyle(ModernAirTheme.tide)
+    .buttonStyle(.plain)
     .accessibilityLabel(title)
   }
 
@@ -200,7 +232,7 @@ struct CalendarHomeView: View {
         ForEach(weekSymbols, id: \.self) { symbol in
           Text(symbol)
             .font(.caption.weight(.semibold))
-            .foregroundStyle(ModernAirTheme.secondaryInk)
+            .foregroundStyle(symbol == "六" || symbol == "日" ? ModernAirTheme.tide : ModernAirTheme.secondaryInk)
             .frame(
               minWidth: SevenColumnGridMetrics.minimumCellWidth,
               maxWidth: .infinity,
@@ -242,7 +274,7 @@ struct CalendarHomeView: View {
     } label: {
       VStack(spacing: 1) {
         ZStack {
-          if hasBirthday || isSelected {
+          if hasBirthday || (isSelected && !isDesktop) {
             Circle()
               .trim(from: 0.08, to: hasBirthday ? 0.88 : 0.72)
               .stroke(
@@ -268,13 +300,13 @@ struct CalendarHomeView: View {
             .monospacedDigit()
             .lineLimit(1)
             .minimumScaleFactor(0.65)
-            .foregroundStyle(ModernAirTheme.ink)
+            .foregroundStyle(isDesktop && isSelected ? ModernAirTheme.selectedInk : ModernAirTheme.ink)
         }
 
         if hasBirthday {
           Image(systemName: "gift.fill")
             .font(.system(size: birthdayMarkerSize, weight: .semibold))
-            .foregroundStyle(ModernAirTheme.tide)
+            .foregroundStyle(isDesktop && isSelected ? ModernAirTheme.selectedInk : ModernAirTheme.tide)
             .accessibilityHidden(true)
         } else {
           Color.clear.frame(height: birthdayMarkerSize)
@@ -286,8 +318,17 @@ struct CalendarHomeView: View {
         minHeight: dayCellMinimumHeight
       )
       .contentShape(Rectangle())
+      .background {
+        if isDesktop && isSelected {
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(ModernAirTheme.tide)
+        } else if isDesktop && hasBirthday {
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(ModernAirTheme.moon.opacity(0.09))
+        }
+      }
       .overlay {
-        if isSelected {
+        if isSelected && !isDesktop {
           RoundedRectangle(cornerRadius: 12, style: .continuous)
             .stroke(ModernAirTheme.ink.opacity(0.28), lineWidth: 1)
         }
@@ -376,7 +417,7 @@ struct CalendarHomeView: View {
         .font(.body.weight(.semibold))
         .foregroundStyle(ModernAirTheme.tide)
         .frame(width: 34, height: 34)
-        .background(ModernAirTheme.glacier, in: Circle())
+        .background(ModernAirTheme.tide.opacity(0.08), in: Circle())
         .accessibilityHidden(true)
 
       VStack(alignment: .leading, spacing: 3) {
@@ -396,11 +437,18 @@ struct CalendarHomeView: View {
 
     if let selectRecord {
       row
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 12)
         .background(
           desktopRowBackground(for: record.id),
           in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
+        .overlay {
+          RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(
+              desktopSelectionID == record.id ? ModernAirTheme.tide.opacity(0.28) : .clear,
+              lineWidth: 1
+            )
+        }
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
           editRecord?(record)
@@ -428,7 +476,7 @@ struct CalendarHomeView: View {
   }
 
   private func desktopRowBackground(for id: UUID) -> Color {
-    if desktopSelectionID == id { return ModernAirTheme.glacier }
+    if desktopSelectionID == id { return ModernAirTheme.tide.opacity(0.08) }
     if hoveredRecordID == id { return ModernAirTheme.tide.opacity(0.08) }
     return .clear
   }
@@ -521,17 +569,7 @@ struct CalendarHomeView: View {
   }
 
   private func lunarText(_ birthday: LunarBirthday) -> String {
-    let months = ["正", "二", "三", "四", "五", "六", "七", "八", "九", "十", "冬", "腊"]
-    let days = [
-      "初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九", "初十",
-      "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
-      "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十",
-    ]
-    let month =
-      months.indices.contains(birthday.month - 1)
-      ? months[birthday.month - 1] : "第\(birthday.month)"
-    let day = days.indices.contains(birthday.day - 1) ? days[birthday.day - 1] : "第\(birthday.day)日"
-    return "\(birthday.isLeapMonth ? "闰" : "")\(month)月\(day)"
+    LunarBirthdayText.string(for: birthday)
   }
 
   private func selectDefaultDayIfNeeded() {
