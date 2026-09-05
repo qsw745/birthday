@@ -657,7 +657,7 @@ iPhone 使用系统分享/文件面板，Mac 使用系统保存面板。取消�
 
 真实设备未完成的项目必须标为“未验证”，不能用单元测试替代。
 
-- [ ] **Step 4：检查架构、隐私和包内容**
+- [x] **Step 4：检查架构、隐私和包内容**
 
 检查 Mac Release 架构包含计划的 `arm64` 和 `x86_64`；检查应用只包含声明的 entitlements、隐私清单和资源；确认 Release 不连接 `qisw.top/api/mobile`。
 
@@ -682,7 +682,7 @@ iPhone 使用系统分享/文件面板，Mac 使用系统保存面板。取消�
 
 确认 iOS 1.1 与 macOS 1.0 的版本/构建号未冲突，生成 Release 构建、隔离 UI 截图和审核说明草稿。验证所有截图无真实姓名、生日、邮箱或账号。
 
-- [ ] **Step 2：请求生产 CloudKit 授权**
+- [x] **Step 2：请求生产 CloudKit 授权**
 
 获得确认后才创建/绑定 `iCloud.top.qisw.birthday`、部署生产 Schema 和索引。部署后用生产容器进行一次真实 iPhone/Mac 双端验证；失败时停止，不上传构建。
 

@@ -2,18 +2,20 @@
 
 记录日期：2026-09-05  
 当前分支：`codex/ios-local-first`  
-范围：本地开发构建、模拟环境、开发签名读回及 Production CloudKit Schema 部署。没有创建或更新发布描述文件、没有上传构建、没有修改 App Store Connect。
+范围：本地开发构建、模拟环境、开发签名读回、Production CloudKit Schema 部署，以及隔离 App ID 下的真实 iPhone ↔ Mac Production 关键数据闭环。没有创建或更新发布描述文件、没有上传构建、没有修改 App Store Connect。
 
 ## 状态结论
 
 - 自动化核心、服务、迁移、iPhone 应用和 UI 回归：通过。
 - iOS 与 Mac Catalyst Release 无签名构建：通过。
 - iPhone 与 Mac Catalyst Debug 开发签名构建：通过；两端 CloudKit 与平台 APS 权限已从实包和描述文件读回。
-- Production CloudKit Schema：部署成功并从 Production 环境读回；真实 iPhone ↔ Mac 数据流仍未验证。
+- Production CloudKit Schema：部署成功并从 Production 环境读回。
+- Production CloudKit 真实关键闭环：通过；iPhone 新增 → Mac 下载、Mac 修改 → iPhone 下载、iPhone 删除墓碑 → Mac 删除均已验证，上传结束时待同步数为 0。
 - Mac Catalyst 双架构与目标级资源检查：通过。
-- Mac Catalyst UI 测试代码无签名编译：通过；实际 Runner 未执行。
+- Mac Catalyst 普通 UI Runner：2/2 通过。
 - CloudKit 开发环境真实 iPhone ↔ Mac 双端矩阵：未验证。
-- 最终签名归档、生产 CloudKit 与 TestFlight 安装：未验证。
+- Production 系统推送、完整离线冲突/账号切换/通知/生物识别矩阵：未验证。
+- 最终发布签名归档、上传及 TestFlight 安装：未验证。
 
 自动化中使用的 fake CloudKit、模拟器和无签名构建不能替代真实 Apple ID、CloudKit 环境、系统推送、通知、生物识别或 TestFlight 验收。
 
@@ -21,15 +23,16 @@
 
 | 检查 | 结果 | 边界 |
 | --- | --- | --- |
-| `npm test` | 338/338 通过 | Node 契约、服务和冒烟回归 |
-| `npm run test:mobile` | 264/264 通过 | 移动端 API 与契约回归 |
-| Apple 三组契约 | 18/18 通过 | 工程、隐私、元数据、双平台版本与截图资源 |
-| `swift test` | 333/333 通过 | BirthdayCore 本地、迁移、CloudKit 状态机与导出 |
+| `npm test` | 340/340 通过 | Node 契约、服务和冒烟回归 |
+| `npm run test:mobile` | 266/266 通过 | 移动端 API 与契约回归 |
+| Apple 三组契约 | 20/20 通过 | 工程、隐私、元数据、双平台版本、截图资源与生产冒烟隔离 |
+| `swift test` | 334/334 通过 | BirthdayCore 本地、迁移、CloudKit 状态机、回调错误传播与导出 |
 | `swift test --filter BirthdayModelContainerMigrationTests` | 5/5 通过 | 固定 V1/V2 夹具与 V3 迁移 |
-| iPhone 模拟器 `BirthdayMobile` 测试方案 | 22/22 通过，0 失败、0 跳过 | iPhone 17 Pro、iOS 26.5；13 个应用单元测试与 9 个 UI 流程 |
+| iPhone 模拟器 `BirthdayMobile` 测试方案 | 23/23 通过，0 失败、0 跳过 | iPhone 17 Pro Max、iOS 26.5；14 个应用单元测试与 9 个 UI 流程 |
 | iOS Release 无签名构建 | 通过 | generic iOS Simulator；不是可提交归档 |
 | Mac Catalyst Release 无签名构建 | 通过 | generic Mac Catalyst；不是可提交归档 |
-| Mac Catalyst `build-for-testing` | 通过 | UI Runner 和测试源完成编译，未实际启动 Runner |
+| Mac Catalyst 普通 UI 方案 | 2/2 通过 | 真实 Mac Catalyst Runner；三栏、右键菜单、删除确认和本地导出入口 |
+| Production CloudKit 隔离冒烟 | 4 段真实设备流程通过 | 实体 iPhone 17 Pro Max 与本机 Mac Catalyst；只使用手动同步，不代表系统推送已验证 |
 
 iPhone UI 流程覆盖离线新增、搜索、编辑、删除、CloudKit 引导与设置、账号变化确认、旧服务器清理失败保护和快照导入保护。测试使用内存 SwiftData、测试偏好域与注入服务，不访问真实 CloudKit。
 
@@ -46,7 +49,7 @@ iPhone UI 流程覆盖离线新增、搜索、编辑、删除、CloudKit 引导�
 - [x] 离线状态下可打开“导出生日数据”的系统保存面板
 - [x] 取消导出不显示错误，也不写入文件
 
-Mac Catalyst 实际 UI 自动化未执行。开发描述文件现已可用，但实体 iPhone 仍不可用，生产 CloudKit 尚未部署，不能据此把真实双端矩阵标为通过。
+Mac Catalyst 普通 UI 自动化已实际执行并 2/2 通过。Production 关键数据闭环也已在实体 iPhone 与 Mac Catalyst 上完成；下文 Development 完整矩阵及系统推送、通知、生物识别等条目仍保持“未验证”。
 
 ## 构建与包内容检查
 
@@ -61,6 +64,8 @@ Mac Catalyst 实际 UI 自动化未执行。开发描述文件现已可用，但
 - [x] 源 entitlements 声明计划内 CloudKit 容器、CloudKit 服务、键值存储与平台 APS 权限；Mac 另含沙盒和网络客户端能力
 - [x] iPhone 开发描述文件 UUID `165e8217-6084-4d9c-a1e4-c97dd6442f71`，实包和描述文件均读回 `aps-environment=development`
 - [x] Mac Catalyst 开发描述文件 UUID `a795de68-02a8-43d1-9be5-7686037d9354`，实包和描述文件均读回 `com.apple.developer.aps-environment=development`
+- [x] Production 冒烟使用独立 bundle ID `top.qisw.birthday.cloudkitsmoke`；iPhone 开发描述文件 UUID `dd1feb0c-2dfb-4402-8174-c51f0f7bd449`，Mac Catalyst 开发描述文件 UUID `d418d738-2ffe-498d-90da-5af0c021e52a`
+- [x] Production 冒烟配置复用 Release 的空服务器基址，只在对应 UI 测试目标中启用，普通 Debug/Release 测试不会访问真实 Production CloudKit
 - [x] 包内隐私清单读回为：不跟踪、不声明收集数据、Required Reason API 仅 UserDefaults `CA92.1`
 - [ ] 最终签名归档的实际 entitlements、描述文件、Privacy Report 和 Payload 未验证
 - [ ] Release 运行时网络抓包未验证；当前仅由空服务器基址、组装测试和静态字符串检查证明不会启动历史服务器同步
@@ -84,7 +89,22 @@ Mac Catalyst 实际 UI 自动化未执行。开发描述文件现已可用，但
 | 两端生物识别和密码回退 | 未验证 | Face ID / Touch ID / 密码实际结果 |
 | 两端数据导出 | 未验证 | 文件名、JSON 内容、取消与失败处理 |
 
-当前可见设备清单中两台 iPhone 都为 `unavailable`。开发描述文件已就绪，但没有可连接的实体 iPhone，因此本次仍未执行真实双端矩阵。
+实体 iPhone 已通过 Mac 直连、配对、解锁并用于下文 Production 关键闭环。上表要求的是 Development 环境的完整异常与设备能力矩阵，本轮没有执行，不能由 Production 关键闭环或自动化替代。
+
+## Production CloudKit 真实关键闭环
+
+测试设备为实体 iPhone 17 Pro Max（iOS 27.0，24A5430a）和本机 Mac Catalyst（macOS 27.0），两端登录同一测试 iCloud 账号，使用 `iCloud.top.qisw.birthday` 的私有数据库及隔离 bundle ID `top.qisw.birthday.cloudkitsmoke`。
+
+| 场景 | 结果 | 证据边界 |
+| --- | --- | --- |
+| iPhone 新增 → Mac 到达 | 通过 | iPhone 创建虚构记录并手动同步；全新 Mac 进程从 Production 下载成功 |
+| Mac 修改 → iPhone 到达 | 通过 | Mac 将虚构记录名称由 `云端验收-68F2A` 改为 `云端验收-68F2B`；iPhone 全新进程下载到修改值 |
+| iPhone 删除 → Mac 不复活 | 通过 | iPhone 上传删除墓碑；Mac 全新进程确认 A/B 两个名称均不存在 |
+| 待上传队列收敛 | 通过 | 每次上传完成后诊断均为 `pending=0` 且状态为已同步 |
+| 故障修复后的重新拉取 | 通过 | 修复 CloudKit 整数布尔值解码后，以全新 iPhone 进程重新下载既有 Production 记录成功 |
+| 冒烟数据清理 | 通过 | 删除诊断阶段遗留的 2 条重复虚构记录并上传墓碑；全新 Mac 进程再次确认无 A/B 记录 |
+
+本闭环通过设置页“立即同步”触发并等待本轮同步完成，只证明 Production 私有数据库的上传、下载、修改、删除墓碑和队列收敛。没有验证静默推送/系统推送触发、后台到达时延、空间不足、账号切换、离线并发冲突、通知或生物识别。
 
 ## CloudKit Schema 部署证据
 
@@ -94,16 +114,17 @@ Mac Catalyst 实际 UI 自动化未执行。开发描述文件现已可用，但
 - [x] 类型：字符串 1 个、64 位整数 7 个、日期时间 3 个，与 `CloudRecordCodec` 白名单一致
 - [x] 自定义索引：0；当前实现只通过 `CKSyncEngine` 和专用记录区增量变更，不执行字段查询
 - [x] 控制台部署结果：`Changes Deployed`，并在通知中读回 Schema 已提升到 Production
-- [ ] Production 真实记录区、订阅、推送和双端数据到达：未验证，不能由 Schema 部署成功替代
+- [x] Production 私有记录区的真实双端新增、下载、修改、删除墓碑和清理已验证
+- [ ] Production 订阅触发与系统推送未验证，不能由手动同步成功替代
 
 ## 进入发布准备前的阻断项
 
-- [ ] 连接可用的实体 iPhone，并准备一台可运行 Catalyst 候选的 Mac
+- [x] 连接可用的实体 iPhone，并准备一台可运行 Catalyst 候选的 Mac
 - [x] 经确认后创建并读回含 CloudKit 与 APS 权限的 iPhone/Mac Catalyst 开发描述文件
 - [x] 确认 Development/Production CloudKit 容器、记录类型、字段、索引和默认安全角色
 - [ ] 完成上面的真实双端矩阵并附上无敏感数据的证据
 - [x] 经单独确认后部署并读回 Production CloudKit Schema
-- [ ] 使用 Production 容器重复关键双端矩阵
+- [x] 使用 Production 容器完成新增、修改、删除墓碑和队列收敛的关键双端闭环
 - [ ] 生成最终签名 iOS/macOS 归档并复核 Payload、entitlements 和 Xcode Privacy Report
 - [ ] 从 TestFlight 安装上传构建后重复离线、同步、通知、锁定、导出和升级迁移验收
 
