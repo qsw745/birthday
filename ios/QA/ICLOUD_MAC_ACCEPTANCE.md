@@ -2,13 +2,14 @@
 
 记录日期：2026-09-05  
 当前分支：`codex/ios-local-first`  
-范围：本地开发构建、模拟环境和开发签名读回。没有部署生产 CloudKit、没有创建或更新发布描述文件、没有上传构建、没有修改 App Store Connect。
+范围：本地开发构建、模拟环境、开发签名读回及 Production CloudKit Schema 部署。没有创建或更新发布描述文件、没有上传构建、没有修改 App Store Connect。
 
 ## 状态结论
 
 - 自动化核心、服务、迁移、iPhone 应用和 UI 回归：通过。
 - iOS 与 Mac Catalyst Release 无签名构建：通过。
 - iPhone 与 Mac Catalyst Debug 开发签名构建：通过；两端 CloudKit 与平台 APS 权限已从实包和描述文件读回。
+- Production CloudKit Schema：部署成功并从 Production 环境读回；真实 iPhone ↔ Mac 数据流仍未验证。
 - Mac Catalyst 双架构与目标级资源检查：通过。
 - Mac Catalyst UI 测试代码无签名编译：通过；实际 Runner 未执行。
 - CloudKit 开发环境真实 iPhone ↔ Mac 双端矩阵：未验证。
@@ -85,13 +86,24 @@ Mac Catalyst 实际 UI 自动化未执行。开发描述文件现已可用，但
 
 当前可见设备清单中两台 iPhone 都为 `unavailable`。开发描述文件已就绪，但没有可连接的实体 iPhone，因此本次仍未执行真实双端矩阵。
 
+## CloudKit Schema 部署证据
+
+- [x] 容器：`iCloud.top.qisw.birthday`
+- [x] Development 与 Production 均读到 `Birthday` 记录类型
+- [x] 业务字段：`schemaVersion`、`name`、`lunarMonth`、`lunarDay`、`isLeapMonth`、`reminderTimeMinutes`、`notifyDayBefore`、`notifySameDay`、`createdAt`、`updatedAt`、`deletedAt`
+- [x] 类型：字符串 1 个、64 位整数 7 个、日期时间 3 个，与 `CloudRecordCodec` 白名单一致
+- [x] 自定义索引：0；当前实现只通过 `CKSyncEngine` 和专用记录区增量变更，不执行字段查询
+- [x] 控制台部署结果：`Changes Deployed`，并在通知中读回 Schema 已提升到 Production
+- [ ] Production 真实记录区、订阅、推送和双端数据到达：未验证，不能由 Schema 部署成功替代
+
 ## 进入发布准备前的阻断项
 
 - [ ] 连接可用的实体 iPhone，并准备一台可运行 Catalyst 候选的 Mac
 - [x] 经确认后创建并读回含 CloudKit 与 APS 权限的 iPhone/Mac Catalyst 开发描述文件
-- [ ] 确认 Development CloudKit 容器、记录类型、字段、索引和权限
+- [x] 确认 Development/Production CloudKit 容器、记录类型、字段、索引和默认安全角色
 - [ ] 完成上面的真实双端矩阵并附上无敏感数据的证据
-- [ ] 经单独确认后部署 Production CloudKit Schema，再重复关键双端矩阵
+- [x] 经单独确认后部署并读回 Production CloudKit Schema
+- [ ] 使用 Production 容器重复关键双端矩阵
 - [ ] 生成最终签名 iOS/macOS 归档并复核 Payload、entitlements 和 Xcode Privacy Report
 - [ ] 从 TestFlight 安装上传构建后重复离线、同步、通知、锁定、导出和升级迁移验收
 

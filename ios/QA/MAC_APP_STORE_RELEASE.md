@@ -8,7 +8,7 @@
 
 ## 当前结论
 
-本地发布候选和商店素材已准备，iPhone 与 Mac Catalyst 的开发描述文件已经创建并通过 Debug 实包签名读回，但尚未形成可上传的签名归档。没有部署生产 CloudKit、没有修改线上页面或 App Store Connect、没有创建或调整发布描述文件、没有上传构建、没有提交审核。
+本地发布候选和商店素材已准备，iPhone 与 Mac Catalyst 的开发描述文件已经创建并通过 Debug 实包签名读回，Production CloudKit Schema 已部署并读回，但尚未完成真实双端生产验证，也未形成可上传的签名归档。没有修改线上页面或 App Store Connect、没有创建或调整发布描述文件、没有上传构建、没有提交审核。
 
 | 项目 | 当前证据 | 状态边界 |
 | --- | --- | --- |
@@ -20,6 +20,7 @@
 | iPhone 开发描述文件 | `iOS Team Provisioning Profile: top.qisw.birthday`，UUID `165e8217-6084-4d9c-a1e4-c97dd6442f71` | 已创建；Debug 实包读回 CloudKit 与 `aps-environment=development` |
 | Mac Catalyst 开发描述文件 | `Mac Catalyst Team Provisioning Profile: top.qisw.birthday`，UUID `a795de68-02a8-43d1-9be5-7686037d9354` | 已创建；Debug 实包读回 CloudKit 与 `com.apple.developer.aps-environment=development` |
 | 发布描述文件 | 本机旧 Store 描述文件尚不含 APS 权限 | 未调整；不属于本轮开发描述文件授权 |
+| Production CloudKit | 容器 `iCloud.top.qisw.birthday`；`Birthday` 含 11 个业务字段和 6 个系统字段；0 个自定义索引 | 已部署并从 Production 环境读回；真实双端数据流尚未验证 |
 | Release 服务器地址 | `BirthdayAPIBaseURL` 为空 | 正式版不恢复历史服务器同步 |
 | 本地数据库与 iCloud | SwiftData `cloudKitDatabase` 显式为 `.none` | 本地模型不使用自动 CloudKit；同步只经过 `CKSyncEngine` |
 | 审核说明草稿 | `ios/AppStore/review-notes.md` | 尚未粘贴或提交 |
@@ -58,7 +59,7 @@
 
 - [x] 本地候选版本、Release 无签名构建、隔离截图、隐私材料和审核说明草稿
 - [x] 创建并读回 iPhone 与 Mac Catalyst 测试所需开发描述文件
-- [ ] 获得行动时确认后创建或绑定 `iCloud.top.qisw.birthday`，并部署 Production CloudKit Schema 与索引
+- [x] 获得行动时确认后创建或绑定 `iCloud.top.qisw.birthday`，并部署 Production CloudKit Schema；代码不使用字段查询，因此自定义索引为 0
 - [ ] 使用生产容器完成真实 iPhone ↔ Mac 双端验证
 - [ ] 获得行动时确认后部署线上隐私与支持页面，并在 App Store Connect 增加 macOS 平台
 - [ ] 获得行动时确认后生成签名归档，核对 Payload、entitlements、描述文件与 Xcode Privacy Report
@@ -74,4 +75,5 @@
 - 当前设备清单中的实体 iPhone 不可用，真实双端矩阵尚未执行。
 - 当前开发描述文件已覆盖 CloudKit 与 APS；发布描述文件仍未调整。
 - 最终签名归档的双架构、实际 entitlements、描述文件、Privacy Report 和 Payload 尚未检查。
-- 生产 CloudKit、线上材料、App Store Connect 平台、上传和提交均等待各自的行动时确认。
+- Production CloudKit Schema 已部署；真实双端生产验证仍被不可用的实体 iPhone 阻断。
+- 线上材料、App Store Connect 平台、上传和提交仍等待各自的行动时确认。
