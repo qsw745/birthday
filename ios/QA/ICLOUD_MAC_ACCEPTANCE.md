@@ -2,12 +2,13 @@
 
 记录日期：2026-09-05  
 当前分支：`codex/ios-local-first`  
-范围：本地开发构建与模拟环境。没有部署生产 CloudKit、没有创建或更新描述文件、没有上传构建、没有修改 App Store Connect。
+范围：本地开发构建、模拟环境和开发签名读回。没有部署生产 CloudKit、没有创建或更新发布描述文件、没有上传构建、没有修改 App Store Connect。
 
 ## 状态结论
 
 - 自动化核心、服务、迁移、iPhone 应用和 UI 回归：通过。
 - iOS 与 Mac Catalyst Release 无签名构建：通过。
+- iPhone 与 Mac Catalyst Debug 开发签名构建：通过；两端 CloudKit 与平台 APS 权限已从实包和描述文件读回。
 - Mac Catalyst 双架构与目标级资源检查：通过。
 - Mac Catalyst UI 测试代码无签名编译：通过；实际 Runner 未执行。
 - CloudKit 开发环境真实 iPhone ↔ Mac 双端矩阵：未验证。
@@ -44,7 +45,7 @@ iPhone UI 流程覆盖离线新增、搜索、编辑、删除、CloudKit 引导�
 - [x] 离线状态下可打开“导出生日数据”的系统保存面板
 - [x] 取消导出不显示错误，也不写入文件
 
-Mac Catalyst 实际 UI 自动化未执行：当前没有可用于 `top.qisw.birthday` 新 CloudKit 权限的 Mac Catalyst App Development 描述文件。无签名 Runner 无法作为有效 UI 测试宿主；创建或更新描述文件属于后续签名动作，需行动时确认。
+Mac Catalyst 实际 UI 自动化未执行。开发描述文件现已可用，但实体 iPhone 仍不可用，生产 CloudKit 尚未部署，不能据此把真实双端矩阵标为通过。
 
 ## 构建与包内容检查
 
@@ -56,7 +57,9 @@ Mac Catalyst 实际 UI 自动化未执行：当前没有可用于 `top.qisw.birt
 - [x] SwiftData 本地配置显式使用 `.none`，不会因 CloudKit entitlement 启动 SwiftData 自动 CloudKit；业务同步仍只经过 `CKSyncEngine`
 - [x] iPhone 与 Mac 二进制均不包含 `qisw.top/api/mobile` 或完整移动 API URL
 - [x] Mac 动态依赖只包含 Apple 系统框架和 Swift 运行库
-- [x] 源 entitlements 仅声明计划内 CloudKit 容器、CloudKit 服务与键值存储；Mac 另含沙盒和网络客户端能力
+- [x] 源 entitlements 声明计划内 CloudKit 容器、CloudKit 服务、键值存储与平台 APS 权限；Mac 另含沙盒和网络客户端能力
+- [x] iPhone 开发描述文件 UUID `165e8217-6084-4d9c-a1e4-c97dd6442f71`，实包和描述文件均读回 `aps-environment=development`
+- [x] Mac Catalyst 开发描述文件 UUID `a795de68-02a8-43d1-9be5-7686037d9354`，实包和描述文件均读回 `com.apple.developer.aps-environment=development`
 - [x] 包内隐私清单读回为：不跟踪、不声明收集数据、Required Reason API 仅 UserDefaults `CA92.1`
 - [ ] 最终签名归档的实际 entitlements、描述文件、Privacy Report 和 Payload 未验证
 - [ ] Release 运行时网络抓包未验证；当前仅由空服务器基址、组装测试和静态字符串检查证明不会启动历史服务器同步
@@ -80,12 +83,12 @@ Mac Catalyst 实际 UI 自动化未执行：当前没有可用于 `top.qisw.birt
 | 两端生物识别和密码回退 | 未验证 | Face ID / Touch ID / 密码实际结果 |
 | 两端数据导出 | 未验证 | 文件名、JSON 内容、取消与失败处理 |
 
-当前可见设备清单中两台 iPhone 都为 `unavailable`，本机也没有移动描述文件，因此本次没有执行真实双端矩阵。
+当前可见设备清单中两台 iPhone 都为 `unavailable`。开发描述文件已就绪，但没有可连接的实体 iPhone，因此本次仍未执行真实双端矩阵。
 
 ## 进入发布准备前的阻断项
 
 - [ ] 连接可用的实体 iPhone，并准备一台可运行 Catalyst 候选的 Mac
-- [ ] 经确认后创建或更新含 CloudKit 权限的开发描述文件
+- [x] 经确认后创建并读回含 CloudKit 与 APS 权限的 iPhone/Mac Catalyst 开发描述文件
 - [ ] 确认 Development CloudKit 容器、记录类型、字段、索引和权限
 - [ ] 完成上面的真实双端矩阵并附上无敏感数据的证据
 - [ ] 经单独确认后部署 Production CloudKit Schema，再重复关键双端矩阵
