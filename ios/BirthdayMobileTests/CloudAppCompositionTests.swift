@@ -50,6 +50,18 @@ private final class FakeCloudSyncRuntime: CloudSyncRuntimeControlling {
   }
 }
 
+@Test func productionCloudKitSmokeLaunchKeepsLocalDataEphemeralAndAllowsRealCloudTraffic() {
+  let bootstrap = UITestBootstrap(arguments: [
+    "BirthdayMobile",
+    "-ui-testing",
+    "-cloudkit-production-smoke",
+  ])
+
+  #expect(bootstrap.isCloudKitProductionSmoke)
+  #expect(bootstrap.isStoredInMemoryOnly)
+  #expect(bootstrap.syncRuntimePolicy.mode == .networked)
+}
+
 @Test func syncModeKeepsReleaseOnCloudKitAndAllowsOnlyExplicitDebugServerDiagnostics() {
   let configured = AppConfiguration(apiBaseURLValue: "https://example.com/api/mobile")
   let missing = AppConfiguration(apiBaseURLValue: nil)
@@ -146,10 +158,17 @@ func cloudRuntimeActionsPublishStatusAndReloadOnlyLocalData() async throws {
   let runtime = FakeCloudSyncRuntime()
   model.configureCloudSyncRuntime(runtime)
 
+  #expect(model.cloudSyncOperationGeneration == 0)
+  #expect(model.cloudSyncCompletionGeneration == 0)
+  #expect(model.cloudSyncPendingChangeCount == nil)
+
   await model.startCloudSync()
   #expect(runtime.startCount == 1)
   #expect(model.cloudSyncStatus == runtime.nextStatus)
   #expect(model.loadState == .loaded)
+  #expect(model.cloudSyncOperationGeneration == 1)
+  #expect(model.cloudSyncCompletionGeneration == 1)
+  #expect(model.cloudSyncPendingChangeCount == 0)
 
   await model.setCloudSyncEnabled(false)
   #expect(runtime.enableValues == [false])
@@ -159,6 +178,9 @@ func cloudRuntimeActionsPublishStatusAndReloadOnlyLocalData() async throws {
   await model.requestCloudSync()
   #expect(runtime.enableValues == [false, true])
   #expect(runtime.requestCount == 1)
+  #expect(model.cloudSyncOperationGeneration == 4)
+  #expect(model.cloudSyncCompletionGeneration == 4)
+  #expect(model.cloudSyncDiagnosticSummary == "started=4;completed=4;pending=0;status=synchronized")
 
   runtime.initialStatus = .accountChangeRequiresConfirmation
   model.configureCloudSyncRuntime(runtime)

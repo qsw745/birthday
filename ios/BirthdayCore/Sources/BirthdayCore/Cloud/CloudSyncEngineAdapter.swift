@@ -100,6 +100,7 @@ public protocol CloudSyncEngineClient: Sendable {
 
 public enum SystemCloudSyncEngineAdapterError: Error, Equatable, Sendable {
   case invalidStateSerialization
+  case eventProcessingFailed
 }
 
 protocol CloudSyncEngineSession: Sendable {
@@ -146,6 +147,24 @@ enum CloudHardDeletionDecoder {
   }
 }
 
+actor CloudSyncEngineCallbackFailureState {
+  private var hasPendingFailure = false
+
+  func recordFailure() {
+    hasPendingFailure = true
+  }
+
+  func throwIfPending() throws {
+    guard hasPendingFailure else { return }
+    hasPendingFailure = false
+    throw SystemCloudSyncEngineAdapterError.eventProcessingFailed
+  }
+
+  func clear() {
+    hasPendingFailure = false
+  }
+}
+
 public actor SystemCloudSyncEngineAdapter: CloudSyncEngineClient {
   public static let defaultContainerIdentifier = "iCloud.top.qisw.birthday"
 
@@ -153,6 +172,7 @@ public actor SystemCloudSyncEngineAdapter: CloudSyncEngineClient {
   private let retainedDelegate: any CKSyncEngineDelegate
   private let session: any CloudSyncEngineSession
   private let requiresZoneCreation: Bool
+  private let callbackFailures: CloudSyncEngineCallbackFailureState
 
   public init(
     repository: any CloudSyncRepository,
@@ -168,10 +188,14 @@ public actor SystemCloudSyncEngineAdapter: CloudSyncEngineClient {
   init(
     repository: any CloudSyncRepository,
     containerIdentifier: String,
-    sessionFactory: CloudSyncEngineSessionFactory
+    sessionFactory: CloudSyncEngineSessionFactory,
+    callbackFailures: CloudSyncEngineCallbackFailureState = CloudSyncEngineCallbackFailureState()
   ) async throws {
     let processor = CloudSyncEngineEventProcessor(repository: repository)
-    let eventBridge = CloudSyncEngineEventBridge(processor: processor)
+    let eventBridge = CloudSyncEngineEventBridge(
+      processor: processor,
+      callbackFailures: callbackFailures
+    )
     let delegate = SystemCloudSyncEngineDelegate(eventBridge: eventBridge)
     let storedState = try await repository.cloudEngineState().serializedState
     let session: any CloudSyncEngineSession
@@ -188,6 +212,7 @@ public actor SystemCloudSyncEngineAdapter: CloudSyncEngineClient {
     self.retainedDelegate = delegate
     self.session = session
     self.requiresZoneCreation = requiresZoneCreation
+    self.callbackFailures = callbackFailures
   }
 
   public func start() async throws {
@@ -196,11 +221,11 @@ public actor SystemCloudSyncEngineAdapter: CloudSyncEngineClient {
       await session.addPendingDatabaseChanges([
         .saveZone(CKRecordZone(zoneID: CloudRecordCodec.zoneID))
       ])
-      try await session.sendChanges()
+      try await sendSessionChanges()
     }
-    try await session.fetchChanges()
+    try await fetchSessionChanges()
     try await enqueuePendingRecords()
-    try await session.sendChanges()
+    try await sendSessionChanges()
   }
 
   public func pause() async {
@@ -209,11 +234,11 @@ public actor SystemCloudSyncEngineAdapter: CloudSyncEngineClient {
 
   public func send() async throws {
     try await enqueuePendingRecords()
-    try await session.sendChanges()
+    try await sendSessionChanges()
   }
 
   public func fetch() async throws {
-    try await session.fetchChanges()
+    try await fetchSessionChanges()
   }
 
   public func close() async {
@@ -233,6 +258,26 @@ public actor SystemCloudSyncEngineAdapter: CloudSyncEngineClient {
     if !changes.isEmpty {
       await session.addPendingRecordZoneChanges(changes)
     }
+  }
+
+  private func fetchSessionChanges() async throws {
+    do {
+      try await session.fetchChanges()
+    } catch {
+      await callbackFailures.clear()
+      throw error
+    }
+    try await callbackFailures.throwIfPending()
+  }
+
+  private func sendSessionChanges() async throws {
+    do {
+      try await session.sendChanges()
+    } catch {
+      await callbackFailures.clear()
+      throw error
+    }
+    try await callbackFailures.throwIfPending()
   }
 }
 
@@ -303,10 +348,15 @@ private final class SystemCloudSyncEngineDelegate: CKSyncEngineDelegate, @unchec
 
 private actor CloudSyncEngineEventBridge {
   private let processor: CloudSyncEngineEventProcessor
+  private let callbackFailures: CloudSyncEngineCallbackFailureState
   private var inFlightChanges: [CKRecord.ID: CloudPendingChange] = [:]
 
-  init(processor: CloudSyncEngineEventProcessor) {
+  init(
+    processor: CloudSyncEngineEventProcessor,
+    callbackFailures: CloudSyncEngineCallbackFailureState
+  ) {
     self.processor = processor
+    self.callbackFailures = callbackFailures
   }
 
   func handle(_ event: CKSyncEngine.Event) async {
@@ -381,6 +431,7 @@ private actor CloudSyncEngineEventBridge {
     } catch {
       // CKSyncEngine delegate callbacks cannot throw. Repository state remains pending so the
       // next explicit or scheduled attempt can retry without changing local birthday data.
+      await callbackFailures.recordFailure()
     }
   }
 
@@ -416,6 +467,7 @@ private actor CloudSyncEngineEventBridge {
       guard !records.isEmpty else { return nil }
       return CKSyncEngine.RecordZoneChangeBatch(recordsToSave: records, atomicByZone: true)
     } catch {
+      await callbackFailures.recordFailure()
       return nil
     }
   }

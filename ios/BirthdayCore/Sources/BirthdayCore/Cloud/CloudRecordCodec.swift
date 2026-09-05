@@ -76,10 +76,10 @@ public enum CloudRecordCodec {
     record[Field.name] = snapshot.name as CKRecordValue
     record[Field.lunarMonth] = NSNumber(value: snapshot.lunarMonth)
     record[Field.lunarDay] = NSNumber(value: snapshot.lunarDay)
-    record[Field.isLeapMonth] = NSNumber(value: snapshot.isLeapMonth)
+    record[Field.isLeapMonth] = NSNumber(value: Int64(snapshot.isLeapMonth ? 1 : 0))
     record[Field.reminderTimeMinutes] = NSNumber(value: snapshot.reminderTimeMinutes)
-    record[Field.notifyDayBefore] = NSNumber(value: snapshot.notifyDayBefore)
-    record[Field.notifySameDay] = NSNumber(value: snapshot.notifySameDay)
+    record[Field.notifyDayBefore] = NSNumber(value: Int64(snapshot.notifyDayBefore ? 1 : 0))
+    record[Field.notifySameDay] = NSNumber(value: Int64(snapshot.notifySameDay ? 1 : 0))
     record[Field.createdAt] = snapshot.createdAt as CKRecordValue
     record[Field.updatedAt] = snapshot.updatedAt as CKRecordValue
     if let deletedAt = snapshot.deletedAt {
@@ -181,10 +181,20 @@ public enum CloudRecordCodec {
     guard let value = record[field] else {
       throw CloudRecordCodecError.missingField(field)
     }
-    guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+    guard let number = value as? NSNumber else {
       throw CloudRecordCodecError.invalidFieldType(field)
     }
-    return number.boolValue
+    if CFGetTypeID(number) == CFBooleanGetTypeID() {
+      return number.boolValue
+    }
+    guard
+      CFGetTypeID(number) == CFNumberGetTypeID(),
+      !CFNumberIsFloatType(number),
+      number.int64Value == 0 || number.int64Value == 1
+    else {
+      throw CloudRecordCodecError.invalidFieldType(field)
+    }
+    return number.int64Value == 1
   }
 
   private static func date(_ record: CKRecord, _ field: String) throws -> Date {

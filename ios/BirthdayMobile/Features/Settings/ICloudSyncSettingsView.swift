@@ -56,6 +56,15 @@ struct ICloudSyncSettingsView: View {
       .accessibilityElement(children: .combine)
       .accessibilityIdentifier("icloudSyncStatus")
 
+      #if DEBUG
+        if UITestBootstrap().isCloudKitProductionSmoke {
+          Text(model.cloudSyncDiagnosticSummary)
+            .font(.caption2.monospaced())
+            .foregroundStyle(ModernAirTheme.secondaryInk)
+            .accessibilityIdentifier("cloudSyncDiagnostics")
+        }
+      #endif
+
       if model.cloudSyncStatus == .accountChangeRequiresConfirmation {
         Label(
           "检测到 iCloud 账号变化。确认后会保留全部本机生日，再与新账号的私有数据安全合并。",

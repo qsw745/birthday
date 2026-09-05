@@ -25,11 +25,11 @@ function generatedProject() {
   ]))
 }
 
-function buildSettings(scheme) {
+function buildSettings(scheme, configuration = 'Release') {
   const output = run('/usr/bin/xcodebuild', [
     '-project', projectPath,
     '-scheme', scheme,
-    '-configuration', 'Release',
+    '-configuration', configuration,
     '-showBuildSettings',
   ])
   return Object.fromEntries(
@@ -40,6 +40,69 @@ function buildSettings(scheme) {
       .map((match) => [match[1], match[2]]),
   )
 }
+
+function targetBuildSettings(target, configuration) {
+  const output = run('/usr/bin/xcodebuild', [
+    '-project', projectPath,
+    '-target', target,
+    '-configuration', configuration,
+    '-showBuildSettings',
+  ])
+  return Object.fromEntries(
+    output
+      .split('\n')
+      .map((line) => line.match(/^\s{4}([A-Z0-9_]+) = (.*)$/))
+      .filter(Boolean)
+      .map((match) => [match[1], match[2]]),
+  )
+}
+
+test('production CloudKit smoke configuration is debug-only and selects Production', () => {
+  generatedProject()
+  const phone = buildSettings('BirthdayMobile', 'CloudKitProductionSmoke')
+  const mac = buildSettings('BirthdayMac', 'CloudKitProductionSmoke')
+  const phoneUITests = targetBuildSettings(
+    'BirthdayMobileUITests',
+    'CloudKitProductionSmoke',
+  )
+  const macUITests = targetBuildSettings(
+    'BirthdayMacUITests',
+    'CloudKitProductionSmoke',
+  )
+  const phoneEntitlements = readPlist(phone.CODE_SIGN_ENTITLEMENTS)
+  const macEntitlements = readPlist(mac.CODE_SIGN_ENTITLEMENTS)
+
+  assert.equal(phone.SWIFT_ACTIVE_COMPILATION_CONDITIONS.includes('DEBUG'), true)
+  assert.equal(mac.SWIFT_ACTIVE_COMPILATION_CONDITIONS.includes('DEBUG'), true)
+  assert.equal(phone.PRODUCT_BUNDLE_IDENTIFIER, 'top.qisw.birthday.cloudkitsmoke')
+  assert.equal(mac.PRODUCT_BUNDLE_IDENTIFIER, 'top.qisw.birthday.cloudkitsmoke')
+  assert.equal(phone.BIRTHDAY_API_BASE_URL ?? '', '')
+  assert.equal(mac.BIRTHDAY_API_BASE_URL ?? '', '')
+  assert.equal(
+    phoneUITests.SWIFT_ACTIVE_COMPILATION_CONDITIONS.includes('CLOUDKIT_PRODUCTION_SMOKE'),
+    true,
+  )
+  assert.equal(
+    macUITests.SWIFT_ACTIVE_COMPILATION_CONDITIONS.includes('CLOUDKIT_PRODUCTION_SMOKE'),
+    true,
+  )
+  assert.equal(
+    phoneEntitlements['com.apple.developer.icloud-container-environment'],
+    'Production',
+  )
+  assert.equal(
+    macEntitlements['com.apple.developer.icloud-container-environment'],
+    'Production',
+  )
+  assert.equal(
+    buildSettings('BirthdayMobile').CODE_SIGN_ENTITLEMENTS,
+    'BirthdayMobile/Config/BirthdayMobile.entitlements',
+  )
+  assert.equal(
+    buildSettings('BirthdayMac').CODE_SIGN_ENTITLEMENTS,
+    'BirthdayMobile/Config/BirthdayMac.entitlements',
+  )
+})
 
 function readPlist(relativePath) {
   return JSON.parse(run('/usr/bin/plutil', [

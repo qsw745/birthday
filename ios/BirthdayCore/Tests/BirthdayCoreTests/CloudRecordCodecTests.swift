@@ -114,8 +114,17 @@ import Testing
     try CloudRecordCodec.decode(record: invalidLunarMonth)
   }
 
+  let integerBackedBooleans = try CloudRecordCodec.encode(snapshot: snapshot, systemFields: nil)
+  integerBackedBooleans["isLeapMonth"] = NSNumber(value: Int64(1))
+  integerBackedBooleans["notifyDayBefore"] = NSNumber(value: Int64(0))
+  integerBackedBooleans["notifySameDay"] = NSNumber(value: Int64(1))
+  let decoded = try CloudRecordCodec.decode(record: integerBackedBooleans)
+  #expect(decoded.isLeapMonth)
+  #expect(!decoded.notifyDayBefore)
+  #expect(decoded.notifySameDay)
+
   let invalidBoolean = try CloudRecordCodec.encode(snapshot: snapshot, systemFields: nil)
-  invalidBoolean["notifySameDay"] = NSNumber(value: 1)
+  invalidBoolean["notifySameDay"] = NSNumber(value: Int64(2))
   #expect(throws: CloudRecordCodecError.invalidFieldType("notifySameDay")) {
     try CloudRecordCodec.decode(record: invalidBoolean)
   }

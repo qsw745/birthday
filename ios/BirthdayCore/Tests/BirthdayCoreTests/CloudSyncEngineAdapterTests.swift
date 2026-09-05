@@ -163,6 +163,27 @@ import Testing
   }
 }
 
+@Test func systemCloudSyncEngineAdapterSurfacesCallbackProcessingFailureAfterFetch() async throws {
+  let repository = FakeCloudRepository()
+  let session = FakeCloudSyncEngineSession()
+  let callbackFailures = CloudSyncEngineCallbackFailureState()
+  let adapter = try await SystemCloudSyncEngineAdapter(
+    repository: repository,
+    containerIdentifier: "iCloud.top.qisw.birthday",
+    sessionFactory: { _, _, _ in session },
+    callbackFailures: callbackFailures
+  )
+
+  await callbackFailures.recordFailure()
+
+  await #expect(throws: SystemCloudSyncEngineAdapterError.eventProcessingFailed) {
+    try await adapter.fetch()
+  }
+
+  try await adapter.fetch()
+  #expect(await session.operations == [.fetch, .fetch])
+}
+
 @Test func cloudHardDeletionDecoderAcceptsOnlyCanonicalBirthdayRecordsInTheDedicatedZone() {
   let entityID = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
   let validRecordID = CKRecord.ID(

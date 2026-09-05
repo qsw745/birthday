@@ -14,10 +14,7 @@ struct BirthdayMobileApp: App {
     let configuration = AppConfiguration(
       apiBaseURLValue: Bundle.main.object(forInfoDictionaryKey: "BirthdayAPIBaseURL")
     )
-    let runtime = SyncRuntimeCompositionPolicy(
-      isUITesting: bootstrap.isEnabled,
-      networkDisabled: bootstrap.networkDisabled
-    )
+    let runtime = bootstrap.syncRuntimePolicy
     let syncMode = AppSyncMode.resolve(
       configuration: configuration,
       policy: runtime,
@@ -201,7 +198,7 @@ private struct BirthdayAppBootstrapView: View {
 
     do {
       let configuration = BirthdayModelContainer.localConfiguration(
-        isStoredInMemoryOnly: uiTestBootstrap.isEnabled
+        isStoredInMemoryOnly: uiTestBootstrap.isStoredInMemoryOnly
       )
       let container = try BirthdayModelContainer.make(configuration: configuration)
       if uiTestBootstrap.isSnapshotImportFixtureEnabled {
@@ -224,10 +221,7 @@ private struct BirthdayAppBootstrapView: View {
   }
 
   private var syncRuntimePolicy: SyncRuntimeCompositionPolicy {
-    SyncRuntimeCompositionPolicy(
-      isUITesting: uiTestBootstrap.isEnabled,
-      networkDisabled: uiTestBootstrap.networkDisabled
-    )
+    uiTestBootstrap.syncRuntimePolicy
   }
 
   private func configureCloudNetworkRestoration(for model: AppModel) {
@@ -314,8 +308,26 @@ private struct BirthdayAppBootstrapView: View {
       let suiteName = "top.qisw.birthday.ui-tests"
       let preferences = UserDefaults(suiteName: suiteName)!
       preferences.removePersistentDomain(forName: suiteName)
-      if uiTestBootstrap.desktopPreview {
+      if uiTestBootstrap.desktopPreview || uiTestBootstrap.isCloudKitProductionSmoke {
         preferences.set(true, forKey: "top.qisw.birthday.hasCompletedOnboarding")
+      }
+
+      if uiTestBootstrap.isCloudKitProductionSmoke {
+        let store = BirthdayStore(modelContainer: container)
+        let model = AppModel(
+          store: store,
+          preferences: preferences,
+          syncMode: .cloudKit,
+          isServerBindingAvailable: false,
+          authenticator: UITestAppLockAuthenticator(),
+          serverDeviceBinder: OfflineServerDeviceBinder(),
+          notificationScheduler: UITestNotificationScheduler(),
+          oneShotNotificationScheduler: UITestOneShotNotificationScheduler(),
+          reminderPlanner: ReminderPlanner(),
+          requestNotificationAuthorization: { true }
+        )
+        model.configureCloudSyncRuntime(CloudSyncRuntime.live(store: store, preferences: preferences))
+        return model
       }
 
       // The UI-test composition injects an offline binder, so no view can

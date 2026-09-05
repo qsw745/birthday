@@ -2,6 +2,94 @@ import XCTest
 
 @MainActor
 final class OfflineFlowUITests: XCTestCase {
+#if CLOUDKIT_PRODUCTION_SMOKE
+  private let productionCloudKitPhoneName = "云端验收-68F2A"
+  private let productionCloudKitMacName = "云端验收-68F2B"
+
+  func testProductionCloudKitCreatesIsolatedFixtureOnIPhone() {
+    let app = launchProductionCloudKitSmoke()
+    XCTAssertTrue(app.buttons["addBirthdayButton"].waitForExistence(timeout: 10))
+    XCTAssertTrue(waitForCloudSynchronization(in: app, timeout: 30))
+
+    app.tabBars.buttons["全部"].tap()
+    if !app.staticTexts[productionCloudKitPhoneName].exists {
+      app.tabBars.buttons["日历"].tap()
+      app.buttons["addBirthdayButton"].tap()
+      let nameField = app.textFields["birthdayNameField"]
+      XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+      nameField.tap()
+      nameField.typeText(productionCloudKitPhoneName)
+      app.buttons["saveBirthdayButton"].tap()
+      if app.buttons["从明年开始"].waitForExistence(timeout: 1) {
+        app.buttons["从明年开始"].tap()
+      }
+    }
+
+    app.tabBars.buttons["全部"].tap()
+    XCTAssertTrue(app.staticTexts[productionCloudKitPhoneName].waitForExistence(timeout: 10))
+    XCTAssertTrue(
+      forceCloudSynchronization(in: app, timeout: 30),
+      "CloudKit 同步诊断：\(app.descendants(matching: .any)["cloudSyncDiagnostics"].label)"
+    )
+  }
+
+  func testProductionCloudKitReceivesMacEditAndDeletesFixtureOnIPhone() {
+    let app = launchProductionCloudKitSmoke()
+    XCTAssertTrue(app.buttons["addBirthdayButton"].waitForExistence(timeout: 10))
+    XCTAssertTrue(waitForCloudSynchronization(in: app, timeout: 30))
+
+    app.tabBars.buttons["全部"].tap()
+    let editedRecord = app.staticTexts[productionCloudKitMacName]
+    XCTAssertTrue(editedRecord.waitForExistence(timeout: 15))
+    editedRecord.tap()
+    let deleteButton = app.buttons["deleteBirthdayButton"]
+    XCTAssertTrue(deleteButton.waitForExistence(timeout: 5))
+    deleteButton.tap()
+    XCTAssertTrue(app.buttons["确认删除"].waitForExistence(timeout: 3))
+    app.buttons["确认删除"].tap()
+    XCTAssertTrue(editedRecord.waitForNonExistence(timeout: 10))
+    XCTAssertTrue(
+      forceCloudSynchronization(in: app, timeout: 30),
+      "CloudKit 同步诊断：\(app.descendants(matching: .any)["cloudSyncDiagnostics"].label)"
+    )
+  }
+
+  func testProductionCloudKitRemovesAllIsolatedFixturesOnIPhone() {
+    let app = launchProductionCloudKitSmoke()
+    XCTAssertTrue(app.buttons["addBirthdayButton"].waitForExistence(timeout: 10))
+    XCTAssertTrue(waitForCloudSynchronization(in: app, timeout: 30))
+
+    app.tabBars.buttons["全部"].tap()
+    for _ in 0..<20 {
+      let macRecords = app.staticTexts.matching(identifier: productionCloudKitMacName)
+      let phoneRecords = app.staticTexts.matching(identifier: productionCloudKitPhoneName)
+      let record = macRecords.count > 0 ? macRecords.firstMatch : phoneRecords.firstMatch
+      guard record.exists else { break }
+      let previousCount = macRecords.count + phoneRecords.count
+
+      record.tap()
+      let deleteButton = app.buttons["deleteBirthdayButton"]
+      XCTAssertTrue(deleteButton.waitForExistence(timeout: 5))
+      deleteButton.tap()
+      XCTAssertTrue(app.buttons["确认删除"].waitForExistence(timeout: 3))
+      app.buttons["确认删除"].tap()
+
+      let recordRemoved = NSPredicate { _, _ in
+        macRecords.count + phoneRecords.count < previousCount
+      }
+      let removalExpectation = XCTNSPredicateExpectation(predicate: recordRemoved, object: app)
+      XCTAssertEqual(XCTWaiter.wait(for: [removalExpectation], timeout: 10), .completed)
+    }
+
+    XCTAssertEqual(app.staticTexts.matching(identifier: productionCloudKitMacName).count, 0)
+    XCTAssertEqual(app.staticTexts.matching(identifier: productionCloudKitPhoneName).count, 0)
+    XCTAssertTrue(
+      forceCloudSynchronization(in: app, timeout: 30),
+      "CloudKit 同步诊断：\(app.descendants(matching: .any)["cloudSyncDiagnostics"].label)"
+    )
+  }
+#endif
+
   func testCloudKitOnboardingAndSettingsRemainLocalFirstWithoutNetwork() {
     let app = XCUIApplication()
     app.launchArguments = ["-ui-testing", "-network-disabled", "-cloudkit-sync"]
@@ -360,6 +448,62 @@ final class OfflineFlowUITests: XCTestCase {
     app.buttons["确认删除"].tap()
     XCTAssertTrue(app.staticTexts["妈妈更新"].waitForNonExistence(timeout: 3))
   }
+
+#if CLOUDKIT_PRODUCTION_SMOKE
+  private func launchProductionCloudKitSmoke() -> XCUIApplication {
+    let app = XCUIApplication()
+    app.launchArguments = ["-ui-testing", "-cloudkit-production-smoke"]
+    app.launch()
+    if app.buttons["unlockButton"].waitForExistence(timeout: 3) {
+      app.buttons["unlockButton"].tap()
+    }
+    return app
+  }
+
+  private func waitForCloudSynchronization(
+    in app: XCUIApplication,
+    timeout: TimeInterval
+  ) -> Bool {
+    app.tabBars.buttons["设置"].tap()
+    let status = app.descendants(matching: .any)["icloudSyncStatus"]
+    guard status.waitForExistence(timeout: 5) else { return false }
+    let synchronized = NSPredicate(format: "label CONTAINS %@", "已同步")
+    let expectation = XCTNSPredicateExpectation(predicate: synchronized, object: status)
+    return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+  }
+
+  private func forceCloudSynchronization(
+    in app: XCUIApplication,
+    timeout: TimeInterval
+  ) -> Bool {
+    app.tabBars.buttons["设置"].tap()
+    let refresh = app.buttons["manualCloudSyncButton"]
+    for _ in 0..<5 where !refresh.isHittable { app.swipeUp() }
+    guard refresh.waitForExistence(timeout: 5), refresh.isEnabled else { return false }
+    let diagnostics = app.descendants(matching: .any)["cloudSyncDiagnostics"]
+    guard diagnostics.waitForExistence(timeout: 5) else { return false }
+    let previousCompletion = diagnosticInteger("completed", in: diagnostics.label) ?? -1
+    refresh.tap()
+
+    let completed = NSPredicate { object, _ in
+      guard let element = object as? XCUIElement else { return false }
+      return (self.diagnosticInteger("completed", in: element.label) ?? -1)
+        > previousCompletion
+    }
+    let completionExpectation = XCTNSPredicateExpectation(predicate: completed, object: diagnostics)
+    guard XCTWaiter.wait(for: [completionExpectation], timeout: timeout) == .completed else {
+      return false
+    }
+    return diagnostics.label.contains("pending=0;status=synchronized")
+  }
+
+  private func diagnosticInteger(_ key: String, in summary: String) -> Int? {
+    summary
+      .split(separator: ";")
+      .first { $0.hasPrefix("\(key)=") }
+      .flatMap { Int($0.dropFirst(key.count + 1)) }
+  }
+#endif
 }
 
 extension XCUIElement {

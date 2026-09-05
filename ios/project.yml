@@ -1,4 +1,8 @@
 name: BirthdayMobile
+configs:
+  Debug: debug
+  CloudKitProductionSmoke: debug
+  Release: release
 options:
   postGenCommand: ./scripts/fix-system-capabilities.py BirthdayMobile.xcodeproj/project.pbxproj
   deploymentTarget:
@@ -34,8 +38,13 @@ targets:
         SUPPORTS_MACCATALYST: NO
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         TARGETED_DEVICE_FAMILY: "1"
+      configs:
+        CloudKitProductionSmoke:
+          CODE_SIGN_ENTITLEMENTS: BirthdayMobile/Config/BirthdayMobileProductionSmoke.entitlements
+          PRODUCT_BUNDLE_IDENTIFIER: top.qisw.birthday.cloudkitsmoke
     configFiles:
       Debug: BirthdayMobile/Config/Debug.xcconfig
+      CloudKitProductionSmoke: BirthdayMobile/Config/Release.xcconfig
       Release: BirthdayMobile/Config/Release.xcconfig
     sources:
       - path: BirthdayMobile
@@ -78,8 +87,13 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: top.qisw.birthday
         SUPPORTS_MACCATALYST: YES
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+      configs:
+        CloudKitProductionSmoke:
+          CODE_SIGN_ENTITLEMENTS: BirthdayMobile/Config/BirthdayMacProductionSmoke.entitlements
+          PRODUCT_BUNDLE_IDENTIFIER: top.qisw.birthday.cloudkitsmoke
     configFiles:
       Debug: BirthdayMobile/Config/Debug.xcconfig
+      CloudKitProductionSmoke: BirthdayMobile/Config/Release.xcconfig
       Release: BirthdayMobile/Config/Release.xcconfig
     sources:
       - path: BirthdayMobile
@@ -107,6 +121,9 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+      configs:
+        CloudKitProductionSmoke:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) CLOUDKIT_PRODUCTION_SMOKE"
     sources:
       - BirthdayMobileUITests
     dependencies:
@@ -119,6 +136,9 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+      configs:
+        CloudKitProductionSmoke:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) CLOUDKIT_PRODUCTION_SMOKE"
     sources:
       - path: BirthdayMobileUITests
         includes:

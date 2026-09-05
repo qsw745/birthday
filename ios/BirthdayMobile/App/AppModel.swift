@@ -13,6 +13,7 @@ struct UITestBootstrap: Equatable, Sendable {
   let cloudKitSyncEnabled: Bool
   let cloudAccountChange: Bool
   let desktopPreview: Bool
+  let isCloudKitProductionSmoke: Bool
 
   init(arguments: [String] = ProcessInfo.processInfo.arguments) {
     isEnabled = arguments.contains("-ui-testing")
@@ -25,10 +26,25 @@ struct UITestBootstrap: Equatable, Sendable {
     cloudKitSyncEnabled = arguments.contains("-cloudkit-sync")
     cloudAccountChange = arguments.contains("-cloud-account-change")
     desktopPreview = arguments.contains("-desktop-preview")
+    #if DEBUG
+      isCloudKitProductionSmoke = isEnabled
+        && arguments.contains("-cloudkit-production-smoke")
+    #else
+      isCloudKitProductionSmoke = false
+    #endif
   }
 
   var isSnapshotImportFixtureEnabled: Bool {
     isEnabled && networkDisabled && snapshotImportPreviewEnabled
+  }
+
+  var isStoredInMemoryOnly: Bool { isEnabled }
+
+  var syncRuntimePolicy: SyncRuntimeCompositionPolicy {
+    SyncRuntimeCompositionPolicy(
+      isUITesting: isEnabled && !isCloudKitProductionSmoke,
+      networkDisabled: networkDisabled
+    )
   }
 }
 
@@ -243,6 +259,13 @@ final class AppModel {
   private(set) var syncStatus: SyncStatus = .idle
   private(set) var cloudSyncStatus: CloudSyncStatus = .disabled
   private(set) var isManualSyncing = false
+  private(set) var cloudSyncOperationGeneration = 0
+  private(set) var cloudSyncCompletionGeneration = 0
+  private(set) var cloudSyncPendingChangeCount: Int?
+  var cloudSyncDiagnosticSummary: String {
+    let pending = cloudSyncPendingChangeCount.map(String.init) ?? "unknown"
+    return "started=\(cloudSyncOperationGeneration);completed=\(cloudSyncCompletionGeneration);pending=\(pending);status=\(cloudSyncDiagnosticStatus)"
+  }
   var syncPresentation: SyncPresentation { syncPresentationReducer.presentation }
   private(set) var syncPendingCount = 0
   private(set) var managedDevices: [ManagedDevice] = []
@@ -982,12 +1005,28 @@ final class AppModel {
     reloadAfterOperation: Bool = true,
     operation: () async -> CloudSyncStatus
   ) async {
+    cloudSyncOperationGeneration += 1
+    let operationGeneration = cloudSyncOperationGeneration
     if showProgress { cloudSyncStatus = .syncing }
     let status = await operation()
     cloudSyncStatus = status
 
-    guard reloadAfterOperation else { return }
-    await reload()
+    if reloadAfterOperation { await reload() }
+    cloudSyncPendingChangeCount = try? await store.pendingCloudChangeCount()
+    cloudSyncCompletionGeneration = operationGeneration
+  }
+
+  private var cloudSyncDiagnosticStatus: String {
+    switch cloudSyncStatus {
+    case .disabled: "disabled"
+    case .unavailable: "unavailable"
+    case .syncing: "syncing"
+    case .pending: "pending"
+    case .synchronized: "synchronized"
+    case .accountChangeRequiresConfirmation: "account-change"
+    case .conflicts: "conflicts"
+    case .failed(let category): "failed-\(category.rawValue)"
+    }
   }
 
   func configureSyncCoordinator(_ coordinator: SyncCoordinator, initiallyBound: Bool) {
