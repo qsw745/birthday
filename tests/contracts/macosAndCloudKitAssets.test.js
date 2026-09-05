@@ -117,7 +117,7 @@ test('each Apple product excludes the other platform Info plist from copied reso
   assert.match(macTarget, /excludes:[\s\S]*- Info\.plist/)
 })
 
-test('both products carry only the planned private CloudKit capabilities', () => {
+test('both products carry the planned private CloudKit and platform push capabilities', () => {
   const expectedCloudCapabilities = {
     'com.apple.developer.icloud-container-identifiers': ['$(ICLOUD_CONTAINER_IDENTIFIER)'],
     'com.apple.developer.icloud-services': ['CloudKit'],
@@ -127,12 +127,40 @@ test('both products carry only the planned private CloudKit capabilities', () =>
   const phone = readPlist('BirthdayMobile/Config/BirthdayMobile.entitlements')
   const mac = readPlist('BirthdayMobile/Config/BirthdayMac.entitlements')
 
-  assert.deepEqual(phone, expectedCloudCapabilities)
+  assert.deepEqual(phone, {
+    ...expectedCloudCapabilities,
+    'aps-environment': 'development',
+  })
   assert.deepEqual(mac, {
     ...expectedCloudCapabilities,
+    'com.apple.developer.aps-environment': 'development',
     'com.apple.security.app-sandbox': true,
     'com.apple.security.network.client': true,
   })
+})
+
+test('both products advertise CloudKit and remote notifications to automatic signing', () => {
+  const project = readFileSync(path.join(iosRoot, 'project.yml'), 'utf8')
+  const phoneTarget = project.slice(
+    project.indexOf('  BirthdayMobile:\n'),
+    project.indexOf('  BirthdayMac:\n'),
+  )
+  const macTarget = project.slice(
+    project.indexOf('  BirthdayMac:\n'),
+    project.indexOf('  BirthdayMobileUITests:\n'),
+  )
+
+  for (const target of [phoneTarget, macTarget]) {
+    assert.match(target, /SystemCapabilities:[\s\S]*com\.apple\.iCloud:[\s\S]*enabled: 1/)
+    assert.match(target, /SystemCapabilities:[\s\S]*com\.apple\.Push:[\s\S]*enabled: 1/)
+  }
+
+  assert.match(project, /postGenCommand: \.\/scripts\/fix-system-capabilities\.py/)
+  generatedProject()
+  const generated = readFileSync(path.join(projectPath, 'project.pbxproj'), 'utf8')
+  assert.doesNotMatch(generated, /SystemCapabilities = "/)
+  assert.equal((generated.match(/com\.apple\.iCloud =/g) ?? []).length, 2)
+  assert.equal((generated.match(/com\.apple\.Push =/g) ?? []).length, 2)
 })
 
 test('release receives CloudKit changes without restoring the legacy server transport', () => {
