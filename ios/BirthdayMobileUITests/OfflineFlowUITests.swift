@@ -183,6 +183,32 @@ final class OfflineFlowUITests: XCTestCase {
     XCTAssertFalse(app.buttons["stopSyncButton"].exists)
   }
 
+  func testStoreReleaseEditorDoesNotOfferUnavailableEmailReminder() {
+    let app = XCUIApplication()
+    app.launchArguments = [
+      "-ui-testing",
+      "-network-disabled",
+      "-store-release-local-only",
+    ]
+    app.launch()
+
+    XCTAssertTrue(app.staticTexts["离线也能完整使用"].waitForExistence(timeout: 5))
+    app.buttons["继续"].tap()
+    app.buttons["暂不开启"].tap()
+    if app.buttons["unlockButton"].waitForExistence(timeout: 2) {
+      app.buttons["unlockButton"].tap()
+    }
+
+    let addButton = app.buttons["addBirthdayButton"]
+    XCTAssertTrue(addButton.waitForExistence(timeout: 5))
+    addButton.tap()
+    XCTAssertTrue(app.textFields["birthdayNameField"].waitForExistence(timeout: 3))
+    XCTAssertFalse(
+      app.switches["邮件备份提醒"].exists,
+      "纯 CloudKit 发布版不应展示没有可用服务器通道的邮件提醒"
+    )
+  }
+
   func testTransportCleanupFailureKeepsRetryAndExplicitResumeActionsVisible() {
     let app = XCUIApplication()
     app.launchArguments = [

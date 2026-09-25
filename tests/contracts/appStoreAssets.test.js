@@ -56,7 +56,7 @@ test('App Store zh-Hans metadata stays inside field limits and points to prepare
   assert.equal(metadata.privacyPolicyURL, 'https://qisw.top/birthday/privacy.html')
   assert.equal(metadata.requiresDemoAccount, false)
   assert.match(metadata.whatsNew, /iCloud/)
-  assert.match(metadata.whatsNew, /设置.*关闭/)
+  assert.match(metadata.description, /设置.*关闭/)
   assert.match(metadata.description, /本机优先/)
   assert.match(metadata.description, /iCloud.*私有/)
   assert.match(metadata.description, /离线/)

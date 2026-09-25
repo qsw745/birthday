@@ -142,10 +142,10 @@ test('release candidates use non-conflicting iPhone and Mac version trains', () 
   const phone = buildSettings('BirthdayMobile')
   const mac = buildSettings('BirthdayMac')
 
-  assert.equal(phone.MARKETING_VERSION, '1.1.0')
-  assert.equal(phone.CURRENT_PROJECT_VERSION, '2')
-  assert.equal(mac.MARKETING_VERSION, '1.0.0')
-  assert.equal(mac.CURRENT_PROJECT_VERSION, '2')
+  assert.equal(phone.MARKETING_VERSION, '1.1.1')
+  assert.equal(phone.CURRENT_PROJECT_VERSION, '5')
+  assert.equal(mac.MARKETING_VERSION, '1.0.1')
+  assert.equal(mac.CURRENT_PROJECT_VERSION, '5')
 })
 
 test('desktop screenshot fixture is isolated and contains only declared fictional names', () => {
@@ -236,6 +236,9 @@ test('release receives CloudKit changes without restoring the legacy server tran
 
   assert.deepEqual(info.UIBackgroundModes, ['remote-notification'])
   assert.deepEqual(macInfo.UIBackgroundModes, ['remote-notification'])
+  assert.equal(info.ITSAppUsesNonExemptEncryption, false)
+  assert.equal(macInfo.ITSAppUsesNonExemptEncryption, false)
+  assert.equal(macInfo.LSApplicationCategoryType, 'public.app-category.lifestyle')
   assert.match(releaseConfiguration, /^BIRTHDAY_API_BASE_URL\s*=\s*$/m)
   assert.doesNotMatch(releaseConfiguration, /https?:/)
 })

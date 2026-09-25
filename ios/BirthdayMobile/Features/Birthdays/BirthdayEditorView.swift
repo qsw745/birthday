@@ -103,7 +103,9 @@ struct BirthdayEditorView: View {
             ReminderTimePicker(minutes: $editor.draft.reminder.timeMinutes)
             Toggle("提前一天", isOn: $editor.draft.reminder.notifyDayBefore)
             Toggle("生日当天", isOn: $editor.draft.reminder.notifySameDay)
-            Toggle("邮件备份提醒", isOn: $editor.draft.reminder.emailEnabled)
+            if model.isServerBindingAvailable {
+              Toggle("邮件备份提醒", isOn: $editor.draft.reminder.emailEnabled)
+            }
           } header: {
             Text("提醒")
           } footer: {
@@ -111,7 +113,7 @@ struct BirthdayEditorView: View {
           }
           .id(BirthdayEditorModel.SectionLocation.reminder)
 
-          if editor.draft.reminder.emailEnabled {
+          if model.isServerBindingAvailable, editor.draft.reminder.emailEnabled {
             Section {
               TextField("收件邮箱", text: $editor.draft.reminder.emailAddress)
                 .focused($focusedField, equals: .emailAddress)

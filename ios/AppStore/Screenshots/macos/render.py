@@ -39,7 +39,10 @@ def gradient_canvas() -> Image.Image:
 
 
 def rounded_capture(source: Path) -> Image.Image:
-    screenshot = Image.open(source).convert("RGB")
+    capture = Image.open(source).convert("RGBA")
+    screenshot = Image.new("RGBA", capture.size, "white")
+    screenshot.alpha_composite(capture)
+    screenshot = screenshot.convert("RGB")
     if screenshot.size != (1662, 1170):
         raise ValueError(f"{source.name}: expected 1662x1170, got {screenshot.size[0]}x{screenshot.size[1]}")
 
@@ -72,7 +75,7 @@ def render(source: Path, destination: Path, title: str, subtitle: str) -> None:
     position = ((CANVAS_SIZE[0] - frame.width) // 2, 230)
     shadow = Image.new("RGBA", CANVAS_SIZE, (0, 0, 0, 0))
     shadow_shape = Image.new("RGBA", frame.size, (32, 62, 67, 88))
-    shadow_shape.putalpha(frame.getchannel("A"))
+    shadow_shape.putalpha(frame.getchannel("A").point(lambda alpha: round(alpha * 0.2)))
     shadow.alpha_composite(shadow_shape, (position[0], position[1] + 24))
     shadow = shadow.filter(ImageFilter.GaussianBlur(30))
     canvas.alpha_composite(shadow)

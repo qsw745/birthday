@@ -1,8 +1,8 @@
 # iCloud 与 Mac 双端验收记录
 
-记录日期：2026-09-05  
-当前分支：`codex/ios-local-first`  
-范围：本地开发构建、模拟环境、开发签名读回、Production CloudKit Schema 部署，以及隔离 App ID 下的真实 iPhone ↔ Mac Production 关键数据闭环。没有创建或更新发布描述文件、没有上传构建、没有修改 App Store Connect。
+记录日期：2026-09-06
+当前分支：`codex/ios-local-first`
+范围：本地开发构建、模拟环境、开发签名读回、Production CloudKit Schema 部署、隔离 App ID 下的真实 iPhone ↔ Mac Production 关键数据闭环，以及 iPhone 1.1.0 (4) / Mac 1.0.0 (4) 在稳定版 macOS 重建、发布签名、上传和 App Store Connect 提交状态复核。
 
 ## 状态结论
 
@@ -15,7 +15,10 @@
 - Mac Catalyst 普通 UI Runner：4/4 通过。
 - CloudKit 开发环境真实 iPhone ↔ Mac 双端矩阵：未验证。
 - Production 系统推送、完整离线冲突/账号切换/通知/生物识别矩阵：未验证。
-- 最终发布签名归档、上传及 TestFlight 安装：未验证。
+- iPhone 1.1.0 (4) 与 Mac 1.0.0 (4) 已在稳定版 macOS 26.6（`25G72`）虚拟机重建，在本机使用发布证书和发布描述文件导出；两端上传成功、App Store Connect 处理完成，并已分别绑定到 iOS 1.1 与 macOS 1.0 版本页。
+- App Store 审核提交：构建 3 的历史提交曾在一分钟内分别因 Mac `ITMS-90301` 和 iPhone `ITMS-90111` 自动被拒。构建 4 重新提交后，iPhone 1.1 已读回“已完成审核 / 已批准”并在中国大陆 App Store 公开接口读到版本 1.1；Mac 1.0 已读回“等待审核”，未再出现“二进制文件无效”。
+- 构建环境根因与处理：被拒的构建 3 来自 macOS 27.0 beta 8（`26A5425a`）+ Xcode 26.6（`17F113`）+ SDK 26.5。构建 4 已改用稳定版 macOS 26.6（`25G72`）+ 同一 Xcode/SDK 重建，解决了包元数据中的测试版系统标记。
+- TestFlight 安装与设备回归：未验证。
 
 自动化中使用的 fake CloudKit、模拟器和无签名构建不能替代真实 Apple ID、CloudKit 环境、系统推送、通知、生物识别或 TestFlight 验收。
 
@@ -67,7 +70,9 @@ Mac Catalyst 普通 UI 自动化已实际执行并 4/4 通过。Production 关�
 - [x] Production 冒烟使用独立 bundle ID `top.qisw.birthday.cloudkitsmoke`；iPhone 开发描述文件 UUID `dd1feb0c-2dfb-4402-8174-c51f0f7bd449`，Mac Catalyst 开发描述文件 UUID `d418d738-2ffe-498d-90da-5af0c021e52a`
 - [x] Production 冒烟配置复用 Release 的空服务器基址，只在对应 UI 测试目标中启用，普通 Debug/Release 测试不会访问真实 Production CloudKit
 - [x] 包内隐私清单读回为：不跟踪、不声明收集数据、Required Reason API 仅 UserDefaults `CA92.1`
-- [ ] 最终签名归档的实际 entitlements、描述文件、Privacy Report 和 Payload 未验证
+- [x] 最终上传包的 Payload、平台架构、实际 entitlements、嵌入式发布描述文件、隐私清单、服务器空基址和历史 API 字符串均已读回；两端使用同一有效 Apple Distribution 证书，iPhone 为 `arm64`，Mac 为 `arm64 + x86_64`
+- [x] 构建 4 的归档 `BuildMachineOSBuild` 均为稳定版 `25G72`；iPhone IPA SHA-256 为 `cc46080cbc983c129f76560e893e3a7b4683518d0f22630e0a1ca918f3bcb978`，Mac PKG SHA-256 为 `01b7582bcfe14cbcc86da522dcd13d081f8206573bd418584edbf2be97e95eed`
+- [ ] Xcode Privacy Report 未单独导出；当前只完成包内 `PrivacyInfo.xcprivacy` 的结构、哈希和声明读回
 - [ ] Release 运行时网络抓包未验证；当前仅由空服务器基址、组装测试和静态字符串检查证明不会启动历史服务器同步
 
 ## CloudKit 开发环境真实双端矩阵
@@ -125,7 +130,10 @@ Mac Catalyst 普通 UI 自动化已实际执行并 4/4 通过。Production 关�
 - [ ] 完成上面的真实双端矩阵并附上无敏感数据的证据
 - [x] 经单独确认后部署并读回 Production CloudKit Schema
 - [x] 使用 Production 容器完成新增、修改、删除墓碑和队列收敛的关键双端闭环
-- [ ] 生成最终签名 iOS/macOS 归档并复核 Payload、entitlements 和 Xcode Privacy Report
+- [x] 生成最终签名 iOS/macOS 归档并复核 Payload、entitlements、发布描述文件与包内隐私清单
+- [x] 取得 Apple 对两个“二进制文件无效”状态的具体 `ITMS-` 原因：iPhone `ITMS-90111`，Mac `ITMS-90301`
+- [x] 改用 Apple 接受的稳定版 macOS 构建环境，上传构建 4 并确认 App Store Connect 处理完成
+- [x] 读回构建 4 重新提交状态：iPhone 1.1 “已批准”且中国大陆公开接口已返回 1.1；Mac 1.0 “等待审核”
 - [ ] 从 TestFlight 安装上传构建后重复离线、同步、通知、锁定、导出和升级迁移验收
 
 只有实际完成并读回证据的项目才可勾选。`VALID`、构建成功、上传完成、等待审核和公开发布必须分别记录，不能互相替代。
