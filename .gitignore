@@ -39,16 +39,10 @@ Pods/
 Recovery-UI-20260923/
 __pycache__/
 artifacts/
-backups/
 build/
 dist/
-downloads/
-logs/
-models/
 node_modules/
-output/
 playwright-report/
-screenshots/
 staticfiles/
 target/
 test-results/
