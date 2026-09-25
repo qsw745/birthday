@@ -129,7 +129,11 @@ router.post('/webauthn/register/options', requireAuth, async (req, res) => {
         transports: parseTransports(row.transports),
       })),
       authenticatorSelection: {
-        residentKey: 'preferred',
+        // 这是 Face ID / 指纹登录入口，只允许在当前设备的系统认证器中
+        // 创建可发现通行密钥，避免 iOS 优先引导到「其他设备」。
+        authenticatorAttachment: 'platform',
+        residentKey: 'required',
+        requireResidentKey: true,
         userVerification: 'required',
       },
     })
